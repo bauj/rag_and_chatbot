@@ -1,0 +1,44 @@
+{
+  "_comment": "SALOME Documentation Extraction Configuration",
+  "output_dir": "./salome_docs_extracted",
+
+  "_comment_chunking_mode": "Token chunking is more precise but MUCH slower (use false for large datasets)",
+  "use_token_chunking": false,
+
+  "quality_threshold": 0.3,
+  "modules": {
+    "SHAPER": {
+      "description": "CAD modeling and geometry creation",
+      "url": "https://docs.salome-platform.org/latest/tui/SHAPER",
+      "dev_path": "./shaper_docs_extracted/html",
+      "user_path": "./shaper_docs_extracted/html_gui"
+    },
+    "SMESH": {
+      "description": "Mesh generation and manipulation",
+      "url": "https://docs.salome-platform.org/latest/tui/SMESH",
+      "dev_path": "./smesh_docs_extracted/html",
+      "user_path": "./smesh_docs_extracted/html_gui"
+    },
+    "GUI": {
+      "description": "Graphical user interface components",
+      "url": "https://docs.salome-platform.org/latest/tui/GUI",
+      "dev_path": "./gui_docs_extracted/html",
+      "user_path": "./gui_docs_extracted/html_gui"
+    }
+  },
+  "chunking": {
+    "max_tokens": 384,
+    "overlap_tokens": 50,
+    "char_chunk_size": 1000,
+    "char_overlap": 200
+  },
+  "quality": {
+    "min_score": 0.3,
+    "min_word_count": 50,
+    "substantial_word_count": 100
+  },
+  "embedding": {
+    "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+    "similarity_metric": "cosine"
+  }
+}

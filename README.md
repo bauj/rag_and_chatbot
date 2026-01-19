@@ -1,93 +1,525 @@
-# rag_and_chatbot
+# SALOME Documentation RAG System
 
+Advanced Retrieval-Augmented Generation (RAG) chatbot for SALOME platform documentation with multi-module support, intelligent chunking, and customizable response generation.
 
+## Overview
 
-## Getting started
+This system extracts SALOME documentation (Doxygen API docs + Sphinx user guides), processes it into a vector database, and provides an intelligent chatbot interface for querying across multiple modules.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+**Key Features:**
+- Multi-module support (SHAPER, SMESH, GUI)
+- Token-aware chunking (prevents embedding truncation)
+- Quality scoring (filters low-value content)
+- Code block extraction (enables code-aware retrieval)
+- Dual interfaces (terminal + web)
+- Customizable response styles
+- Deep dive mode for complex questions
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## Architecture
 
 ```
-cd existing_repo
-git remote add origin https://example.com/jh281314/rag_and_chatbot.git
-git branch -M main
-git push -uf origin main
+salome_docs_RAG/
+├── extraction/              # Documentation processing pipeline
+│   ├── process_multi_module_salome_docs.py
+│   ├── config.example.json
+│   └── README.md
+│
+├── chatbot/                 # RAG chatbot
+│   ├── core/               # Business logic
+│   │   ├── config.py
+│   │   └── salome_chatbot.py
+│   ├── ui/                 # User interfaces
+│   │   ├── terminal.py
+│   │   └── web.py
+│   ├── chatbot.py          # Unified entry point
+│   ├── config.example.json
+│   └── README.md
+│
+└── requirements.txt        # All dependencies
 ```
 
-## Integrate with your tools
+## Quick Start
 
-- [ ] [Set up project integrations](https://example.com/jh281314/rag_and_chatbot/-/settings/integrations)
+### 1. Installation
 
-## Collaborate with your team
+```bash
+# Clone repository
+git clone <repository-url>
+cd salome_docs_RAG
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-## Test and Deploy
+# Install dependencies (CPU-only PyTorch)
+pip install -r requirements.txt
+```
 
-Use the built-in continuous integration in GitLab.
+### 2. Extract Documentation
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+```bash
+cd extraction
 
-***
+# Option A: Use config file (recommended)
+cp config.example.json config.json
+# Edit config.json to add your documentation paths
+python process_multi_module_salome_docs.py --config config.json
 
-# Editing this README
+# Option B: Command line arguments
+python process_multi_module_salome_docs.py \
+  --shaper-dir ./shaper_docs_extracted \
+  --smesh-dir ./smesh_docs_extracted \
+  --gui-dir ./gui_docs_extracted
+```
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+**Expected output:**
+- `salome_docs_extracted/chromadb/` - Vector database
+- `salome_docs_extracted/salome_docs.json` - Processed chunks
+- `salome_docs_extracted/statistics.json` - Extraction stats
 
-## Suggestions for a good README
+### 3. Configure LLM Endpoint
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+The chatbot requires an OpenAI-compatible API endpoint. Configure it in `chatbot/config.json`:
 
-## Name
-Choose a self-explaining name for your project.
+```json
+{
+  "base_url": "http://localhost:8080/v1",
+  "model_name": "mistral",
+  "api_key": "your-api-key"
+}
+```
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+Supported endpoints:
+- **OpenAI**: `https://api.openai.com/v1` with your API key
+- **Mistral**: `https://api.mistral.ai/v1` with your API key
+- **Local (Ollama)**: `http://localhost:11434/v1` with `api_key: "dummy"`
+- **Any OpenAI-compatible endpoint**
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+### 4. Run Chatbot
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+```bash
+cd chatbot
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+# Terminal interface (interactive)
+python chatbot.py
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+# Web interface
+python chatbot.py --web
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+# Single question
+python chatbot.py --question "What is ModelAPI::Feature in SHAPER?"
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+# With filters
+python chatbot.py --question "How to create a mesh?" --module SMESH --type user
+```
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+## Features in Detail
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+### Extraction Pipeline
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+**Token-Aware Chunking:**
+- Uses actual tokenizer (384 tokens max for all-MiniLM-L6-v2)
+- Prevents embedding truncation
+- Respects sentence boundaries
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+**Quality Scoring:**
+```python
+score = min(word_count/200, 1.0)
+      + 0.1 if has_title
+      + 0.1 if word_count > 50
+      + 0.1 if word_count > 100
 
-## License
-For open source projects, say how it is licensed.
+Filter: score >= 0.3
+```
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+**Code Block Extraction:**
+- Automatically extracts code snippets from `<pre>` and `<code>` tags
+- Stored in metadata for code-aware retrieval
+- Enables filtering by `has_code: true`
+
+**Parent Document Tracking:**
+- Every chunk knows its source document
+- Enables hierarchical retrieval strategies
+- Format: `parent_doc_id: "SHAPER:dev:FeatureAPI"`
+
+See [extraction/README.md](extraction/README.md) for full details.
+
+### Chatbot Features
+
+**Multi-Module Support:**
+- SHAPER (CAD modeling and geometry creation)
+- SMESH (Mesh generation and manipulation)
+- GUI (Graphical user interface components)
+- Automatic module detection from database
+
+**Dual Interfaces:**
+
+1. **Terminal** - Interactive CLI with filters
+   ```bash
+   You [all]: What is ModelAPI::Feature?
+   You [SHAPER] [dev]: Show me code examples
+   ```
+
+2. **Web** - Gradio interface with controls
+   - Module and doc type filters
+   - Response style presets
+   - Search depth slider (20-80 chunks)
+   - Answer length slider (500-4000 tokens)
+
+**Response Styles:**
+
+| Style | Temperature | Chunks | Deep Dive | Best For |
+|-------|-------------|--------|-----------|----------|
+| Precise (Recommended) | 0.0 | 40 | No | Technical queries, API lookups |
+| Balanced | 0.2 | 50 | No | General questions, broader context |
+| Comprehensive | 0.1 | 60 | Yes | Complex workflows, multi-part questions |
+
+**Deep Dive Mode:**
+- Retrieves 60 chunks (vs 40 standard)
+- Batch summarization (10 chunks per batch)
+- 7 LLM calls (6 summaries + 1 final answer)
+- Best for complex, multi-faceted questions
+
+See [chatbot/README.md](chatbot/README.md) for full details.
+
+## Configuration
+
+### Extraction Config (extraction/config.json)
+
+```json
+{
+  "output_dir": "./salome_docs_extracted",
+  "use_token_chunking": true,
+  "modules": {
+    "SHAPER": {
+      "description": "CAD modeling and geometry creation",
+      "dev_path": "./shaper_docs_extracted/html",
+      "user_path": "./shaper_docs_extracted/html_gui"
+    }
+  },
+  "chunking": {
+    "max_tokens": 384,
+    "overlap_tokens": 50
+  },
+  "quality": {
+    "min_score": 0.3,
+    "min_word_count": 50,
+    "substantial_word_count": 100
+  }
+}
+```
+
+### Chatbot Config (chatbot/config.json)
+
+```json
+{
+  "chromadb_path": "../extraction/salome_docs_extracted/chromadb",
+  "base_url": "http://localhost:8080/v1",
+  "model_name": "mistral",
+  "api_key": "your-api-key",
+  "embedding_model": "all-MiniLM-L6-v2",
+  "k_standard": 40,
+  "k_deep_dive": 60,
+  "temperature": 0.0,
+  "max_tokens": 2000
+}
+```
+
+**Priority Order (highest to lowest):**
+1. Web UI controls (search depth, answer length)
+2. Response style presets (temperature, deep_dive)
+3. config.json
+4. Code defaults
+
+## Usage Examples
+
+### Terminal Mode
+
+```bash
+# Interactive mode
+python chatbot.py
+
+# Commands in interactive mode:
+module:SHAPER      # Filter by module
+type:dev           # Filter by doc type
+deep               # Toggle deep dive mode
+clear              # Clear all filters
+stats              # Show database statistics
+exit               # Exit
+
+# Single question mode
+python chatbot.py --question "How do I create a Feature in SHAPER?" \
+  --module SHAPER --type dev
+
+# Deep dive mode
+python chatbot.py --question "Explain the complete mesh generation workflow" \
+  --module SMESH --deep-dive
+```
+
+### Web Mode
+
+```bash
+# Launch web interface
+python chatbot.py --web
+
+# Custom port
+python chatbot.py --web --port 8080
+
+# Public URL via Gradio
+python chatbot.py --web --share
+```
+
+**Web Interface Controls:**
+- **Module Filter**: SHAPER, SMESH, GUI, All
+- **Doc Type**: Dev (API), User (guides), All
+- **Response Style**: Precise, Balanced, Comprehensive
+- **Search Depth**: 20-80 chunks (slider)
+- **Answer Length**: 500-4000 tokens (slider)
+
+### Python API
+
+```python
+from chatbot.core import ChatbotConfig, SALOMEChatbot
+
+# Initialize
+config = ChatbotConfig.load("config.json")
+chatbot = SALOMEChatbot(config)
+
+# Basic query
+result = chatbot.ask("What is ModelAPI::Feature?")
+print(result['answer'])
+print(result['sources'])
+
+# With filters
+result = chatbot.ask(
+    "Show me mesh generation examples",
+    module="SMESH",
+    doc_type="user"
+)
+
+# Custom parameters (override config)
+result = chatbot.ask(
+    "Explain the workflow",
+    deep_dive=True,
+    k=70,              # Override chunk count
+    temperature=0.1,   # Override temperature
+    max_tokens=3000    # Override max length
+)
+
+# Get statistics
+stats = chatbot.get_stats()
+print(f"Total chunks: {stats['total_chunks']}")
+print(f"Modules: {stats['available_modules']}")
+```
+
+## Technical Details
+
+### Embedding Model
+
+**all-MiniLM-L6-v2:**
+- 384-dimensional embeddings
+- 512 token max sequence length
+- Fast CPU inference (~2000 chunks/min)
+- Good quality for technical documentation
+
+### Chunking Strategy
+
+**Token-aware mode** (recommended):
+```
+Max: 384 tokens (safe for 512 limit)
+Overlap: 50 tokens (~13%)
+Respects sentence boundaries
+```
+
+**Fallback mode** (if transformers not installed):
+```
+Max: 1000 characters
+Overlap: 200 characters
+```
+
+### Vector Database
+
+**ChromaDB with:**
+- Cosine similarity metric
+- Explicit embedding function (no silent mismatches)
+- Persistent storage
+- Metadata filtering support
+
+### LLM Integration
+
+**LangChain with OpenAI-compatible APIs:**
+- Works with any OpenAI-compatible endpoint
+- Supports: OpenAI, Mistral, Anthropic, Ollama, local models
+- Default: Mistral
+- Easy to swap providers (change base_url + api_key)
+
+## Troubleshooting
+
+### Extraction Issues
+
+**"No HTML files found"**
+```bash
+# Check directory structure
+ls -R extraction/
+# Should have: module_docs_extracted/html and module_docs_extracted/html_gui
+```
+
+**"transformers not installed"**
+```bash
+pip install transformers
+# Falls back to character-based chunking (still works, less optimal)
+```
+
+**Low chunk count**
+- Check `salome_docs_extracted/statistics.json`
+- Adjust `min_score` in config.json (default 0.3)
+- Verify HTML files are valid
+
+### Chatbot Issues
+
+**"ChromaDB not found"**
+```bash
+# Run extraction first
+cd extraction && python process_multi_module_salome_docs.py
+```
+
+**"Connection refused" (LLM endpoint)**
+```bash
+# Check if your LLM endpoint is running
+curl http://localhost:8080/v1/models
+
+# For Ollama:
+ollama serve
+
+# Verify base_url and api_key in config.json
+```
+
+**Web interface not loading**
+```bash
+# Check port availability
+python chatbot.py --web --port 7861
+
+# Check firewall settings
+# Open http://localhost:7860 in browser
+```
+
+## Adding New Modules
+
+### Via Config File (Recommended)
+
+Edit `extraction/config.json`:
+```json
+{
+  "modules": {
+    "GEOM": {
+      "description": "Geometry module",
+      "url": "https://docs.salome-platform.org/latest/tui/GEOM",
+      "dev_path": "./geom_docs/html",
+      "user_path": "./geom_docs/html_gui"
+    }
+  }
+}
+```
+
+### Via Command Line
+
+```bash
+python process_multi_module_salome_docs.py \
+  --geom-dev ./geom_docs/html \
+  --geom-user ./geom_docs/html_gui
+```
+
+Chatbot will automatically detect new modules on next startup.
+
+## Dependencies
+
+**Core:**
+- Python 3.8+
+- beautifulsoup4 (HTML parsing)
+- chromadb (vector database)
+- sentence-transformers (embeddings)
+- langchain (RAG framework)
+- gradio (web interface)
+
+**Optional:**
+- transformers (token-aware chunking - recommended)
+
+**LLM Access:**
+- Any OpenAI-compatible endpoint (OpenAI, Mistral, Ollama, etc.)
+
+See [requirements.txt](requirements.txt) for exact versions.
+
+## Project Structure
+
+```
+salome_docs_RAG/
+│
+├── extraction/                      # Documentation extraction
+│   ├── process_multi_module_salome_docs.py
+│   ├── config.example.json
+│   ├── README.md
+│   └── salome_docs_extracted/      # Generated output (gitignored)
+│       ├── chromadb/
+│       ├── salome_docs.json
+│       └── statistics.json
+│
+├── chatbot/                         # RAG chatbot
+│   ├── core/                       # Business logic
+│   │   ├── __init__.py
+│   │   ├── config.py               # Configuration management
+│   │   └── salome_chatbot.py       # RAG logic
+│   ├── ui/                         # User interfaces
+│   │   ├── __init__.py
+│   │   ├── terminal.py             # CLI interface
+│   │   └── web.py                  # Gradio web UI
+│   ├── _old/                       # Legacy code (archived)
+│   ├── chatbot.py                  # Unified entry point
+│   ├── config.example.json
+│   └── README.md
+│
+├── requirements.txt                 # Python dependencies
+├── .gitignore
+└── README.md                        # This file
+```
+
+## Development
+
+### Architecture Principles
+
+**Separation of Concerns:**
+- `core/` - Pure business logic (no UI)
+- `ui/` - Interface layers (terminal, web)
+- `chatbot.py` - Entry point and routing
+
+**Configuration Priority:**
+```
+Runtime parameters > Response styles > config.json > defaults
+```
+
+**Extensibility:**
+- Easy to add new modules (via config)
+- Easy to add new interfaces (implement UI class)
+- Easy to swap LLMs (change base_url + api_key)
+
+### Testing
+
+```bash
+# Compile check
+python -m py_compile chatbot/core/*.py chatbot/ui/*.py
+
+# Test extraction
+cd extraction && python process_multi_module_salome_docs.py --help
+
+# Test chatbot
+cd chatbot && python chatbot.py --help
+```
+
+---
+
+Built for the SALOME platform documentation system.
+
+**Technologies:**
+- LangChain for RAG orchestration
+- ChromaDB for vector storage
+- Sentence Transformers for embeddings
+- Gradio for web interface
