@@ -1,3 +1,10 @@
+# To do (en vrac)
+- Plus généraliste que SALOME : réfléchir à quel type d'arborescence mettre en input
+- Améliorer la modularité : faire en sorte que le projet soit standalone, que les dev n'ait qu'à brancher en input leur doc et les paramètres dans des fichiers config
+- Extraction à partir de PDFs
+- Extraction à partir d'images (à venir dans MAIA à priori)
+- Quantifier la qualité des réponses : améliorer le listing des sources, voir création d'une base de tests ?
+
 # SALOME Documentation RAG System
 
 Advanced Retrieval-Augmented Generation (RAG) chatbot for SALOME platform documentation with multi-module support, intelligent chunking, and customizable response generation.
