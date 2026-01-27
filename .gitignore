@@ -1,3 +1,6 @@
+# Embeddings models
+models/
+
 # Virtual environments
 env_RAG/
 .venv_RAG/

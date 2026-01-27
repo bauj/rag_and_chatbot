@@ -4,6 +4,15 @@ Pure logic with no UI concerns - returns data structures only
 """
 
 import os
+os.environ['POSTHOG_DISABLED'] = '1'
+os.environ['ANONYMIZED_TELEMETRY'] = 'false'
+os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+os.environ['LANGCHAIN_TRACING_V2'] = 'false'
+
+os.environ['HF_HUB_OFFLINE'] = '1'
+os.environ['TRANSFORMERS_OFFLINE'] = '1'
+os.environ['HF_DATASETS_OFFLINE'] = '1'
+
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 
@@ -43,18 +52,24 @@ class SALOMEChatbot:
             cert_path = Path(self.config.ssl_cert_file).expanduser().resolve()
             if cert_path.exists():
                 os.environ['SSL_CERT_FILE'] = str(cert_path)
+                os.environ['REQUESTS_CA_BUNDLE'] = str(cert_path)
             else:
                 raise FileNotFoundError(f"SSL certificate file not found: {cert_path}")
+
+        print("DEBUG : load vector store ...")
 
         # Load vector database
         self.vectorstore = self._load_vectorstore()
 
+        print("DEBUG : detect modules ...")
         # Detect available modules
         self.available_modules = self._detect_modules()
 
+        print("DEBUG : initialize LLM ...")
         # Initialize LLM
         self.llm = self._initialize_llm()
 
+        print("DEBUG : create prompt ...")
         # Create base prompt template
         self.base_prompt = self._create_prompt()
 
@@ -75,10 +90,13 @@ class SALOMEChatbot:
                 f"python process_multi_module_salome_docs.py"
             )
 
+        print("DEBUG: Loading huggingFace embeddings model ... ")
+
         embeddings = HuggingFaceEmbeddings(
             model_name=self.config.embedding_model
         )
 
+        print("DEBUG: Creating Chroma object ... ")
         vectorstore = Chroma(
             persist_directory=str(db_path),
             embedding_function=embeddings,
