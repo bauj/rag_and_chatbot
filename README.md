@@ -5,7 +5,7 @@
 - Extraction à partir d'images (à venir dans MAIA à priori)
 - Quantifier la qualité des réponses : améliorer le listing des sources, voir création d'une base de tests ?
   - Tester LangSmith ou RAGAS
-  - Boucle d'optimisation des paramètres (chunk, nombre de documents évalués, etc ...) basés sur les évaluations obtenues
+  - Boucle d'optimisation des paramètres (chunk, nombre de documents évalués, etc ...) basée sur les évaluations obtenues
 
 # SALOME Documentation RAG System
 
