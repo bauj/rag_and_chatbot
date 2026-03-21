@@ -7,10 +7,13 @@ Processes HTML documentation (Sphinx, Doxygen) into a ChromaDB vector database f
 ```bash
 cp config.example.json config.json
 # Edit config.json: set project_name, output_dir, module paths
-python process_docs.py --config config.json
+python process_docs.py
+
+# Explicit config path
+python process_docs.py --config /path/to/config.json
 
 # Override output directory
-python process_docs.py --config config.json --output ./my_output
+python process_docs.py --output ./my_output
 ```
 
 ## Configuration

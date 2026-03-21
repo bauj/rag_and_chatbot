@@ -692,19 +692,24 @@ Examples:
   python process_docs.py --config config.json --output ./my_output
         """
     )
-    parser.add_argument("--config", required=True,
-                        help="Path to JSON config file (defines project_name, modules, paths)")
+    parser.add_argument("--config", default=None,
+                        help="Path to JSON config file (default: config.json in current directory)")
     parser.add_argument("--output", help="Override output directory from config")
     args = parser.parse_args()
+
+    config_path = args.config or "config.json"
 
     print("=" * 70)
     print("Documentation Processor")
     print("=" * 70)
 
     try:
-        processor = DocumentationProcessor.from_config_file(args.config)
+        processor = DocumentationProcessor.from_config_file(config_path)
     except FileNotFoundError:
-        print(f"Config file not found: {args.config}")
+        if args.config:
+            print(f"Config file not found: {config_path}")
+        else:
+            print("No config file found. Create config.json or pass --config <path>.")
         sys.exit(1)
     except json.JSONDecodeError as e:
         print(f"Invalid JSON in config file: {e}")
