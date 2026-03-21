@@ -17,14 +17,16 @@ except ImportError:
 class WebUI:
     """Gradio web interface for documentation chatbot"""
 
-    def __init__(self, chatbot: DocumentationChatbot):
+    def __init__(self, chatbot: DocumentationChatbot, agentic_chatbot=None):
         """
         Initialize web UI
 
         Args:
             chatbot: DocumentationChatbot instance
+            agentic_chatbot: Optional AgenticChatbot instance
         """
         self.chatbot = chatbot
+        self.agentic_chatbot = agentic_chatbot
 
     def _format_answer_markdown(self, result: dict) -> str:
         """
@@ -75,8 +77,16 @@ class WebUI:
         deep_dive: bool,
         search_depth: int,
         answer_length: int,
+        mode: str = "RAG",          # "RAG" or "Agentic"
     ) -> str:
         """Handle incoming chat message."""
+        if mode == "Agentic" and self.agentic_chatbot is not None:
+            try:
+                result = self.agentic_chatbot.ask(message)
+                return self._format_answer_markdown(result)
+            except Exception as e:
+                return f"**Error:** {str(e)}"
+
         try:
             module = module_filter if module_filter != "All" else None
             doc_type = doc_type_filter if doc_type_filter != "All" else None
@@ -170,6 +180,13 @@ class WebUI:
                         step=500,
                         label="Max answer length (tokens)",
                     )
+                    mode_radio = gr.Radio(
+                        choices=["RAG", "Agentic"],
+                        value="RAG",
+                        label="Mode",
+                        info="RAG: vector retrieval · Agentic: reads HTML pages directly",
+                        visible=self.agentic_chatbot is not None,
+                    )
 
                 with gr.Column(scale=3):
                     chatbot_interface = gr.ChatInterface(
@@ -181,6 +198,7 @@ class WebUI:
                             deep_dive,
                             search_depth,
                             answer_length,
+                            mode_radio,
                         ],
                         examples=examples,
                         title=None,
