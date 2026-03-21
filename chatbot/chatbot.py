@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified entry point for SALOME Documentation Chatbot
+Unified entry point for Documentation RAG Chatbot
 Routes to terminal or web interface based on CLI arguments
 """
 
@@ -8,7 +8,7 @@ import sys
 import argparse
 from pathlib import Path
 
-from core import ChatbotConfig, SALOMEChatbot
+from core import ChatbotConfig, DocumentationChatbot
 from ui import TerminalUI, WebUI
 
 
@@ -16,33 +16,15 @@ def main():
     """Main entry point with unified CLI"""
 
     parser = argparse.ArgumentParser(
-        description='SALOME Multi-Module Documentation Chatbot',
+        description='Documentation RAG Chatbot',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Interactive terminal (default)
   python chatbot.py
-
-  # Single question in terminal
-  python chatbot.py --question "What is ModelAPI::Feature?"
-
-  # Filter by module and doc type
-  python chatbot.py --module SHAPER --type dev
-
-  # Use deep dive mode
-  python chatbot.py --question "Explain mesh generation" --deep-dive
-
-  # Launch web interface
+  python chatbot.py --question "How does the API work?"
+  python chatbot.py --module MY_MODULE --type dev
   python chatbot.py --web
-
-  # Web interface on custom port
-  python chatbot.py --web --port 8080
-
-  # Use custom config file
   python chatbot.py --config my_config.json
-
-  # Override config with CLI args
-  python chatbot.py --config prod.json --model mistral-mini
         """
     )
 
@@ -63,8 +45,8 @@ Examples:
         help='Path to ChromaDB (overrides config)'
     )
     parser.add_argument(
-        '--litellm-url',
-        help='LiteLLM URL (overrides config)'
+        '--base-url',
+        help='LLM API base URL (overrides config)'
     )
     parser.add_argument(
         '--model',
@@ -78,8 +60,7 @@ Examples:
     )
     parser.add_argument(
         '--module',
-        choices=['SHAPER', 'SMESH', 'GUI'],
-        help='Filter by module (terminal single-question mode)'
+        help='Filter by module name (must exist in the database)'
     )
     parser.add_argument(
         '--type',
@@ -110,7 +91,7 @@ Examples:
 
     # Load configuration
     try:
-        print("Initializing SALOME Multi-Module Chatbot...")
+        print(f"Initializing {ChatbotConfig.load(args.config).project_name} Documentation Chatbot...")
 
         # Start with config file or defaults
         config = ChatbotConfig.load(args.config)
@@ -118,32 +99,32 @@ Examples:
         # Override with CLI arguments
         if args.chromadb:
             config.chromadb_path = args.chromadb
-        if args.litellm_url:
-            config.litellm_url = args.litellm_url
+        if args.base_url:
+            config.llm.base_url = args.base_url
         if args.model:
-            config.model_name = args.model
+            config.llm.model = args.model
 
         # Initialize core chatbot
         print("Loading documentation database...")
-        chatbot = SALOMEChatbot(config)
+        chatbot = DocumentationChatbot(config)
 
         print(f"  Loaded {chatbot.get_chunk_count()} documentation chunks")
         print(f"  Modules: {', '.join(chatbot.available_modules)}")
-        print(f"Initializing {config.model_name} via LiteLLM...")
-        print(f"  Connected to {config.model_name}")
+        print(f"Using model: {config.llm.model}")
+        print(f"  Endpoint: {config.llm.base_url}")
         print("Chatbot ready!\n")
 
     except FileNotFoundError as e:
         print(f"\nError: {e}")
         print("\nMake sure:")
-        print("  1. ChromaDB exists (run: cd ../extraction && python process_multi_module_salome_docs.py)")
+        print("  1. ChromaDB exists (run: python process_docs.py --config config.json)")
         print("  2. Path is correct in config or --chromadb argument")
         sys.exit(1)
     except Exception as e:
         print(f"\nFailed to initialize: {e}")
         print("\nMake sure:")
         print("  1. ChromaDB exists and is accessible")
-        print("  2. LiteLLM is running: curl http://localhost:8080/v1/models")
+        print("  2. LLM endpoint is reachable at the configured base_url")
         print("  3. Config file is valid JSON (if using --config)")
         sys.exit(1)
 
