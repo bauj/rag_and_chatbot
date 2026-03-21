@@ -1,8 +1,6 @@
 # tests/test_extraction_config.py
 import json, pytest
 from pathlib import Path
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "extraction"))
 
 
 def test_processor_created_from_config(tmp_path):

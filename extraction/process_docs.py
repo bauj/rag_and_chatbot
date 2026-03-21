@@ -69,10 +69,13 @@ class DocumentationProcessor:
             quality = config["quality"]
             if "min_score" in quality:
                 processor.quality_min_score = quality["min_score"]
+                processor.quality_threshold = quality["min_score"]
             if "min_word_count" in quality:
                 processor.quality_min_words = quality["min_word_count"]
+                processor.min_word_count = quality["min_word_count"]
             if "substantial_word_count" in quality:
                 processor.quality_substantial_words = quality["substantial_word_count"]
+                processor.substantial_word_count = quality["substantial_word_count"]
 
         # Load modules
         for module_name, module_config in config.get("modules", {}).items():
@@ -387,7 +390,7 @@ class DocumentationProcessor:
             if token_count > 512:  # all-MiniLM-L6-v2 limit
                 return False
             return True
-        except:
+        except Exception:
             return True  # If encoding fails, assume it's OK
 
     def process_file(self, filepath: Path, module_name: str, doc_category: str) -> List[DocumentChunk]:
@@ -563,7 +566,7 @@ class DocumentationProcessor:
                 'total_chunks': len(module_chunks),
                 'dev_chunks': len(dev_chunks),
                 'user_chunks': len(user_chunks),
-                'description': self.MODULE_INFO.get(module_name, '')
+                'description': self.MODULE_INFO.get(module_name, {}).get('description', '')
             }
 
         stats_file = self.output_dir / 'statistics.json'
@@ -594,7 +597,7 @@ class DocumentationProcessor:
             # Delete existing
             try:
                 client.delete_collection(self.collection_name)
-            except:
+            except Exception:
                 pass
 
             # Create collection with explicit embedding and cosine similarity
