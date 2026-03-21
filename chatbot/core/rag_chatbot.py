@@ -45,6 +45,7 @@ class DocumentationChatbot:
         self.llm = self._initialize_llm()
         print("DEBUG : create prompt ...")
         self.base_prompt = self._create_prompt()
+        self.reranker = self._load_reranker()
 
     def _load_vectorstore(self) -> Chroma:
         """Load ChromaDB vector store"""
@@ -123,6 +124,66 @@ class DocumentationChatbot:
                 model_kwargs={"max_tokens": effective_max_tokens},
             )
         return llm
+
+    def _load_reranker(self):
+        """Load cross-encoder reranker if configured. Returns None when disabled."""
+        if self.config.reranker is None:
+            return None
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError:
+            raise ImportError(
+                "sentence-transformers is required for reranking.\n"
+                "Install it: pip install sentence-transformers"
+            )
+        model = self.config.reranker.model
+        print(f"DEBUG : load reranker ({model}) ...")
+        return CrossEncoder(model)
+
+    def _rerank_and_expand(self, query: str, docs: List) -> List:
+        """
+        Rerank docs with cross-encoder, expand to section context, deduplicate.
+
+        If no reranker is configured, returns docs unchanged.
+        Otherwise:
+          1. Scores all (query, page_content) pairs.
+          2. Sorts by score descending.
+          3. Deduplicates by section_id (keeps highest-scored chunk per section).
+          4. Expands each surviving doc to its full section_text if available.
+          5. Returns at most config.top_n_after_rerank docs.
+
+        Note: docs with an empty section_id (e.g. old ChromaDB databases without
+        section metadata) bypass deduplication — all such docs pass through. This
+        is intentional backward-compatibility behaviour.
+        """
+        if self.reranker is None:
+            return docs
+
+        pairs = [(query, doc.page_content) for doc in docs]
+        scores = self.reranker.predict(pairs)
+
+        scored = sorted(zip(scores, docs), key=lambda x: float(x[0]), reverse=True)
+
+        result = []
+        seen_sections: set = set()
+
+        for _score, doc in scored:
+            if len(result) >= self.config.top_n_after_rerank:
+                break
+            section_id = doc.metadata.get('section_id', '')
+            if section_id and section_id in seen_sections:
+                continue
+            if section_id:
+                seen_sections.add(section_id)
+
+            section_text = doc.metadata.get('section_text', '')
+            if section_text:
+                from langchain_core.documents import Document as LCDocument
+                doc = LCDocument(page_content=section_text, metadata=doc.metadata)
+
+            result.append(doc)
+
+        return result
 
     def _create_prompt(self) -> PromptTemplate:
         """Create the base prompt template"""
