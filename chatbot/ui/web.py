@@ -117,51 +117,6 @@ class WebUI:
         project = self.chatbot.config.project_name
         k_default = self.chatbot.config.k_standard
 
-        self._custom_css = """
-        /* === CHAT BUBBLE CONTRAST === */
-        .message.user,
-        .bubble-wrap.user .message,
-        div[data-testid="user"] .message {
-            background: #0f2d52 !important;
-            color: #c8e0fa !important;
-            border: 1px solid #1e5296 !important;
-        }
-        .message.bot,
-        .bubble-wrap.bot .message,
-        div[data-testid="bot"] .message {
-            background: #0d2118 !important;
-            color: #b8e4c9 !important;
-            border: 1px solid #1a5c38 !important;
-        }
-        .message.user p, .message.user li, .message.user code,
-        div[data-testid="user"] p { color: #c8e0fa !important; }
-        .message.bot p, .message.bot li, .message.bot code,
-        div[data-testid="bot"] p { color: #b8e4c9 !important; }
-
-        /* === TOOLTIP: make label cursor hint it's hoverable === */
-        label[title] { cursor: help !important; }
-        """
-
-        tooltip_js = """() => {
-            function applyTooltips() {
-                document.querySelectorAll('.info').forEach(function(info) {
-                    if (info.dataset.tipped) return;
-                    var text = (info.textContent || '').trim();
-                    if (!text) return;
-                    info.dataset.tipped = '1';
-                    info.style.setProperty('display', 'none', 'important');
-                    var el = info.parentElement;
-                    for (var i = 0; i < 5 && el; i++, el = el.parentElement) {
-                        var label = el.querySelector('label');
-                        if (label) { label.title = text; break; }
-                    }
-                });
-            }
-            applyTooltips();
-            new MutationObserver(applyTooltips)
-                .observe(document.body, {childList: true, subtree: true});
-        }"""
-
         # Build interface
         with gr.Blocks(title=f"{project} Documentation Chatbot") as demo:
             with gr.Row():
@@ -251,9 +206,6 @@ class WebUI:
                 js=js_toggle_light_dark,
             )
 
-            # Convert info text to native title tooltips
-            demo.load(fn=None, js=tooltip_js)
-
         return demo
 
     def launch(self, share: bool = False, port: int = 7860):
@@ -304,4 +256,4 @@ class WebUI:
         print(f"Starting web interface on http://localhost:{port}")
         print("=" * 70)
 
-        demo.launch(share=share, server_name="127.0.0.1", server_port=port, theme=theme, css=self._custom_css)
+        demo.launch(share=share, server_name="127.0.0.1", server_port=port, theme=theme)
