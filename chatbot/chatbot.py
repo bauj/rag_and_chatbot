@@ -9,7 +9,6 @@ import argparse
 from pathlib import Path
 
 from core import ChatbotConfig, DocumentationChatbot
-from ui import TerminalUI, WebUI
 
 
 def main():
@@ -130,10 +129,12 @@ Examples:
 
     # Route to appropriate interface
     if args.web:
+        from ui import WebUI
         # Web interface
         web_ui = WebUI(chatbot)
         web_ui.launch(share=args.share, port=args.port)
     else:
+        from ui import TerminalUI
         # Terminal interface
         terminal_ui = TerminalUI(chatbot)
 

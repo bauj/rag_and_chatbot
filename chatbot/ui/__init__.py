@@ -1,5 +1,5 @@
 """
-User interface layers for SALOME Documentation Chatbot
+User interface layers for Documentation RAG Chatbot
 """
 
 from .terminal import TerminalUI
