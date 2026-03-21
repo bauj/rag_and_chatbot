@@ -185,7 +185,7 @@ class WebUI:
                         examples=examples,
                         title=None,
                         description=None,
-                        chatbot=gr.Chatbot(height=600),
+                        chatbot=gr.Chatbot(height=1200),
                     )
 
             js_toggle_light_dark = """
