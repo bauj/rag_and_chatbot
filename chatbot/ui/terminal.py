@@ -1,5 +1,5 @@
 """
-Terminal interface for SALOME Documentation Chatbot
+Terminal interface for documentation chatbot
 Handles user interaction, formatting, and command parsing
 """
 
@@ -8,33 +8,33 @@ import sys
 
 # Handle both package and direct script execution
 try:
-    from ..core import SALOMEChatbot
+    from ..core import DocumentationChatbot
 except ImportError:
-    from core import SALOMEChatbot
+    from core import DocumentationChatbot
 
 
 class TerminalUI:
-    """Interactive terminal interface for SALOME chatbot"""
+    """Interactive terminal interface for documentation chatbot"""
 
-    def __init__(self, chatbot: SALOMEChatbot):
+    def __init__(self, chatbot: DocumentationChatbot):
         """
         Initialize terminal UI
 
         Args:
-            chatbot: SALOMEChatbot instance
+            chatbot: DocumentationChatbot instance
         """
         self.chatbot = chatbot
 
     def _print_header(self):
         """Print welcome header"""
+        project = self.chatbot.config.project_name
         print("=" * 70)
-        print("SALOME Multi-Module Documentation Chatbot")
+        print(f"{project} Documentation Chatbot")
         print("=" * 70)
         print(f"Modules: {', '.join(self.chatbot.available_modules)}")
         print("\nCommands:")
-        print("  module:SHAPER     - Filter by SHAPER")
-        print("  module:SMESH      - Filter by SMESH")
-        print("  module:GUI        - Filter by GUI")
+        for mod in self.chatbot.available_modules:
+            print(f"  module:{mod:<12} - Filter by {mod}")
         print("  type:dev          - Filter developer docs only")
         print("  type:user         - Filter user docs only")
         print("  deep              - Toggle DEEP DIVE mode (comprehensive analysis)")
@@ -100,7 +100,7 @@ class TerminalUI:
         stats = self.chatbot.get_stats()
 
         print("\n" + "="*70)
-        print("SALOME Documentation Statistics")
+        print(f"{self.chatbot.config.project_name} Documentation Statistics")
         print("="*70)
 
         print(f"\nTotal chunks: {stats['total_chunks']}")
