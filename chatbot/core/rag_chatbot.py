@@ -241,6 +241,9 @@ Answer (based strictly on the documentation above):"""
             k = self.config.k_deep_dive if deep_dive else self.config.k_standard
         search_kwargs = {"k": k}
 
+        if deep_dive and self.reranker is not None:
+            print("Note: deep_dive=True — reranking is skipped in deep dive mode.")
+
         # Create LLM with runtime overrides
         llm = self._initialize_llm(temperature=temperature, max_tokens=max_tokens)
 
@@ -303,13 +306,15 @@ Answer (based strictly on the documentation above):"""
                 | StrOutputParser()
             )
         else:
-            # Standard chain
-            def format_docs(docs):
-                return "\n\n".join(doc.page_content for doc in docs)
+            # Standard chain — retrieve, rerank, format
+            def retrieve_and_format(question: str) -> str:
+                raw_docs = retriever.invoke(question)
+                reranked = self._rerank_and_expand(question, raw_docs)
+                return "\n\n".join(doc.page_content for doc in reranked)
 
             chain = (
                 {
-                    "context": retriever | format_docs,
+                    "context": RunnableLambda(retrieve_and_format),
                     "question": RunnablePassthrough()
                 }
                 | self.base_prompt
@@ -379,7 +384,8 @@ Answer (based strictly on the documentation above):"""
                 k=k, temperature=temperature, max_tokens=max_tokens
             )
             answer = chain.invoke(question)
-            source_docs = retriever.invoke(question)
+            raw_source_docs = retriever.invoke(question)
+            source_docs = self._rerank_and_expand(question, raw_source_docs)
 
             # Format sources
             sources = []
