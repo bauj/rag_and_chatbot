@@ -81,11 +81,21 @@ class DocumentationChatbot:
     def _detect_modules(self) -> List[str]:
         """Detect which modules are in the database"""
         try:
-            all_data = self.vectorstore._collection.get(include=['metadatas'])
             modules = set()
-            for meta in all_data['metadatas']:
-                if 'module' in meta:
-                    modules.add(meta['module'])
+            batch_size = 5000
+            offset = 0
+            while True:
+                batch = self.vectorstore._collection.get(
+                    include=['metadatas'],
+                    limit=batch_size,
+                    offset=offset,
+                )
+                for meta in batch['metadatas']:
+                    if 'module' in meta:
+                        modules.add(meta['module'])
+                if len(batch['metadatas']) < batch_size:
+                    break
+                offset += batch_size
             return sorted(list(modules))
         except Exception as e:
             raise RuntimeError(
@@ -430,22 +440,31 @@ Answer (based strictly on the documentation above):"""
         Returns:
             Dict with stats by module and doc type
         """
-        all_docs = self.vectorstore._collection.get(include=['metadatas'])
-
         stats = {}
-        for meta in all_docs['metadatas']:
-            module = meta.get('module', 'Unknown')
-            doc_cat = meta.get('doc_category', 'Unknown')
-
-            if module not in stats:
-                stats[module] = {'dev': 0, 'user': 0, 'total': 0}
-
-            if doc_cat in ['dev', 'user']:
-                stats[module][doc_cat] += 1
-            stats[module]['total'] += 1
+        total_chunks = 0
+        batch_size = 5000
+        offset = 0
+        while True:
+            batch = self.vectorstore._collection.get(
+                include=['metadatas'],
+                limit=batch_size,
+                offset=offset,
+            )
+            for meta in batch['metadatas']:
+                module = meta.get('module', 'Unknown')
+                doc_cat = meta.get('doc_category', 'Unknown')
+                if module not in stats:
+                    stats[module] = {'dev': 0, 'user': 0, 'total': 0}
+                if doc_cat in ['dev', 'user']:
+                    stats[module][doc_cat] += 1
+                stats[module]['total'] += 1
+            total_chunks += len(batch['metadatas'])
+            if len(batch['metadatas']) < batch_size:
+                break
+            offset += batch_size
 
         return {
-            'total_chunks': len(all_docs['ids']),
+            'total_chunks': total_chunks,
             'modules': stats,
             'available_modules': self.available_modules
         }
