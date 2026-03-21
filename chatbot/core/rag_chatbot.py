@@ -306,10 +306,13 @@ Answer (based strictly on the documentation above):"""
                 | StrOutputParser()
             )
         else:
-            # Standard chain — retrieve, rerank, format
+            # Standard chain — retrieve, rerank, format.
+            # Results are cached on self._last_reranked_docs so ask() can reuse
+            # them for source attribution without a second retrieval + reranking pass.
             def retrieve_and_format(question: str) -> str:
                 raw_docs = retriever.invoke(question)
                 reranked = self._rerank_and_expand(question, raw_docs)
+                self._last_reranked_docs = reranked  # cache for source attribution
                 return "\n\n".join(doc.page_content for doc in reranked)
 
             chain = (
@@ -384,8 +387,14 @@ Answer (based strictly on the documentation above):"""
                 k=k, temperature=temperature, max_tokens=max_tokens
             )
             answer = chain.invoke(question)
-            raw_source_docs = retriever.invoke(question)
-            source_docs = self._rerank_and_expand(question, raw_source_docs)
+            # Reuse docs already retrieved+reranked inside the standard chain.
+            # Deep-dive chains don't populate the cache, so fall back to a
+            # separate retrieval call for that path.
+            if not deep_dive and hasattr(self, '_last_reranked_docs'):
+                source_docs = self._last_reranked_docs
+            else:
+                raw_source_docs = retriever.invoke(question)
+                source_docs = self._rerank_and_expand(question, raw_source_docs)
 
             # Format sources
             sources = []
