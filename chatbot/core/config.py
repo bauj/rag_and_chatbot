@@ -1,131 +1,114 @@
 """
-Configuration management for SALOME Documentation Chatbot
-Supports defaults, JSON config files, and CLI overrides
+Configuration management for Documentation RAG Chatbot.
+Supports nested JSON config blocks for llm, embedding, and reranker.
 """
 
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
 
 @dataclass
-class ChatbotConfig:
-    """Configuration for SALOME Chatbot with hybrid JSON/code support"""
-
-    # Paths
-    chromadb_path: str = "../extraction/salome_docs_extracted/chromadb"
-
-    # LLM settings
+class LLMConfig:
     base_url: str = "http://localhost:8080/v1"
-    model_name: str = "mistral"
-    api_key: str = "dummy"  # API key for LLM endpoint (use "dummy" for local models)
-    ssl_cert_file: str = ""  # Path to SSL certificate bundle (empty = use system default)
+    model: str = "mistral"
+    api_key: str = "dummy"
+    ssl_cert_file: str = ""
 
-    # Embedding settings
-    embedding_model: str = "all-MiniLM-L6-v2"
+
+@dataclass
+class EmbeddingConfig:
+    model: str = "all-MiniLM-L6-v2"
+    type: str = "local"          # "local" (sentence-transformers) or "api" (OpenAI-compatible)
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+
+
+@dataclass
+class RerankerConfig:
+    model: str = "BAAI/bge-reranker-v2-m3"
+    type: str = "local"          # "local" only for now
+
+
+@dataclass
+class ChatbotConfig:
+    """Configuration for Documentation RAG Chatbot with nested JSON support."""
+
+    project_name: str = "docs"
+    chromadb_path: str = ""      # defaults to ../{project_name}_docs_extracted/chromadb
+
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    reranker: Optional[RerankerConfig] = None   # None = reranking disabled
 
     # Retrieval parameters
     k_standard: int = 40
     k_deep_dive: int = 60
     deep_dive_batch_size: int = 10
 
-    # LLM parameters
+    # LLM generation parameters
     temperature: float = 0.0
     max_tokens: int = 2000
 
-    # Response style presets (for UI)
+    # Response style presets (used by web UI)
     RESPONSE_STYLES = {
-        "Precise (Recommended)": {
-            "temperature": 0.0,
-            "k": 40,
-            "deep_dive": False
-        },
-        "Balanced": {
-            "temperature": 0.2,
-            "k": 50,
-            "deep_dive": False
-        },
-        "Comprehensive": {
-            "temperature": 0.1,
-            "k": 60,
-            "deep_dive": True
-        }
+        "Precise (Recommended)": {"temperature": 0.0, "k": 40, "deep_dive": False},
+        "Balanced":              {"temperature": 0.2, "k": 50, "deep_dive": False},
+        "Comprehensive":         {"temperature": 0.1, "k": 60, "deep_dive": True},
     }
 
+    def __post_init__(self):
+        if not self.chromadb_path:
+            self.chromadb_path = f"../extraction/{self.project_name}_docs_extracted/chromadb"
+
+    @property
+    def collection_name(self) -> str:
+        return f"{self.project_name}_documentation"
+
     @classmethod
-    def from_json(cls, path: str) -> 'ChatbotConfig':
-        """
-        Load configuration from JSON file
+    def load(cls, config_file: Optional[str] = None) -> "ChatbotConfig":
+        """Load config: explicit file > config.json in cwd > defaults."""
+        if config_file:
+            return cls._from_json(config_file)
+        default = Path("config.json")
+        if default.exists():
+            return cls._from_json(str(default))
+        return cls()
 
-        Args:
-            path: Path to JSON config file
-
-        Returns:
-            ChatbotConfig instance
-
-        Raises:
-            FileNotFoundError: If config file doesn't exist
-            ValueError: If JSON is malformed or has invalid values
-        """
+    @classmethod
+    def _from_json(cls, path: str) -> "ChatbotConfig":
         config_path = Path(path)
-
         if not config_path.exists():
             raise FileNotFoundError(f"Config file not found: {path}")
-
         try:
             with open(config_path) as f:
                 data = json.load(f)
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON in config file: {e}")
 
-        # Filter out comment keys (keys starting with _comment)
-        config_data = {k: v for k, v in data.items() if not k.startswith('_comment')}
+        # Strip top-level comment keys
+        data = {k: v for k, v in data.items() if not k.startswith("_")}
 
-        # Validate that all keys are valid config parameters
-        valid_keys = set(cls.__annotations__.keys())
-        invalid_keys = set(config_data.keys()) - valid_keys
+        # Known top-level keys (scalars + nested blocks)
+        scalar_keys = {"project_name", "chromadb_path", "k_standard", "k_deep_dive",
+                       "deep_dive_batch_size", "temperature", "max_tokens"}
+        nested_keys = {"llm", "embedding", "reranker"}
+        valid_keys = scalar_keys | nested_keys
+        invalid = set(data.keys()) - valid_keys
+        if invalid:
+            raise ValueError(f"Invalid config keys: {invalid}")
 
-        if invalid_keys:
-            raise ValueError(f"Invalid config keys: {invalid_keys}")
+        def strip_comments(d: dict) -> dict:
+            return {k: v for k, v in d.items() if not k.startswith("_")}
 
-        return cls(**config_data)
+        kwargs = {k: v for k, v in data.items() if k in scalar_keys}
 
-    @classmethod
-    def load(cls, config_file: Optional[str] = None) -> 'ChatbotConfig':
-        """
-        Load configuration with priority: JSON > defaults
+        if "llm" in data:
+            kwargs["llm"] = LLMConfig(**strip_comments(data["llm"]))
+        if "embedding" in data:
+            kwargs["embedding"] = EmbeddingConfig(**strip_comments(data["embedding"]))
+        if "reranker" in data:
+            kwargs["reranker"] = RerankerConfig(**strip_comments(data["reranker"])) if data["reranker"] else None
 
-        Args:
-            config_file: Optional path to JSON config file
-
-        Returns:
-            ChatbotConfig instance
-        """
-        if config_file:
-            return cls.from_json(config_file)
-
-        # Check for default config.json in current directory
-        default_config = Path("config.json")
-        if default_config.exists():
-            return cls.from_json(str(default_config))
-
-        # Use defaults
-        return cls()
-
-    def to_json(self, path: str) -> None:
-        """
-        Save configuration to JSON file
-
-        Args:
-            path: Path where to save config
-        """
-        with open(path, 'w') as f:
-            json.dump(asdict(self), f, indent=2)
-
-    def __str__(self) -> str:
-        """Pretty print configuration"""
-        lines = ["ChatbotConfig:"]
-        for key, value in asdict(self).items():
-            lines.append(f"  {key}: {value}")
-        return "\n".join(lines)
+        return cls(**kwargs)
