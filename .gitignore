@@ -39,3 +39,7 @@ Thumbs.db
 
 # Docs and notes
 docs/
+
+# Personal configuration files (might contain secrets)
+extraction/config.json
+chatbot/config.json
