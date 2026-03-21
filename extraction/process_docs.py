@@ -12,6 +12,11 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 from dataclasses import dataclass, asdict
 import os
 
+from html_parser import (
+    _split_into_sections as _html_split_into_sections,
+    extract_sections_with_soup as _html_extract_sections_with_soup,
+)
+
 # For token-aware chunking
 try:
     from transformers import AutoTokenizer
@@ -363,70 +368,16 @@ class DocumentationProcessor:
     def _split_into_sections(self, element: "Tag") -> List[tuple]:
         """
         Split a BS4 element into (heading, text) sections at h2/h3 boundaries.
-
-        Returns list of (heading_text: str | None, section_text: str).
-        If no h2/h3 tags are present, returns a single (None, full_text) entry.
+        Delegates to html_parser._split_into_sections.
         """
-        sections = []
-        current_heading = None
-        current_parts: List[str] = []
-
-        def process_node(node):
-            nonlocal current_heading
-            if isinstance(node, Tag):
-                if node.name in ('h2', 'h3'):
-                    # Save whatever we've accumulated so far
-                    text = '\n'.join(p for p in current_parts if p)
-                    if text:
-                        sections.append((current_heading, text))
-                    current_heading = node.get_text(strip=True)
-                    current_parts.clear()
-                else:
-                    for child in node.children:
-                        process_node(child)
-            elif isinstance(node, NavigableString):
-                text = node.strip()
-                if text:
-                    current_parts.append(text)
-
-        for child in element.children:
-            process_node(child)
-
-        # Flush last section
-        text = '\n'.join(p for p in current_parts if p)
-        if text:
-            sections.append((current_heading, text))
-
-        if not sections:
-            fallback = element.get_text(separator='\n', strip=True)
-            return [(None, fallback)]
-
-        return sections
+        return _html_split_into_sections(element)
 
     def extract_sections_with_soup(self, soup: BeautifulSoup, doc_category: str) -> List[tuple]:
         """
         Find the main content element and split it into sections.
-
-        Mirrors the element-selection logic of extract_content_doxygen /
-        extract_content_sphinx so we operate on the same subtree.
-        Returns list of (heading_text, section_text) — see _split_into_sections.
+        Delegates to html_parser.extract_sections_with_soup.
         """
-        if doc_category == 'dev':
-            element = soup.find('div', class_='contents') or soup.find('body')
-        else:
-            element = (
-                soup.find('div', role='main') or
-                soup.find('div', class_='document') or
-                soup.find('div', class_='body') or
-                soup.find('div', class_='section') or
-                soup.find('article') or
-                soup.find('body')
-            )
-        if not element:
-            return [(None, '')]
-        for tag in element.find_all(['script', 'style', 'noscript']):
-            tag.decompose()
-        return self._split_into_sections(element)
+        return _html_extract_sections_with_soup(soup, doc_category)
 
     def calculate_quality_score(self, content: str, title: str) -> float:
         """Calculate content quality score (0.0 - 1.0)"""
