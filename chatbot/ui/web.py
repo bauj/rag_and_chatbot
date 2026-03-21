@@ -1,5 +1,5 @@
 """
-Web interface for SALOME Documentation Chatbot using Gradio
+Web interface for Documentation Chatbot using Gradio
 Handles web UI, formatting, and Gradio-specific logic
 """
 
@@ -8,21 +8,21 @@ import gradio as gr
 
 # Handle both package and direct script execution
 try:
-    from ..core import SALOMEChatbot, ChatbotConfig
+    from ..core import DocumentationChatbot, ChatbotConfig
 except ImportError:
-    from core import SALOMEChatbot
+    from core import DocumentationChatbot
     from core.config import ChatbotConfig
 
 
 class WebUI:
-    """Gradio web interface for SALOME chatbot"""
+    """Gradio web interface for documentation chatbot"""
 
-    def __init__(self, chatbot: SALOMEChatbot):
+    def __init__(self, chatbot: DocumentationChatbot):
         """
         Initialize web UI
 
         Args:
-            chatbot: SALOMEChatbot instance
+            chatbot: DocumentationChatbot instance
         """
         self.chatbot = chatbot
 
@@ -138,62 +138,14 @@ class WebUI:
         """
         # Example questions with new parameter format
         # [question, module, doc_type, response_style, search_depth, answer_length]
-        examples = [
-            [
-                "What is ModelAPI::Feature in SHAPER?",
-                "SHAPER",
-                "Dev",
-                "Precise (Recommended)",
-                5,
-                2000,
-            ],
-            [
-                "How do I create a mesh from geometry?",
-                "All",
-                "User",
-                "Precise (Recommended)",
-                4,
-                2000,
-            ],
-            [
-                "What meshing algorithms are in SMESH?",
-                "SMESH",
-                "All",
-                "Balanced",
-                5,
-                2000,
-            ],
-            [
-                "Show me GUI components for dialogs",
-                "GUI",
-                "Dev",
-                "Precise (Recommended)",
-                4,
-                1500,
-            ],
-            [
-                "Tutorial for creating a box in SHAPER",
-                "SHAPER",
-                "User",
-                "Precise (Recommended)",
-                4,
-                2000,
-            ],
-            [
-                "Explain the complete mesh generation workflow in SMESH",
-                "SMESH",
-                "All",
-                "Comprehensive",
-                6,
-                3000,
-            ],
-        ]
+        examples = []
 
         # Build interface
-        with gr.Blocks(title="SALOME Documentation Chatbot") as demo:
+        with gr.Blocks(title=f"{self.chatbot.config.project_name} Documentation Chatbot") as demo:
             with gr.Row():
                 with gr.Column(scale=10):
-                    gr.Markdown("""<img src="http://example.com/wp-content/uploads/2019/08/salome_text_alpha.png" style="width: 250px; height: auto; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);"> Documentation Chatbot""")
+                    project = self.chatbot.config.project_name
+                    gr.Markdown(f"# {project} Documentation Chatbot")
 
                 with gr.Column(scale=1, min_width=100):
                     theme_toggle = gr.Button(
@@ -212,7 +164,7 @@ class WebUI:
                         choices=["All"] + self.chatbot.available_modules,
                         value="All",
                         label="Module",
-                        info="Filter by SALOME module",
+                        info="Filter by module",
                     )
                     doc_type_filter = gr.Dropdown(
                         choices=["All", "Dev", "User"],
@@ -249,21 +201,20 @@ class WebUI:
                     )
 
                     gr.Markdown("---")
-                    gr.Markdown("""
-                    **Module Filters:**
-                    - **SHAPER**: CAD modeling, geometry
-                    - **SMESH**: Mesh generation
-                    - **GUI**: Interface components
+                    module_desc = "\n".join(f"- **{m}**" for m in self.chatbot.available_modules)
+                    gr.Markdown(f"""
+**Module Filters:**
+{module_desc}
 
-                    **Doc Types:**
-                    - **Dev**: API reference, classes
-                    - **User**: Tutorials, guides
+**Doc Types:**
+- **Dev**: API reference, classes
+- **User**: Tutorials, guides
 
-                    **Response Styles:**
-                    - **Precise**: Temp=0.0, focused (40 chunks)
-                    - **Balanced**: Temp=0.2, broader (50 chunks)
-                    - **Comprehensive**: Temp=0.1, deep dive (60 chunks)
-                    """)
+**Response Styles:**
+- **Precise**: Temp=0.0, focused (40 chunks)
+- **Balanced**: Temp=0.2, broader (50 chunks)
+- **Comprehensive**: Temp=0.1, deep dive (60 chunks)
+""")
 
                 with gr.Column(scale=3):
                     # Use ChatInterface with resizable chatbot
@@ -278,7 +229,7 @@ class WebUI:
                         ],
                         examples=examples,
                         title=None,
-                        description="Ask anything about SALOME! Use controls on the left to customize responses.",
+                        description=f"Ask anything about {self.chatbot.config.project_name}! Use controls on the left to customize responses.",
                         chatbot=gr.Chatbot(height=600),
                     )
 
