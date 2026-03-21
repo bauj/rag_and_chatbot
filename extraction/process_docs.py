@@ -8,7 +8,7 @@ import re
 import gc
 from pathlib import Path
 from typing import List, Dict, Optional, Iterator
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag
 from dataclasses import dataclass, asdict
 import os
 
@@ -360,15 +360,13 @@ class DocumentationProcessor:
 
         return unique_blocks[:5]  # Keep top 5 code blocks
 
-    def _split_into_sections(self, element) -> List[tuple]:
+    def _split_into_sections(self, element: "Tag") -> List[tuple]:
         """
         Split a BS4 element into (heading, text) sections at h2/h3 boundaries.
 
         Returns list of (heading_text: str | None, section_text: str).
         If no h2/h3 tags are present, returns a single (None, full_text) entry.
         """
-        from bs4 import NavigableString, Tag
-
         sections = []
         current_heading = None
         current_parts: List[str] = []
@@ -383,7 +381,6 @@ class DocumentationProcessor:
                         sections.append((current_heading, text))
                     current_heading = node.get_text(strip=True)
                     current_parts.clear()
-                    current_parts.append(current_heading)
                 else:
                     for child in node.children:
                         process_node(child)
@@ -427,6 +424,8 @@ class DocumentationProcessor:
             )
         if not element:
             return [(None, '')]
+        for tag in element.find_all(['script', 'style', 'noscript']):
+            tag.decompose()
         return self._split_into_sections(element)
 
     def calculate_quality_score(self, content: str, title: str) -> float:

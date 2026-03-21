@@ -1,6 +1,7 @@
 # tests/test_extraction_config.py
 import json, pytest
 from pathlib import Path
+from bs4 import BeautifulSoup
 
 
 def test_processor_created_from_config(tmp_path):
@@ -44,9 +45,6 @@ def test_no_default_modules(tmp_path):
     from process_docs import DocumentationProcessor
     p = DocumentationProcessor(project_name="empty", output_dir=str(tmp_path))
     assert len(p.modules) == 0
-
-
-from bs4 import BeautifulSoup
 
 
 def _make_processor():
@@ -100,3 +98,31 @@ def test_split_into_sections_preamble_before_first_heading():
     assert sections[0][0] is None
     assert "Preamble" in sections[0][1]
     assert sections[1][0] == "Section"
+
+
+def test_extract_sections_with_soup_dev_uses_contents_div():
+    """For dev docs, extract_sections_with_soup should use div.contents."""
+    html = """<html><body>
+    <div class="contents">
+        <h2>API Section</h2><p>Some API content here</p>
+    </div>
+    </body></html>"""
+    soup = BeautifulSoup(html, "html.parser")
+    sections = _make_processor().extract_sections_with_soup(soup, "dev")
+    assert len(sections) == 1
+    assert sections[0][0] == "API Section"
+    assert "API content" in sections[0][1]
+
+
+def test_extract_sections_with_soup_user_uses_role_main():
+    """For user docs, extract_sections_with_soup should use div[role=main]."""
+    html = """<html><body>
+    <div role="main">
+        <h2>User Guide</h2><p>Some user guide content here</p>
+    </div>
+    </body></html>"""
+    soup = BeautifulSoup(html, "html.parser")
+    sections = _make_processor().extract_sections_with_soup(soup, "user")
+    assert len(sections) == 1
+    assert sections[0][0] == "User Guide"
+    assert "user guide content" in sections[0][1]
