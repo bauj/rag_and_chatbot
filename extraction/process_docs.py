@@ -510,46 +510,73 @@ class DocumentationProcessor:
         # Extract code blocks
         code_blocks = self.extract_code_blocks(soup)
 
+        # Extract sections BEFORE freeing BeautifulSoup memory
+        sections = self.extract_sections_with_soup(soup, doc_category)
+
         # Free BeautifulSoup memory immediately
         soup.decompose()
         del soup
 
-        # Chunk the text
-        text_chunks = self.chunk_text(full_text)
-
         doc_chunks = []
         skipped_chunks = 0
 
-        for i, chunk_text in enumerate(text_chunks):
-            # Validate chunk length before creating
-            if not self.validate_chunk_token_length(chunk_text):
-                skipped_chunks += 1
-                continue  # Skip chunks that exceed token limit
+        for section_heading, section_text in sections:
+            if not section_text.strip():
+                continue
 
-            chunk = DocumentChunk(
-                title=content_dict['title'],
-                content=chunk_text,
-                url=url,
-                doc_type=doc_type,
-                hierarchy=content_dict['title'],
-                chunk_id=i,
-                module=module_name,
-                doc_category=doc_category,
-                metadata={
-                    'total_chunks': len(text_chunks),
-                    'chunk_position': f"{i+1}/{len(text_chunks)}",
-                    'parent_doc_id': parent_doc_id,
-                    'source': f'{self.project_name} {module_name} {doc_category.title()} Documentation',
-                    'file': str(filepath.name),
-                    'module_description': self.MODULE_INFO.get(module_name, {}).get('description', ''),
-                    'quality_score': round(quality_score, 2),
-                    'has_code': len(code_blocks) > 0,
-                    'code_blocks': code_blocks if len(code_blocks) > 0 else []
-                }
-            )
-            doc_chunks.append(chunk)
+            # Prepend doc title when the section has no heading of its own
+            if section_heading is None:
+                text_to_chunk = f"{content_dict['title']}\n\n{section_text}"
+            else:
+                text_to_chunk = section_text
 
-        # Warning if chunks were skipped
+            # Stable section identifier: (parent_doc_id or filename stem) + normalised heading.
+            # parent_doc_id is the module's base_url which may be '' when no url is configured
+            # in MODULE_INFO. Fall back to filepath.stem so that two different files with an
+            # identically-named section (e.g. "Overview") never share the same section_id.
+            prefix = parent_doc_id if parent_doc_id else filepath.stem
+            raw_id = section_heading if section_heading else 'root'
+            normalized = re.sub(r'[^\w]', '_', raw_id.lower())[:50]
+            section_id = f"{prefix}#{normalized}"
+
+            # Cap section_text stored in metadata to avoid bloating ChromaDB
+            stored_section_text = section_text[:5000]
+
+            text_chunks = self.chunk_text(text_to_chunk)
+
+            for i, chunk_text_content in enumerate(text_chunks):
+                if not self.validate_chunk_token_length(chunk_text_content):
+                    skipped_chunks += 1
+                    continue
+
+                chunk = DocumentChunk(
+                    title=content_dict['title'],
+                    content=chunk_text_content,
+                    url=url,
+                    doc_type=doc_type,
+                    hierarchy=section_heading or content_dict['title'],
+                    chunk_id=i,
+                    module=module_name,
+                    doc_category=doc_category,
+                    metadata={
+                        # NOTE: total_chunks and chunk_position are now section-scoped,
+                        # not document-scoped. They reflect position within this section,
+                        # not the full HTML file. This is a semantic change from the old code.
+                        'total_chunks': len(text_chunks),
+                        'chunk_position': f"{i+1}/{len(text_chunks)}",
+                        'parent_doc_id': parent_doc_id,
+                        'section_id': section_id,
+                        'section_text': stored_section_text,
+                        'source': f'{self.project_name} {module_name} {doc_category.title()} Documentation',
+                        'file': str(filepath.name),
+                        'module_description': self.MODULE_INFO.get(module_name, {}).get('description', ''),
+                        'quality_score': round(quality_score, 2),
+                        'has_code': len(code_blocks) > 0,
+                        'code_blocks': code_blocks if code_blocks else [],
+                    }
+                )
+                doc_chunks.append(chunk)
+
         if skipped_chunks > 0:
             print(f"    Warning: Skipped {skipped_chunks} chunks (>512 tokens) in {filepath.name}")
 
@@ -724,7 +751,9 @@ class DocumentationProcessor:
                         'parent_doc_id': chunk.metadata.get('parent_doc_id', ''),
                         'chunk_position': chunk.metadata.get('chunk_position', ''),
                         'quality_score': chunk.metadata.get('quality_score', 0.0),
-                        'has_code': chunk.metadata.get('has_code', False)
+                        'has_code': chunk.metadata.get('has_code', False),
+                        'section_id': chunk.metadata.get('section_id', ''),
+                        'section_text': chunk.metadata.get('section_text', ''),
                     })
                     batch_ids.append(f"{i + idx:06d}")
 

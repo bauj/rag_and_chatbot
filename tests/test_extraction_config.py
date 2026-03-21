@@ -2,6 +2,7 @@
 import json, pytest
 from pathlib import Path
 from bs4 import BeautifulSoup
+import tempfile, os
 
 
 def test_processor_created_from_config(tmp_path):
@@ -126,3 +127,37 @@ def test_extract_sections_with_soup_user_uses_role_main():
     assert len(sections) == 1
     assert sections[0][0] == "User Guide"
     assert "user guide content" in sections[0][1]
+
+
+def test_process_file_chunks_have_section_metadata(tmp_path):
+    """Each chunk produced by process_file must carry section_id and section_text."""
+    html_content = """<!DOCTYPE html>
+<html>
+<head><title>Test Page</title></head>
+<body>
+<div class="contents">
+<h2>Alpha Section</h2>
+<p>This is the alpha section with enough words to pass quality filter and produce
+at least one chunk of documentation content for testing purposes here.</p>
+<h2>Beta Section</h2>
+<p>This is the beta section with enough words to pass quality filter and produce
+at least one chunk of documentation content for testing purposes here.</p>
+</div>
+</body>
+</html>"""
+    html_file = tmp_path / "test.html"
+    html_file.write_text(html_content)
+
+    from process_docs import DocumentationProcessor
+    processor = DocumentationProcessor(project_name="test_proj")
+    processor.quality_threshold = 0.0  # disable quality filter
+    chunks = processor.process_file(html_file, "MOD", "dev")
+
+    assert len(chunks) > 0
+    for chunk in chunks:
+        assert 'section_id' in chunk.metadata
+        assert 'section_text' in chunk.metadata
+
+    # Two sections in the HTML — at least 2 unique section_ids
+    section_ids = {c.metadata['section_id'] for c in chunks}
+    assert len(section_ids) >= 2
