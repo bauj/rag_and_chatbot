@@ -119,7 +119,6 @@ class WebUI:
 
         self._custom_css = """
         /* === CHAT BUBBLE CONTRAST === */
-        /* User messages — deep navy with bright text */
         .message.user,
         .bubble-wrap.user .message,
         div[data-testid="user"] .message {
@@ -127,7 +126,6 @@ class WebUI:
             color: #c8e0fa !important;
             border: 1px solid #1e5296 !important;
         }
-        /* Bot messages — dark teal with soft green text */
         .message.bot,
         .bubble-wrap.bot .message,
         div[data-testid="bot"] .message {
@@ -135,64 +133,75 @@ class WebUI:
             color: #b8e4c9 !important;
             border: 1px solid #1a5c38 !important;
         }
-        /* Text inside bubbles */
         .message.user p, .message.user li, .message.user code,
-        div[data-testid="user"] p {
-            color: #c8e0fa !important;
-        }
+        div[data-testid="user"] p { color: #c8e0fa !important; }
         .message.bot p, .message.bot li, .message.bot code,
-        div[data-testid="bot"] p {
-            color: #b8e4c9 !important;
-        }
+        div[data-testid="bot"] p { color: #b8e4c9 !important; }
 
-        /* === TOOLTIPS === */
-        /* Make the block container a positioning context */
-        .block {
-            position: relative !important;
+        /* === TOOLTIP TARGET === */
+        .gr-tooltip {
+            position: relative;
+            display: inline-block;
+            cursor: help;
+            text-decoration: underline dotted rgba(150,150,150,0.5);
+            text-underline-offset: 3px;
         }
-        /* Hide info text by default */
-        .block .info,
-        span.info {
-            visibility: hidden !important;
-            opacity: 0 !important;
-            position: absolute !important;
-            top: auto !important;
-            bottom: calc(100% + 4px) !important;
-            left: 0 !important;
-            width: 240px !important;
-            background: #1a1a2e !important;
-            color: #d0d8e8 !important;
-            border: 1px solid #334 !important;
-            padding: 7px 11px !important;
-            border-radius: 6px !important;
-            font-size: 12px !important;
-            font-style: normal !important;
-            line-height: 1.5 !important;
-            box-shadow: 0 4px 16px rgba(0,0,0,0.5) !important;
-            z-index: 9999 !important;
-            pointer-events: none !important;
-            transition: opacity 0.15s ease !important;
-            white-space: normal !important;
+        .gr-tooltip::after {
+            content: attr(data-tip);
+            display: none;
+            position: absolute;
+            bottom: 130%;
+            left: 0;
+            width: 240px;
+            background: #1a1a2e;
+            color: #d0d8e8;
+            border: 1px solid #445;
+            padding: 7px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: normal;
+            font-style: normal;
+            line-height: 1.5;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+            z-index: 9999;
+            white-space: normal;
+            pointer-events: none;
         }
-        /* Show on hover */
-        .block:hover .info,
-        .block:hover span.info {
-            visibility: visible !important;
-            opacity: 1 !important;
-        }
-        /* Small triangle pointer */
-        .block .info::after {
-            content: "" !important;
-            position: absolute !important;
-            top: 100% !important;
-            left: 16px !important;
-            border: 5px solid transparent !important;
-            border-top-color: #334 !important;
-        }
+        .gr-tooltip:hover::after { display: block; }
+        """
+
+        tooltip_js = """
+        <script>
+        (function() {
+            function applyTooltips() {
+                document.querySelectorAll('.info').forEach(function(info) {
+                    if (info.dataset.tipped) return;
+                    var text = info.textContent.trim();
+                    if (!text) return;
+                    info.dataset.tipped = '1';
+                    info.style.cssText = 'display:none!important';
+                    // Walk up to the block container, then find the label span
+                    var el = info.parentElement;
+                    for (var i = 0; i < 4 && el; i++, el = el.parentElement) {
+                        var span = el.querySelector('label > span:first-child, legend > span:first-child, .label-wrap > span:first-child');
+                        if (span) {
+                            span.setAttribute('data-tip', text);
+                            span.classList.add('gr-tooltip');
+                            break;
+                        }
+                    }
+                });
+            }
+            // Run immediately and watch for Gradio re-renders
+            applyTooltips();
+            new MutationObserver(applyTooltips).observe(document.body, {childList: true, subtree: true});
+        })();
+        </script>
         """
 
         # Build interface
         with gr.Blocks(title=f"{project} Documentation Chatbot") as demo:
+            gr.HTML(tooltip_js)
             with gr.Row():
                 with gr.Column(scale=10):
                     gr.Markdown(f"# {project} Documentation Chatbot")
