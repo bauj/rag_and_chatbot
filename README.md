@@ -56,7 +56,21 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Extract Documentation
+### 2. Download Local Models
+
+If you are using local embeddings or reranking (the default), download the models once:
+
+```bash
+python download_models.py
+```
+
+This downloads to `~/.cache/huggingface/hub`:
+- `all-MiniLM-L6-v2` — embedding model (required for local embeddings)
+- `BAAI/bge-reranker-v2-m3` — reranker model (required if `reranker` is enabled in chatbot config)
+
+> **Offline use:** the chatbot runs with `HF_HUB_OFFLINE=1` by default, so models must be downloaded before first use. Skip this step only if you are using API-based embeddings and no reranker.
+
+### 3. Extract Documentation
 
 ```bash
 cd extraction
@@ -70,7 +84,7 @@ python process_docs.py --config config.json
 - `{project_name}_docs.json` / `{project_name}_docs.jsonl` — processed chunks
 - `statistics.json` — extraction stats
 
-### 3. Configure the Chatbot
+### 4. Configure the Chatbot
 
 ```bash
 cd ../chatbot
@@ -78,7 +92,7 @@ cp config.example.json config.json
 # Edit config.json: set project_name, chromadb_path, llm endpoint
 ```
 
-### 4. Run the Chatbot
+### 5. Run the Chatbot
 
 ```bash
 # Interactive terminal
