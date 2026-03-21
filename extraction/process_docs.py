@@ -360,6 +360,75 @@ class DocumentationProcessor:
 
         return unique_blocks[:5]  # Keep top 5 code blocks
 
+    def _split_into_sections(self, element) -> List[tuple]:
+        """
+        Split a BS4 element into (heading, text) sections at h2/h3 boundaries.
+
+        Returns list of (heading_text: str | None, section_text: str).
+        If no h2/h3 tags are present, returns a single (None, full_text) entry.
+        """
+        from bs4 import NavigableString, Tag
+
+        sections = []
+        current_heading = None
+        current_parts: List[str] = []
+
+        def process_node(node):
+            nonlocal current_heading
+            if isinstance(node, Tag):
+                if node.name in ('h2', 'h3'):
+                    # Save whatever we've accumulated so far
+                    text = '\n'.join(p for p in current_parts if p)
+                    if text:
+                        sections.append((current_heading, text))
+                    current_heading = node.get_text(strip=True)
+                    current_parts.clear()
+                    current_parts.append(current_heading)
+                else:
+                    for child in node.children:
+                        process_node(child)
+            elif isinstance(node, NavigableString):
+                text = node.strip()
+                if text:
+                    current_parts.append(text)
+
+        for child in element.children:
+            process_node(child)
+
+        # Flush last section
+        text = '\n'.join(p for p in current_parts if p)
+        if text:
+            sections.append((current_heading, text))
+
+        if not sections:
+            fallback = element.get_text(separator='\n', strip=True)
+            return [(None, fallback)]
+
+        return sections
+
+    def extract_sections_with_soup(self, soup: BeautifulSoup, doc_category: str) -> List[tuple]:
+        """
+        Find the main content element and split it into sections.
+
+        Mirrors the element-selection logic of extract_content_doxygen /
+        extract_content_sphinx so we operate on the same subtree.
+        Returns list of (heading_text, section_text) — see _split_into_sections.
+        """
+        if doc_category == 'dev':
+            element = soup.find('div', class_='contents') or soup.find('body')
+        else:
+            element = (
+                soup.find('div', role='main') or
+                soup.find('div', class_='document') or
+                soup.find('div', class_='body') or
+                soup.find('div', class_='section') or
+                soup.find('article') or
+                soup.find('body')
+            )
+        if not element:
+            return [(None, '')]
+        return self._split_into_sections(element)
+
     def calculate_quality_score(self, content: str, title: str) -> float:
         """Calculate content quality score (0.0 - 1.0)"""
         if not content or not content.strip():
