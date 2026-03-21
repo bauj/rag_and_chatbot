@@ -519,6 +519,7 @@ class DocumentationProcessor:
 
         doc_chunks = []
         skipped_chunks = 0
+        doc_chunk_counter = 0
 
         for section_heading, section_text in sections:
             if not section_text.strip():
@@ -555,7 +556,7 @@ class DocumentationProcessor:
                     url=url,
                     doc_type=doc_type,
                     hierarchy=section_heading or content_dict['title'],
-                    chunk_id=i,
+                    chunk_id=doc_chunk_counter,
                     module=module_name,
                     doc_category=doc_category,
                     metadata={
@@ -576,6 +577,7 @@ class DocumentationProcessor:
                     }
                 )
                 doc_chunks.append(chunk)
+                doc_chunk_counter += 1
 
         if skipped_chunks > 0:
             print(f"    Warning: Skipped {skipped_chunks} chunks (>512 tokens) in {filepath.name}")
