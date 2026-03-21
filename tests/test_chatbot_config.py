@@ -79,3 +79,23 @@ def test_invalid_key_raises(tmp_path):
 def test_collection_name():
     cfg = ChatbotConfig(project_name="my_docs")
     assert cfg.collection_name == "my_docs_documentation"
+
+
+def test_null_reranker_in_json(tmp_path):
+    """Explicit null reranker in JSON should result in cfg.reranker is None"""
+    f = tmp_path / "config.json"
+    f.write_text(json.dumps({"reranker": None}))
+    cfg = ChatbotConfig.load(str(f))
+    assert cfg.reranker is None
+
+
+def test_file_not_found_raises():
+    with pytest.raises(FileNotFoundError):
+        ChatbotConfig.load("/nonexistent/path/config.json")
+
+
+def test_invalid_json_raises(tmp_path):
+    f = tmp_path / "bad.json"
+    f.write_text("{not valid json")
+    with pytest.raises(ValueError, match="Invalid JSON"):
+        ChatbotConfig.load(str(f))

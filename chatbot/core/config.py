@@ -4,9 +4,9 @@ Supports nested JSON config blocks for llm, embedding, and reranker.
 """
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar, Optional
 
 
 @dataclass
@@ -14,7 +14,7 @@ class LLMConfig:
     base_url: str = "http://localhost:8080/v1"
     model: str = "mistral"
     api_key: str = "dummy"
-    ssl_cert_file: str = ""
+    ssl_cert_file: Optional[str] = None
 
 
 @dataclass
@@ -51,8 +51,8 @@ class ChatbotConfig:
     temperature: float = 0.0
     max_tokens: int = 2000
 
-    # Response style presets (used by web UI)
-    RESPONSE_STYLES = {
+    # Response style presets (used by web UI); ClassVar excludes this from dataclass instance fields
+    RESPONSE_STYLES: ClassVar[dict] = {
         "Precise (Recommended)": {"temperature": 0.0, "k": 40, "deep_dive": False},
         "Balanced":              {"temperature": 0.2, "k": 50, "deep_dive": False},
         "Comprehensive":         {"temperature": 0.1, "k": 60, "deep_dive": True},
@@ -102,13 +102,20 @@ class ChatbotConfig:
         def strip_comments(d: dict) -> dict:
             return {k: v for k, v in d.items() if not k.startswith("_")}
 
+        def _make(cls_, d: dict, block_name: str):
+            clean = {k: v for k, v in d.items() if not k.startswith("_")}
+            try:
+                return cls_(**clean)
+            except TypeError as e:
+                raise ValueError(f"Invalid keys in '{block_name}' config block: {e}")
+
         kwargs = {k: v for k, v in data.items() if k in scalar_keys}
 
         if "llm" in data:
-            kwargs["llm"] = LLMConfig(**strip_comments(data["llm"]))
+            kwargs["llm"] = _make(LLMConfig, data["llm"], "llm")
         if "embedding" in data:
-            kwargs["embedding"] = EmbeddingConfig(**strip_comments(data["embedding"]))
+            kwargs["embedding"] = _make(EmbeddingConfig, data["embedding"], "embedding")
         if "reranker" in data:
-            kwargs["reranker"] = RerankerConfig(**strip_comments(data["reranker"])) if data["reranker"] else None
+            kwargs["reranker"] = _make(RerankerConfig, data["reranker"], "reranker") if data["reranker"] else None
 
         return cls(**kwargs)
