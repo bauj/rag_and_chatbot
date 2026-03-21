@@ -4,6 +4,7 @@ Pure logic with no UI concerns - returns data structures only
 """
 
 import os
+import warnings
 os.environ['POSTHOG_DISABLED'] = '1'
 os.environ['ANONYMIZED_TELEMETRY'] = 'false'
 os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
@@ -103,15 +104,24 @@ class DocumentationChatbot:
             os.environ['REQUESTS_CA_BUNDLE'] = str(cert_path)
 
         effective_max_tokens = max_tokens if max_tokens is not None else self.config.max_tokens
-        llm = ChatOpenAI(
-            model=llm_cfg.model,
-            base_url=llm_cfg.base_url,
-            api_key=llm_cfg.api_key,
-            temperature=temperature if temperature is not None else self.config.temperature,
-            max_completion_tokens=None,  # prevent langchain-openai from sending this field
-            streaming=True,
-            model_kwargs={"max_tokens": effective_max_tokens},
-        )
+        # model_kwargs bypasses langchain-openai's max_tokens→max_completion_tokens renaming,
+        # which breaks non-OpenAI endpoints. Suppress the resulting "should be specified
+        # explicitly" warning since this is intentional.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Parameters \{'max_tokens'\} should be specified explicitly",
+                category=UserWarning,
+            )
+            llm = ChatOpenAI(
+                model=llm_cfg.model,
+                base_url=llm_cfg.base_url,
+                api_key=llm_cfg.api_key,
+                temperature=temperature if temperature is not None else self.config.temperature,
+                max_completion_tokens=None,  # prevent langchain-openai from sending this field
+                streaming=True,
+                model_kwargs={"max_tokens": effective_max_tokens},
+            )
         return llm
 
     def _create_prompt(self) -> PromptTemplate:
