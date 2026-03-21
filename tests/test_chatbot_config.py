@@ -99,3 +99,15 @@ def test_invalid_json_raises(tmp_path):
     f.write_text("{not valid json")
     with pytest.raises(ValueError, match="Invalid JSON"):
         ChatbotConfig.load(str(f))
+
+
+def test_top_n_after_rerank_default():
+    cfg = ChatbotConfig()
+    assert cfg.top_n_after_rerank == 15
+
+
+def test_top_n_after_rerank_from_json(tmp_path):
+    f = tmp_path / "config.json"
+    f.write_text(json.dumps({"project_name": "p", "top_n_after_rerank": 10}))
+    cfg = ChatbotConfig.load(str(f))
+    assert cfg.top_n_after_rerank == 10

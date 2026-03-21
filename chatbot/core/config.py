@@ -46,6 +46,7 @@ class ChatbotConfig:
     k_standard: int = 40
     k_deep_dive: int = 60
     deep_dive_batch_size: int = 10
+    top_n_after_rerank: int = 15    # docs to keep after cross-encoder reranking
 
     # LLM generation parameters
     temperature: float = 0.0
@@ -97,7 +98,7 @@ class ChatbotConfig:
 
         # Known top-level keys (scalars + nested blocks)
         scalar_keys = {"project_name", "chromadb_path", "k_standard", "k_deep_dive",
-                       "deep_dive_batch_size", "temperature", "max_tokens"}
+                       "deep_dive_batch_size", "top_n_after_rerank", "temperature", "max_tokens"}
         nested_keys = {"llm", "embedding", "reranker"}
         valid_keys = scalar_keys | nested_keys
         invalid = set(data.keys()) - valid_keys
