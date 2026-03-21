@@ -10,6 +10,7 @@ if str(EXTRACTION_DIR) not in sys.path:
     sys.path.insert(0, str(EXTRACTION_DIR))
 
 from html_parser import get_page_title, parse_page, save_page_index, search_pages
+from html_parser import _split_into_sections, extract_sections_with_soup
 
 
 # ---------------------------------------------------------------------------
@@ -145,3 +146,98 @@ def test_search_pages_exclude_filepaths():
     results = search_pages(idx, "ModelAPI", exclude_filepaths=excluded)
     filepaths = {r["filepath"] for r in results}
     assert "/docs/classModelAPI__Feature.html" not in filepaths
+
+
+# ---------------------------------------------------------------------------
+# _split_into_sections
+# ---------------------------------------------------------------------------
+
+def _make_tag(html: str):
+    """Helper: parse html and return the <body> Tag."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    return soup.find("body")
+
+
+def test_split_into_sections_returns_list_of_tuples():
+    html = "<body><h2>Section A</h2><p>Content A</p><h2>Section B</h2><p>Content B</p></body>"
+    tag = _make_tag(html)
+    result = _split_into_sections(tag)
+    assert isinstance(result, list)
+    assert len(result) >= 1
+    for item in result:
+        assert isinstance(item, tuple)
+        assert len(item) == 2
+
+
+def test_split_into_sections_captures_h2_headings():
+    html = "<body><h2>Alpha</h2><p>First paragraph.</p><h2>Beta</h2><p>Second paragraph.</p></body>"
+    tag = _make_tag(html)
+    result = _split_into_sections(tag)
+    headings = [heading for heading, _ in result]
+    assert "Alpha" in headings
+    assert "Beta" in headings
+
+
+def test_split_into_sections_no_headings_returns_single_entry():
+    html = "<body><p>Some plain text with no headings.</p></body>"
+    tag = _make_tag(html)
+    result = _split_into_sections(tag)
+    assert len(result) == 1
+    heading, text = result[0]
+    assert heading is None
+    assert "plain text" in text
+
+
+def test_split_into_sections_h3_creates_boundary():
+    html = "<body><h3>Sub-section</h3><p>Sub content.</p></body>"
+    tag = _make_tag(html)
+    result = _split_into_sections(tag)
+    headings = [heading for heading, _ in result]
+    assert "Sub-section" in headings
+
+
+# ---------------------------------------------------------------------------
+# extract_sections_with_soup
+# ---------------------------------------------------------------------------
+
+def test_extract_sections_with_soup_returns_list():
+    from bs4 import BeautifulSoup
+    html = "<html><body><div role='main'><h2>Intro</h2><p>Hello world.</p></div></body></html>"
+    soup = BeautifulSoup(html, "html.parser")
+    result = extract_sections_with_soup(soup, "user")
+    assert isinstance(result, list)
+    assert len(result) >= 1
+
+
+def test_extract_sections_with_soup_entries_are_tuples():
+    from bs4 import BeautifulSoup
+    html = "<html><body><div role='main'><h2>Overview</h2><p>Details here.</p></div></body></html>"
+    soup = BeautifulSoup(html, "html.parser")
+    result = extract_sections_with_soup(soup, "user")
+    for item in result:
+        assert isinstance(item, tuple)
+        assert len(item) == 2
+
+
+def test_extract_sections_with_soup_dev_category_uses_contents_div():
+    from bs4 import BeautifulSoup
+    html = "<html><body><div class='contents'><h2>API</h2><p>API reference text.</p></div></body></html>"
+    soup = BeautifulSoup(html, "html.parser")
+    result = extract_sections_with_soup(soup, "dev")
+    headings = [h for h, _ in result]
+    assert "API" in headings
+
+
+def test_extract_sections_with_soup_strips_script_tags():
+    from bs4 import BeautifulSoup
+    html = (
+        "<html><body><div role='main'>"
+        "<script>alert('x')</script>"
+        "<h2>Clean</h2><p>Visible content.</p>"
+        "</div></body></html>"
+    )
+    soup = BeautifulSoup(html, "html.parser")
+    result = extract_sections_with_soup(soup, "user")
+    all_text = " ".join(text for _, text in result)
+    assert "alert" not in all_text
