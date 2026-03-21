@@ -1,5 +1,5 @@
 """
-Core business logic for SALOME Documentation RAG Chatbot
+Core business logic for Documentation RAG Chatbot
 Pure logic with no UI concerns - returns data structures only
 """
 
@@ -26,112 +26,86 @@ from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from .config import ChatbotConfig
 
 
-class SALOMEChatbot:
+class DocumentationChatbot:
     """
-    Core RAG chatbot for SALOME documentation
+    Core RAG chatbot for documentation
 
     Handles vectorstore, LLM, and retrieval logic without UI concerns.
     Returns structured data that UI layers can format as needed.
     """
 
     def __init__(self, config: ChatbotConfig):
-        """
-        Initialize chatbot with configuration
-
-        Args:
-            config: ChatbotConfig instance
-
-        Raises:
-            FileNotFoundError: If ChromaDB not found
-            Exception: If LLM connection fails
-        """
         self.config = config
-
-        # Set SSL certificate path if provided
-        if self.config.ssl_cert_file:
-            cert_path = Path(self.config.ssl_cert_file).expanduser().resolve()
-            if cert_path.exists():
-                os.environ['SSL_CERT_FILE'] = str(cert_path)
-                os.environ['REQUESTS_CA_BUNDLE'] = str(cert_path)
-            else:
-                raise FileNotFoundError(f"SSL certificate file not found: {cert_path}")
-
         print("DEBUG : load vector store ...")
-
-        # Load vector database
         self.vectorstore = self._load_vectorstore()
-
         print("DEBUG : detect modules ...")
-        # Detect available modules
         self.available_modules = self._detect_modules()
-
         print("DEBUG : initialize LLM ...")
-        # Initialize LLM
         self.llm = self._initialize_llm()
-
         print("DEBUG : create prompt ...")
-        # Create base prompt template
         self.base_prompt = self._create_prompt()
 
     def _load_vectorstore(self) -> Chroma:
         """Load ChromaDB vector store"""
-        # Resolve path (handle both absolute and relative paths)
         db_path = Path(self.config.chromadb_path)
         if not db_path.is_absolute():
-            # Relative to chatbot directory
             db_path = Path(__file__).parent.parent / self.config.chromadb_path
-
         db_path = db_path.resolve()
 
         if not db_path.exists():
             raise FileNotFoundError(
                 f"ChromaDB not found at: {db_path}\n"
-                f"Run the processor first: cd ../extraction && "
-                f"python process_multi_module_salome_docs.py"
+                f"Run the processor first: cd ../extraction && python process_docs.py --config config.json"
             )
 
-        print("DEBUG: Loading huggingFace embeddings model ... ")
+        emb_cfg = self.config.embedding
+        if emb_cfg.type == "local":
+            embeddings = HuggingFaceEmbeddings(model_name=emb_cfg.model)
+        else:
+            from langchain_openai import OpenAIEmbeddings
+            embeddings = OpenAIEmbeddings(
+                model=emb_cfg.model,
+                base_url=emb_cfg.base_url,
+                api_key=emb_cfg.api_key,
+            )
 
-        embeddings = HuggingFaceEmbeddings(
-            model_name=self.config.embedding_model
-        )
-
-        print("DEBUG: Creating Chroma object ... ")
         vectorstore = Chroma(
             persist_directory=str(db_path),
             embedding_function=embeddings,
-            collection_name="salome_documentation"
+            collection_name=self.config.collection_name,
         )
-
         return vectorstore
 
     def _detect_modules(self) -> List[str]:
         """Detect which modules are in the database"""
         try:
-            # Get all documents (metadata only - lightweight)
             all_data = self.vectorstore._collection.get(include=['metadatas'])
             modules = set()
             for meta in all_data['metadatas']:
                 if 'module' in meta:
                     modules.add(meta['module'])
             return sorted(list(modules))
-        except Exception:
-            # Fallback to defaults if detection fails
-            return ['SHAPER', 'SMESH', 'GUI']
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to detect modules from ChromaDB: {e}\n"
+                f"Make sure the database was populated by the extraction pipeline."
+            )
 
     def _initialize_llm(self, temperature: Optional[float] = None,
                         max_tokens: Optional[int] = None) -> ChatOpenAI:
-        """
-        Initialize LLM with OpenAI-compatible API
+        """Initialize LLM with OpenAI-compatible API"""
+        llm_cfg = self.config.llm
+        if llm_cfg.ssl_cert_file:
+            cert_path = Path(llm_cfg.ssl_cert_file).expanduser().resolve()
+            if not cert_path.exists():
+                raise FileNotFoundError(f"SSL certificate file not found: {cert_path}")
+            os.environ['SSL_CERT_FILE'] = str(cert_path)
+            os.environ['REQUESTS_CA_BUNDLE'] = str(cert_path)
 
-        Args:
-            temperature: Override config temperature (optional)
-            max_tokens: Override config max_tokens (optional)
-        """
         llm = ChatOpenAI(
-            model=self.config.model_name,
-            base_url=self.config.base_url,
-            api_key=self.config.api_key,
+            model=llm_cfg.model,
+            base_url=llm_cfg.base_url,
+            api_key=llm_cfg.api_key,
             temperature=temperature if temperature is not None else self.config.temperature,
             max_tokens=max_tokens if max_tokens is not None else self.config.max_tokens,
             streaming=True,
@@ -140,12 +114,13 @@ class SALOMEChatbot:
 
     def _create_prompt(self) -> PromptTemplate:
         """Create the base prompt template"""
-        template = """You are an expert assistant for SALOME platform documentation.
+        module_lines = "\n".join(
+            f"- {m}" for m in self.available_modules
+        )
+        template = f"""You are an expert assistant for {self.config.project_name} documentation.
 
-SALOME modules:
-- SHAPER: CAD modeling and geometry creation
-- SMESH: Mesh generation and manipulation
-- GUI: Graphical user interface components
+Available modules:
+{module_lines}
 
 Each module has:
 - Dev docs: API reference (classes, methods, namespaces)
@@ -157,15 +132,14 @@ CRITICAL INSTRUCTIONS:
 3. If the documentation does not contain enough information to answer the question, explicitly say "I don't have enough information in the documentation to answer this question"
 4. ALWAYS cite which module and document type you're referencing
 5. If multiple modules are relevant, explain which provides which functionality
-6. If the question is not related to SALOME platform, politely decline to answer
+6. If the question is not related to {self.config.project_name} documentation, politely decline to answer
 
 Documentation:
-{context}
+{{context}}
 
-Question: {question}
+Question: {{question}}
 
 Answer (based strictly on the documentation above):"""
-
         return PromptTemplate.from_template(template)
 
     def _create_chain(self,
@@ -179,7 +153,7 @@ Answer (based strictly on the documentation above):"""
         Create RAG chain with optional filtering
 
         Args:
-            module_filter: Filter by module (SHAPER, SMESH, GUI, or None)
+            module_filter: Filter by module (or None)
             doc_type_filter: Filter by doc type (dev, user, or None)
             deep_dive: Use deep dive mode (more docs + summarization)
             k: Override number of chunks to retrieve (optional)
@@ -285,7 +259,7 @@ Answer (based strictly on the documentation above):"""
 
         Args:
             question: The question to ask
-            module: Optional module filter (SHAPER, SMESH, GUI)
+            module: Optional module filter
             doc_type: Optional doc type filter (dev, user)
             deep_dive: Use deep dive mode for comprehensive analysis
             k: Override number of chunks to retrieve (higher priority than config/deep_dive)
