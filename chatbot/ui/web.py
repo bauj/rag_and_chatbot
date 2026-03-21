@@ -117,7 +117,7 @@ class WebUI:
         project = self.chatbot.config.project_name
         k_default = self.chatbot.config.k_standard
 
-        custom_css = """
+        self._custom_css = """
         /* === CHAT BUBBLE CONTRAST === */
         /* User messages — deep navy with bright text */
         .message.user,
@@ -192,7 +192,7 @@ class WebUI:
         """
 
         # Build interface
-        with gr.Blocks(title=f"{project} Documentation Chatbot", css=custom_css) as demo:
+        with gr.Blocks(title=f"{project} Documentation Chatbot") as demo:
             with gr.Row():
                 with gr.Column(scale=10):
                     gr.Markdown(f"# {project} Documentation Chatbot")
@@ -330,4 +330,4 @@ class WebUI:
         print(f"Starting web interface on http://localhost:{port}")
         print("=" * 70)
 
-        demo.launch(share=share, server_name="127.0.0.1", server_port=port, theme=theme)
+        demo.launch(share=share, server_name="127.0.0.1", server_port=port, theme=theme, css=self._custom_css)
