@@ -59,6 +59,11 @@ class ChatbotConfig:
     }
 
     def __post_init__(self):
+        if " " in self.project_name:
+            raise ValueError(
+                f"project_name must not contain spaces: {self.project_name!r}. "
+                "Use underscores instead (e.g. 'my_project')."
+            )
         if not self.chromadb_path:
             self.chromadb_path = f"../extraction/{self.project_name}_docs_extracted/chromadb"
 

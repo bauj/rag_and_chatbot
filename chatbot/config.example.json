@@ -1,5 +1,6 @@
 {
   "project_name": "my_project",
+  "_comment_project_name": "No spaces — used as ChromaDB collection name. Use underscores.",
   "chromadb_path": "../extraction/my_project_docs_extracted/chromadb",
 
   "llm": {

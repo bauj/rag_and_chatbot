@@ -1,5 +1,6 @@
 {
   "project_name": "my_project",
+  "_comment_project_name": "No spaces — used as ChromaDB collection name. Use underscores.",
   "output_dir": "./my_project_docs_extracted",
   "use_token_chunking": false,
   "_comment_token_chunking": "Token chunking is more precise but MUCH slower (use false for large datasets)",

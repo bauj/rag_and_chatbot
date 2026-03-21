@@ -93,6 +93,11 @@ class DocumentationProcessor:
         return processor
 
     def __init__(self, project_name: str = "docs", output_dir: str = "", use_token_chunking: bool = False):
+        if " " in project_name:
+            raise ValueError(
+                f"project_name must not contain spaces: {project_name!r}. "
+                "Use underscores instead (e.g. 'my_project')."
+            )
         self.project_name = project_name
         self._embedding_model = "all-MiniLM-L6-v2"
         self._embedding_type = "local"
