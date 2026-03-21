@@ -138,70 +138,32 @@ class WebUI:
         .message.bot p, .message.bot li, .message.bot code,
         div[data-testid="bot"] p { color: #b8e4c9 !important; }
 
-        /* === TOOLTIP TARGET === */
-        .gr-tooltip {
-            position: relative;
-            display: inline-block;
-            cursor: help;
-            text-decoration: underline dotted rgba(150,150,150,0.5);
-            text-underline-offset: 3px;
-        }
-        .gr-tooltip::after {
-            content: attr(data-tip);
-            display: none;
-            position: absolute;
-            bottom: 130%;
-            left: 0;
-            width: 240px;
-            background: #1a1a2e;
-            color: #d0d8e8;
-            border: 1px solid #445;
-            padding: 7px 12px;
-            border-radius: 6px;
-            font-size: 12px;
-            font-weight: normal;
-            font-style: normal;
-            line-height: 1.5;
-            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
-            z-index: 9999;
-            white-space: normal;
-            pointer-events: none;
-        }
-        .gr-tooltip:hover::after { display: block; }
+        /* === TOOLTIP: make label cursor hint it's hoverable === */
+        label[title] { cursor: help !important; }
         """
 
-        tooltip_js = """
-        <script>
-        (function() {
+        tooltip_js = """() => {
             function applyTooltips() {
                 document.querySelectorAll('.info').forEach(function(info) {
                     if (info.dataset.tipped) return;
-                    var text = info.textContent.trim();
+                    var text = (info.textContent || '').trim();
                     if (!text) return;
                     info.dataset.tipped = '1';
-                    info.style.cssText = 'display:none!important';
-                    // Walk up to the block container, then find the label span
+                    info.style.setProperty('display', 'none', 'important');
                     var el = info.parentElement;
-                    for (var i = 0; i < 4 && el; i++, el = el.parentElement) {
-                        var span = el.querySelector('label > span:first-child, legend > span:first-child, .label-wrap > span:first-child');
-                        if (span) {
-                            span.setAttribute('data-tip', text);
-                            span.classList.add('gr-tooltip');
-                            break;
-                        }
+                    for (var i = 0; i < 5 && el; i++, el = el.parentElement) {
+                        var label = el.querySelector('label');
+                        if (label) { label.title = text; break; }
                     }
                 });
             }
-            // Run immediately and watch for Gradio re-renders
             applyTooltips();
-            new MutationObserver(applyTooltips).observe(document.body, {childList: true, subtree: true});
-        })();
-        </script>
-        """
+            new MutationObserver(applyTooltips)
+                .observe(document.body, {childList: true, subtree: true});
+        }"""
 
         # Build interface
         with gr.Blocks(title=f"{project} Documentation Chatbot") as demo:
-            gr.HTML(tooltip_js)
             with gr.Row():
                 with gr.Column(scale=10):
                     gr.Markdown(f"# {project} Documentation Chatbot")
@@ -288,6 +250,9 @@ class WebUI:
                 outputs=theme_toggle,
                 js=js_toggle_light_dark,
             )
+
+            # Convert info text to native title tooltips
+            demo.load(fn=None, js=tooltip_js)
 
         return demo
 
