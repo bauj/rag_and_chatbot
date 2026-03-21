@@ -15,6 +15,7 @@ import os
 from html_parser import (
     _split_into_sections as _html_split_into_sections,
     extract_sections_with_soup as _html_extract_sections_with_soup,
+    get_page_title,
 )
 
 # For token-aware chunking
@@ -97,7 +98,21 @@ class DocumentationProcessor:
 
         return processor
 
-    def __init__(self, project_name: str = "docs", output_dir: str = "", use_token_chunking: bool = False):
+    def __init__(self, project_name_or_config=None, output_dir: str = "", use_token_chunking: bool = False, project_name: str = None):
+        # Support being called with a config dict as the first positional argument
+        if isinstance(project_name_or_config, dict):
+            config = project_name_or_config
+            project_name = config.get("project_name", "docs")
+            output_dir = config.get("output_dir", output_dir)
+            use_token_chunking = config.get("use_token_chunking", use_token_chunking)
+        else:
+            # Legacy positional: first arg is project_name string
+            if project_name_or_config is not None:
+                project_name = project_name_or_config
+            elif project_name is None:
+                project_name = "docs"
+            config = {}
+
         if " " in project_name:
             raise ValueError(
                 f"project_name must not contain spaces: {project_name!r}. "
@@ -126,6 +141,39 @@ class DocumentationProcessor:
         self.quality_min_words = 50
         self.substantial_word_count = 100
         self.quality_substantial_words = 100
+
+        # Apply config dict overrides if provided
+        if config:
+            if "embedding" in config:
+                emb = config["embedding"]
+                self._embedding_model = emb.get("model", self._embedding_model)
+                self._embedding_type = emb.get("type", "local")
+                self._embedding_base_url = emb.get("base_url", None)
+                self._embedding_api_key = emb.get("api_key", None)
+            if "chunking" in config:
+                chunking = config["chunking"]
+                if "max_tokens" in chunking:
+                    self.max_tokens = chunking["max_tokens"]
+                if "overlap_tokens" in chunking:
+                    self.overlap_tokens = chunking["overlap_tokens"]
+                if "char_chunk_size" in chunking:
+                    self.char_chunk_size = chunking["char_chunk_size"]
+                if "char_overlap" in chunking:
+                    self.char_overlap = chunking["char_overlap"]
+            if "quality" in config:
+                quality = config["quality"]
+                if "min_score" in quality:
+                    self.quality_min_score = quality["min_score"]
+                    self.quality_threshold = quality["min_score"]
+                if "min_word_count" in quality:
+                    self.quality_min_words = quality["min_word_count"]
+                    self.min_word_count = quality["min_word_count"]
+                if "substantial_word_count" in quality:
+                    self.quality_substantial_words = quality["substantial_word_count"]
+                    self.substantial_word_count = quality["substantial_word_count"]
+
+        # Page index entries collected during processing
+        self._page_index_entries: List[dict] = []
 
         # Initialize tokenizer for token-aware chunking
         self.use_token_chunking = use_token_chunking and TOKENIZER_AVAILABLE
@@ -424,8 +472,9 @@ class DocumentationProcessor:
         except Exception:
             return True  # If encoding fails, assume it's OK
 
-    def process_file(self, filepath: Path, module_name: str, doc_category: str) -> List[DocumentChunk]:
+    def process_file(self, filepath, module_name: str, doc_category: str) -> List[DocumentChunk]:
         """Process a single HTML file"""
+        filepath = Path(filepath)  # Accept both str and Path
         try:
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 soup = BeautifulSoup(f.read(), 'html.parser')
@@ -457,6 +506,15 @@ class DocumentationProcessor:
             soup.decompose()  # Free BeautifulSoup memory
             del soup
             return []
+
+        # Add page index entry (once per file, only for quality-passing pages)
+        self._page_index_entries.append({
+            "filepath": str(filepath),
+            "filename": filepath.name,
+            "title": get_page_title(str(filepath)),
+            "module": module_name,
+            "doc_category": doc_category,
+        })
 
         # Extract code blocks
         code_blocks = self.extract_code_blocks(soup)
@@ -785,6 +843,12 @@ Examples:
     print(f"\nTotal: {len(chunks)} chunks extracted")
     processor.save_chunks(chunks)
     processor.create_chromadb(chunks)
+
+    from html_parser import save_page_index
+    output_dir = processor.output_dir
+    index_path = output_dir / "page_index.json"
+    save_page_index(processor._page_index_entries, str(index_path))
+    print(f"Page index saved: {index_path} ({len(processor._page_index_entries)} pages)")
 
     print(f"\nOK: Done. ChromaDB at {processor.output_dir}/chromadb")
     print("=" * 70)
