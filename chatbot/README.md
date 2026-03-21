@@ -1,86 +1,77 @@
-# SALOME Documentation Chatbot
+# Documentation RAG Chatbot
 
-Refactored RAG chatbot with clean separation between business logic and UI.
+RAG chatbot with clean separation between business logic and UI. Queries a ChromaDB vector database built by the extraction pipeline.
 
 ## Architecture
 
 ```
 chatbot/
-├── core/                      # Business logic (no UI)
-│   ├── config.py             # Hybrid config (JSON + dataclass)
-│   └── salome_chatbot.py     # RAG logic
-├── ui/                        # User interfaces
-│   ├── terminal.py           # Terminal interface
-│   └── web.py                # Gradio web interface
-├── chatbot.py                # Unified entry point
-├── config.example.json       # Example configuration
-└── _old/                     # Legacy implementations
+├── core/
+│   ├── config.py           # ChatbotConfig, LLMConfig, EmbeddingConfig, RerankerConfig
+│   └── rag_chatbot.py      # DocumentationChatbot — RAG logic
+├── ui/
+│   ├── terminal.py         # Interactive terminal interface
+│   └── web.py              # Gradio web interface
+├── chatbot.py              # Unified entry point
+└── config.example.json     # Example configuration
 ```
 
-## Features
+## Configuration
 
-- **Multi-module support**: SHAPER, SMESH, GUI
-- **Flexible filtering**: By module and doc type (dev/user)
-- **Deep Dive mode**: Comprehensive analysis with batch summarization
-- **Hybrid configuration**: JSON files + Python defaults + CLI overrides
-- **Two interfaces**: Terminal (interactive) and Web (Gradio)
-- **Clean architecture**: Core logic separated from UI
-
-## Quick Start
-
-### Installation
+Copy and edit the example:
 
 ```bash
-# Install dependencies
-pip install -r ../requirements.txt
-```
-
-### Configuration
-
-Three ways to configure (priority: CLI > JSON > defaults):
-
-**1. Use defaults** (no config needed)
-```bash
-python chatbot.py
-```
-
-**2. Use JSON config file**
-```bash
-# Create config from example
 cp config.example.json config.json
-
-# Edit config.json with your settings
-# Chatbot automatically loads config.json if present
-
-python chatbot.py
 ```
 
-**3. Override with CLI arguments**
-```bash
-python chatbot.py --model mistral-mini --chromadb /path/to/chromadb
-```
+| Field | Default | Description |
+|---|---|---|
+| `project_name` | `"docs"` | Must match `project_name` used during extraction |
+| `chromadb_path` | derived | Path to ChromaDB produced by the extractor |
+| `llm.base_url` | `http://localhost:8080/v1` | OpenAI-compatible LLM endpoint |
+| `llm.model` | `"mistral"` | Model name |
+| `llm.api_key` | `"dummy"` | Use `"dummy"` for local models |
+| `embedding.model` | `"all-MiniLM-L6-v2"` | Must match extraction config |
+| `embedding.type` | `"local"` | `"local"` or `"api"` |
+| `reranker.model` | `"BAAI/bge-reranker-v2-m3"` | Cross-encoder reranker |
+| `k_standard` | `40` | Chunks retrieved in standard mode |
+| `k_deep_dive` | `60` | Chunks retrieved in deep dive mode |
+| `temperature` | `0.0` | LLM temperature |
+| `max_tokens` | `2000` | Max tokens per response |
+
+Config is loaded in this priority order: CLI arguments > `config.json` > defaults.
+
+**`embedding.model` must be identical to `extraction/config.json`** — mismatch causes wrong retrieval with no error.
+
+Remove the `reranker` block entirely to disable reranking.
 
 ## Usage
 
 ### Terminal Interface
 
-**Interactive mode** (default):
 ```bash
+# Interactive mode
 python chatbot.py
+
+# Single question
+python chatbot.py --question "How do I create a mesh?"
+
+# With filters
+python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type user
+
+# Deep dive mode
+python chatbot.py --question "Explain the full workflow" --deep-dive
 ```
 
-Commands:
-- `module:SHAPER` - Filter by module
-- `type:dev` - Filter by doc type
-- `deep` - Toggle deep dive mode
-- `stats` - Show database statistics
-- `clear` - Clear filters
-- `exit` - Quit
-
-**Single question mode**:
-```bash
-python chatbot.py --question "What is ModelAPI::Feature?"
-python chatbot.py --question "How to create mesh?" --module SMESH --deep-dive
+Commands in interactive mode:
+```
+module:MODULE_A   - Filter by module
+type:dev          - Filter developer docs only
+type:user         - Filter user docs only
+deep              - Toggle deep dive mode
+clear             - Clear all filters
+stats             - Show database statistics
+exit              - Exit
 ```
 
 ### Web Interface
@@ -92,116 +83,78 @@ python chatbot.py --web
 # Custom port
 python chatbot.py --web --port 8080
 
-# Create public URL (via Gradio)
+# Public URL via Gradio
 python chatbot.py --web --share
 ```
 
-## Configuration Options
-
-All settings from `config.example.json`:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `chromadb_path` | `../extraction/salome_docs_extracted/chromadb` | Path to ChromaDB |
-| `litellm_url` | `http://localhost:8080` | LiteLLM server URL |
-| `model_name` | `mistral` | LLM model name |
-| `embedding_model` | `all-MiniLM-L6-v2` | Embedding model |
-| `k_standard` | `40` | Chunks for standard retrieval |
-| `k_deep_dive` | `60` | Chunks for deep dive mode |
-| `deep_dive_batch_size` | `10` | Batch size for summarization |
-| `temperature` | `0.0` | LLM temperature |
-| `max_tokens` | `2000` | Max tokens per response |
-
-## Examples
+### CLI Overrides
 
 ```bash
-# Interactive terminal with default settings
-python chatbot.py
+# Override LLM endpoint
+python chatbot.py --base-url http://localhost:11434/v1 --model llama3
 
-# Single question with custom config
-python chatbot.py --config prod.json --question "Explain mesh generation"
-
-# Web interface with overrides
-python chatbot.py --web --model mistral-mini --port 9000
-
-# Deep dive mode for complex questions
-python chatbot.py --question "Complete SMESH workflow" --module SMESH --deep-dive
+# Load a specific config file
+python chatbot.py --config /path/to/my_config.json
 ```
 
-## Migration from Legacy
+### Python API
 
-**Old scripts** (moved to `_old/`):
-- `chatbot_salome_doc.py` → `python chatbot.py`
-- `chatbot_web_salome_doc.py` → `python chatbot.py --web`
-
-**Equivalent commands**:
-```bash
-# Old
-python chatbot_salome_doc.py --question "test" --module SHAPER
-
-# New
-python chatbot.py --question "test" --module SHAPER
-```
-
-## Using as a Library
+Run from inside the `chatbot/` directory:
 
 ```python
-from core import ChatbotConfig, SALOMEChatbot
+from core import ChatbotConfig, DocumentationChatbot
 
-# Create config
-config = ChatbotConfig(
-    model_name="mistral-mini",
-    k_standard=50
-)
+config = ChatbotConfig.load("config.json")
+chatbot = DocumentationChatbot(config)
 
-# Or load from JSON
-config = ChatbotConfig.from_json("my_config.json")
-
-# Initialize chatbot
-bot = SALOMEChatbot(config)
-
-# Ask questions
-result = bot.ask(
-    "What is ModelAPI::Feature?",
-    module="SHAPER",
-    doc_type="dev"
-)
-
+# Basic query
+result = chatbot.ask("How do I create a mesh?")
 print(result["answer"])
 for source in result["sources"]:
     print(f"  - {source['title']}")
+
+# With filters
+result = chatbot.ask(
+    "Show mesh generation examples",
+    module="MODULE_A",
+    doc_type="user"
+)
+
+# Custom parameters
+result = chatbot.ask(
+    "Explain the full workflow",
+    deep_dive=True,
+    k=70,
+    temperature=0.1,
+    max_tokens=3000
+)
+
+stats = chatbot.get_stats()
+print(f"Modules: {stats['available_modules']}")
 ```
 
-## Development
+## Response Styles (Web UI)
 
-**Add new UI**:
-1. Create `ui/my_interface.py`
-2. Import `SALOMEChatbot` from `core`
-3. Call `bot.ask()` and format results
-4. No core logic changes needed!
+| Style | Temperature | Chunks | Deep Dive |
+|---|---|---|---|
+| Precise (default) | 0.0 | 40 | No |
+| Balanced | 0.2 | 50 | No |
+| Comprehensive | 0.1 | 60 | Yes |
 
-**Modify RAG logic**:
-1. Edit `core/salome_chatbot.py`
-2. All UIs automatically use new logic
+**Deep Dive Mode:** retrieves 60 chunks, splits them into batches of 10, generates one summary per batch, then synthesizes a final answer. Use for complex multi-part questions.
 
 ## Troubleshooting
 
-**ChromaDB not found**:
+**"ChromaDB not found"**
 ```bash
-cd ../extraction
-python process_multi_module_salome_docs.py
+cd ../extraction && python process_docs.py --config config.json
 ```
 
-**LiteLLM connection failed**:
+**"Connection refused" (LLM endpoint)**
 ```bash
-# Check LiteLLM is running
-curl http://localhost:8080/v1/models
-
-# Or specify different URL
-python chatbot.py --litellm-url http://your-server:8080
+curl http://localhost:8080/v1/models  # check endpoint is up
+ollama serve                          # if using Ollama
 ```
 
-**Import errors**:
-```bash
-pip install -r ../requirements.txt
-```
+**Retrieval returns wrong results**
+- Check that `embedding.model` matches exactly in both `extraction/config.json` and `chatbot/config.json`
