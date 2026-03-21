@@ -32,6 +32,14 @@ class RerankerConfig:
 
 
 @dataclass
+class AgenticConfig:
+    page_index_path: str           # required — path to page_index.json (relative or absolute)
+    max_chars_per_page: int = 8000
+    max_pages_per_round: int = 3
+    max_pages_round2: int = 2
+
+
+@dataclass
 class ChatbotConfig:
     """Configuration for Documentation RAG Chatbot with nested JSON support."""
 
@@ -41,6 +49,7 @@ class ChatbotConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     reranker: Optional[RerankerConfig] = None   # None = reranking disabled
+    agentic: Optional[AgenticConfig] = None    # None = agentic mode unavailable
 
     # Retrieval parameters
     k_standard: int = 40
@@ -99,7 +108,7 @@ class ChatbotConfig:
         # Known top-level keys (scalars + nested blocks)
         scalar_keys = {"project_name", "chromadb_path", "k_standard", "k_deep_dive",
                        "deep_dive_batch_size", "top_n_after_rerank", "temperature", "max_tokens"}
-        nested_keys = {"llm", "embedding", "reranker"}
+        nested_keys = {"llm", "embedding", "reranker", "agentic"}
         valid_keys = scalar_keys | nested_keys
         invalid = set(data.keys()) - valid_keys
         if invalid:
@@ -123,5 +132,7 @@ class ChatbotConfig:
             kwargs["embedding"] = _make(EmbeddingConfig, data["embedding"], "embedding")
         if "reranker" in data:
             kwargs["reranker"] = _make(RerankerConfig, data["reranker"], "reranker") if data["reranker"] else None
+        if "agentic" in data:
+            kwargs["agentic"] = _make(AgenticConfig, data["agentic"], "agentic") if data["agentic"] else None
 
         return cls(**kwargs)
