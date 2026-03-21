@@ -48,9 +48,13 @@ class DocumentationProcessor:
         processor = cls(project_name=project_name, output_dir=output_dir,
                         use_token_chunking=use_token_chunking)
 
-        # Read embedding model from config
+        # Read embedding config
         if "embedding" in config:
-            processor._embedding_model = config["embedding"].get("model", processor._embedding_model)
+            emb = config["embedding"]
+            processor._embedding_model = emb.get("model", processor._embedding_model)
+            processor._embedding_type = emb.get("type", "local")
+            processor._embedding_base_url = emb.get("base_url", None)
+            processor._embedding_api_key = emb.get("api_key", None)
 
         # Chunking overrides
         if "chunking" in config:
@@ -90,7 +94,10 @@ class DocumentationProcessor:
 
     def __init__(self, project_name: str = "docs", output_dir: str = "", use_token_chunking: bool = False):
         self.project_name = project_name
-        self._embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
+        self._embedding_model = "all-MiniLM-L6-v2"
+        self._embedding_type = "local"
+        self._embedding_base_url = None
+        self._embedding_api_key = None
         if not output_dir:
             output_dir = f"./{project_name}_docs_extracted"
         self.output_dir = Path(output_dir)
@@ -574,8 +581,8 @@ class DocumentationProcessor:
             json.dump(stats, f, indent=2)
         print(f"OK: Statistics: {stats_file}")
 
-    def create_chromadb(self, chunks: List[DocumentChunk], embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"):
-        """Create ChromaDB index with explicit embedding model - memory efficient version"""
+    def create_chromadb(self, chunks: List[DocumentChunk]):
+        """Create ChromaDB index - memory efficient version"""
         try:
             import chromadb
             from chromadb.config import Settings
@@ -583,11 +590,19 @@ class DocumentationProcessor:
 
             print("\nCreating ChromaDB index...")
 
-            # Create embedding function (same as chatbot uses)
-            embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name=embedding_model
-            )
-            print(f"  Using {embedding_model} embeddings")
+            # Build embedding function based on type
+            if self._embedding_type == "local":
+                embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+                    model_name=self._embedding_model
+                )
+                print(f"  Using local embeddings: {self._embedding_model}")
+            else:
+                embedding_function = embedding_functions.OpenAIEmbeddingFunction(
+                    api_key=self._embedding_api_key or "dummy",
+                    api_base=self._embedding_base_url,
+                    model_name=self._embedding_model,
+                )
+                print(f"  Using API embeddings: {self._embedding_model} @ {self._embedding_base_url}")
 
             client = chromadb.PersistentClient(
                 path=str(self.output_dir / 'chromadb'),
@@ -709,7 +724,7 @@ Examples:
 
     print(f"\nTotal: {len(chunks)} chunks extracted")
     processor.save_chunks(chunks)
-    processor.create_chromadb(chunks, processor._embedding_model)
+    processor.create_chromadb(chunks)
 
     print(f"\nOK: Done. ChromaDB at {processor.output_dir}/chromadb")
     print("=" * 70)
