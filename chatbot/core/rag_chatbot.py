@@ -102,13 +102,15 @@ class DocumentationChatbot:
             os.environ['SSL_CERT_FILE'] = str(cert_path)
             os.environ['REQUESTS_CA_BUNDLE'] = str(cert_path)
 
+        effective_max_tokens = max_tokens if max_tokens is not None else self.config.max_tokens
         llm = ChatOpenAI(
             model=llm_cfg.model,
             base_url=llm_cfg.base_url,
             api_key=llm_cfg.api_key,
             temperature=temperature if temperature is not None else self.config.temperature,
-            max_tokens=max_tokens if max_tokens is not None else self.config.max_tokens,
+            max_completion_tokens=None,  # prevent langchain-openai from sending this field
             streaming=True,
+            model_kwargs={"max_tokens": effective_max_tokens},
         )
         return llm
 
