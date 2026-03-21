@@ -21,15 +21,15 @@
     "_comment_match": "IMPORTANT: embedding config must match what was used during extraction or retrieval will silently return wrong results."
   },
 
-  "reranker": {
-    "model": "BAAI/bge-reranker-v2-m3",
-    "type": "local",
-    "_comment": "Remove this block entirely to disable reranking. Requires sentence-transformers."
-  },
+  "reranker": null,
+  "_comment_reranker": "Set to null to disable. Enable with: {\"model\": \"BAAI/bge-reranker-v2-m3\", \"type\": \"local\"}. Requires sentence-transformers.",
 
   "k_standard": 40,
   "k_deep_dive": 60,
   "deep_dive_batch_size": 10,
+  "top_n_after_rerank": 15,
+  "_comment_top_n": "Docs kept after cross-encoder reranking. Only used when reranker is enabled.",
+
   "temperature": 0.0,
   "max_tokens": 2000
 }
