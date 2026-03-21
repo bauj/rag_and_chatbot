@@ -72,55 +72,29 @@ class WebUI:
         module_filter: str,
         doc_type_filter: str,
         response_style: str,
+        deep_dive: bool,
         search_depth: int,
         answer_length: int,
     ) -> str:
-        """
-        Handle incoming chat message
-
-        Args:
-            message: User's message
-            history: Chat history (unused, maintained by Gradio)
-            module_filter: Selected module filter
-            doc_type_filter: Selected doc type filter
-            response_style: Response style preset
-            search_depth: Number of chunks to retrieve
-            answer_length: Maximum answer length in tokens
-
-        Returns:
-            Formatted answer string
-        """
+        """Handle incoming chat message."""
         try:
-            # Convert filter values
             module = module_filter if module_filter != "All" else None
             doc_type = doc_type_filter if doc_type_filter != "All" else None
 
-            # Get response style preset from config
+            # Temperature comes from the style preset; k and deep_dive from explicit controls
             style_config = ChatbotConfig.RESPONSE_STYLES.get(response_style, {})
-
-            # Priority: UI controls > style preset > config defaults
-            # Deep dive mode from style preset
-            deep_dive = style_config.get("deep_dive", False)
-
-            # Temperature: style preset (UI doesn't expose direct control)
             temperature = style_config.get("temperature")
 
-            # K and max_tokens: UI controls override everything
-            k = search_depth
-            max_tokens = answer_length
-
-            # Get answer with runtime overrides
             result = self.chatbot.ask(
                 message,
                 module=module,
                 doc_type=doc_type,
                 deep_dive=deep_dive,
-                k=k,
+                k=search_depth,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=answer_length,
             )
 
-            # Format and return
             return self._format_answer_markdown(result)
 
         except Exception as e:
@@ -140,96 +114,77 @@ class WebUI:
         # [question, module, doc_type, response_style, search_depth, answer_length]
         examples = []
 
+        project = self.chatbot.config.project_name
+        k_default = self.chatbot.config.k_standard
+
         # Build interface
-        with gr.Blocks(title=f"{self.chatbot.config.project_name} Documentation Chatbot") as demo:
+        with gr.Blocks(title=f"{project} Documentation Chatbot") as demo:
             with gr.Row():
                 with gr.Column(scale=10):
-                    project = self.chatbot.config.project_name
                     gr.Markdown(f"# {project} Documentation Chatbot")
+                with gr.Column(scale=1, min_width=120):
+                    theme_toggle = gr.Button("Switch theme", size="sm", elem_id="theme-toggle-btn")
 
-                with gr.Column(scale=1, min_width=100):
-                    theme_toggle = gr.Button(
-                        "Switch theme", size="sm", elem_id="theme-toggle-btn"
-                    )
-
-            gr.Markdown(
-                f"*Multi-module support: {', '.join(self.chatbot.available_modules)}*"
-            )
-        
             with gr.Row():
-                with gr.Column(scale=1):
-                    # Content filters
+                with gr.Column(scale=1, min_width=240):
                     gr.Markdown("### Filters")
                     module_filter = gr.Dropdown(
                         choices=["All"] + self.chatbot.available_modules,
                         value="All",
                         label="Module",
-                        info="Filter by module",
+                        info="Restrict search to one module, or keep All to search across all.",
                     )
                     doc_type_filter = gr.Dropdown(
                         choices=["All", "Dev", "User"],
                         value="All",
                         label="Doc Type",
-                        info="Filter by documentation type",
+                        info="Dev = API reference & classes · User = tutorials & guides",
                     )
 
                     gr.Markdown("---")
+                    gr.Markdown("### Response")
 
-                    # Response controls
-                    gr.Markdown("### Response Controls")
                     response_style = gr.Dropdown(
                         choices=["Precise (Recommended)", "Balanced", "Comprehensive"],
                         value="Precise (Recommended)",
-                        label="Response Style",
-                        info="Controls temperature and retrieval strategy",
+                        label="Style",
+                        info="Precise: temp=0.0 · Balanced: temp=0.2 · Comprehensive: temp=0.1",
+                    )
+                    deep_dive = gr.Checkbox(
+                        label="Deep Dive mode",
+                        value=False,
+                        info="Multi-step analysis: summaries per batch then a final synthesis. Slower but more thorough.",
                     )
                     search_depth = gr.Slider(
-                        minimum=1,
-                        maximum=10,
-                        value=1,
-                        step=1,
-                        label="Search Depth",
-                        info="Number of documentation chunks to retrieve",
+                        minimum=10,
+                        maximum=80,
+                        value=k_default,
+                        step=5,
+                        label="Search depth (chunks)",
+                        info="How many documentation chunks to retrieve before ranking. More = broader context, slower.",
                     )
                     answer_length = gr.Slider(
                         minimum=500,
                         maximum=4000,
                         value=2000,
                         step=500,
-                        label="Answer Length (tokens)",
-                        info="Maximum length of generated answer",
+                        label="Max answer length (tokens)",
                     )
 
-                    gr.Markdown("---")
-                    module_desc = "\n".join(f"- **{m}**" for m in self.chatbot.available_modules)
-                    gr.Markdown(f"""
-**Module Filters:**
-{module_desc}
-
-**Doc Types:**
-- **Dev**: API reference, classes
-- **User**: Tutorials, guides
-
-**Response Styles:**
-- **Precise**: Temp=0.0, focused (40 chunks)
-- **Balanced**: Temp=0.2, broader (50 chunks)
-- **Comprehensive**: Temp=0.1, deep dive (60 chunks)
-""")
-
                 with gr.Column(scale=3):
-                    # Use ChatInterface with resizable chatbot
                     chatbot_interface = gr.ChatInterface(
                         fn=self._handle_message,
                         additional_inputs=[
                             module_filter,
                             doc_type_filter,
                             response_style,
+                            deep_dive,
                             search_depth,
                             answer_length,
                         ],
                         examples=examples,
                         title=None,
-                        description=f"Ask anything about {self.chatbot.config.project_name}! Use controls on the left to customize responses.",
+                        description=None,
                         chatbot=gr.Chatbot(height=600),
                     )
 
