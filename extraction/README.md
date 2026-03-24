@@ -29,14 +29,16 @@ All configuration is in `config.json`. See `config.example.json` for a full temp
   "MODULE_A": {
     "description": "What this module does",
     "dev_path": "./module_a/html",
-    "user_path": "./module_a/html_gui"
+    "user_path": "./module_a/html_gui",
+    "url_for_sources_citation": "https://docs.myproject.org/module_a/html"
   }
 }
 ```
 
 - `dev_path` — API reference / developer docs (Doxygen `html/`)
 - `user_path` — tutorials / user guides (Sphinx `_build/html/`)
-- Both are optional per module; omit either if not applicable
+- `url_for_sources_citation` — optional base URL of the directory containing the HTML files, no trailing slash. Source links become `base_url/filename.html`. To find the right value, open any page of the online docs and remove the filename from the URL: e.g. `https://docs.salome-platform.org/latest/tui/SHAPER/classModelAPI__Feature.html` → `https://docs.salome-platform.org/latest/tui/SHAPER`. When omitted, sources show the local filename only.
+- Both paths are optional per module; omit either if not applicable
 - Add as many modules as needed; chatbot detects them automatically
 
 ### Embedding

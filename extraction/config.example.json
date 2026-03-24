@@ -9,7 +9,8 @@
     "MODULE_A": {
       "description": "What this module does",
       "dev_path": "./module_a/html",
-      "user_path": "./module_a/html_gui"
+      "user_path": "./module_a/html_gui",
+      "url_for_sources_citation": "https://docs.myproject.org/module_a/html"
     },
     "MODULE_B": {
       "description": "What this module does",
@@ -17,6 +18,7 @@
       "user_path": "./module_b/html_gui"
     }
   },
+  "_comment_url_for_sources_citation": "Optional base URL for the online docs. When set, source links in chatbot responses point to the live documentation page. When omitted, sources show local file paths.",
 
   "embedding": {
     "model": "all-MiniLM-L6-v2",

@@ -93,7 +93,8 @@ class DocumentationProcessor:
                 name=module_name,
                 description=module_config.get("description", ""),
                 dev_path=module_config.get("dev_path", ""),
-                user_path=module_config.get("user_path", "")
+                user_path=module_config.get("user_path", ""),
+                url_for_sources_citation=module_config.get("url_for_sources_citation", "")
             )
 
         return processor
@@ -201,7 +202,7 @@ class DocumentationProcessor:
     def docs_json_path(self) -> Path:
         return self.output_dir / f"{self.project_name}_docs.json"
 
-    def add_module(self, name: str = None, description: str = "", dev_path: str = None, user_path: str = None, module_name: str = None):
+    def add_module(self, name: str = None, description: str = "", dev_path: str = None, user_path: str = None, module_name: str = None, url_for_sources_citation: str = ""):
         """Add a module with dev and/or user docs"""
         # Support both positional (old API: module_name) and keyword (new API: name)
         if name is None and module_name is not None:
@@ -217,6 +218,9 @@ class DocumentationProcessor:
 
         if description:
             self.MODULE_INFO[name]['description'] = description
+
+        if url_for_sources_citation:
+            self.MODULE_INFO[name]['url_for_sources_citation'] = url_for_sources_citation
 
         if dev_path:
             path = Path(dev_path)
@@ -490,10 +494,9 @@ class DocumentationProcessor:
         doc_type = self.determine_doc_type(filepath, doc_category)
 
         # Generate URL and parent doc ID
-        relative_path = Path(*filepath.parts[2:])
         module_info = self.MODULE_INFO.get(module_name, {})
-        base_url = module_info.get('url', '')
-        url = base_url + f"/{relative_path}" if base_url else str(relative_path)
+        base_url = module_info.get('url_for_sources_citation', '')
+        url = base_url.rstrip('/') + f"/{filepath.name}" if base_url else filepath.name
         parent_doc_id = base_url
 
         full_text = f"{content_dict['title']}\n\n{content_dict['content']}"
