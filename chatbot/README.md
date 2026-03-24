@@ -1,19 +1,23 @@
-# Documentation RAG Chatbot
+# Documentation Chatbot
 
-RAG chatbot with clean separation between business logic and UI. Queries a ChromaDB vector database built by the extraction pipeline.
+Chatbot with two retrieval modes and clean separation between business logic and UI.
+
+- **RAG mode** — queries a ChromaDB vector database, with optional cross-encoder reranking
+- **Agentic mode** — searches a page index, asks the LLM to select pages, reads HTML files directly; no vector retrieval at query time
 
 ## Architecture
 
 ```
 chatbot/
 ├── core/
-│   ├── config.py           # ChatbotConfig, LLMConfig, EmbeddingConfig, RerankerConfig
-│   └── rag_chatbot.py      # DocumentationChatbot — RAG logic
+│   ├── config.py               # ChatbotConfig, LLMConfig, EmbeddingConfig, RerankerConfig, AgenticConfig
+│   ├── rag_chatbot.py          # DocumentationChatbot — RAG mode
+│   └── agentic_chatbot.py      # AgenticChatbot — agentic mode
 ├── ui/
-│   ├── terminal.py         # Interactive terminal interface
-│   └── web.py              # Gradio web interface
-├── chatbot.py              # Unified entry point
-└── config.example.json     # Example configuration
+│   ├── terminal.py             # Interactive terminal interface
+│   └── web.py                  # Gradio web interface
+├── chatbot.py                  # Unified entry point
+└── config.example.json         # Example configuration
 ```
 
 ## Configuration
@@ -27,15 +31,17 @@ cp config.example.json config.json
 | Field | Default | Description |
 |---|---|---|
 | `project_name` | `"docs"` | Must match `project_name` used during extraction |
-| `chromadb_path` | derived | Path to ChromaDB produced by the extractor |
+| `chromadb_path` | derived | Path to ChromaDB produced by the extractor (RAG mode) |
 | `llm.base_url` | `http://localhost:8080/v1` | OpenAI-compatible LLM endpoint |
 | `llm.model` | `"mistral"` | Model name |
 | `llm.api_key` | `"dummy"` | Use `"dummy"` for local models |
 | `embedding.model` | `"all-MiniLM-L6-v2"` | Must match extraction config |
 | `embedding.type` | `"local"` | `"local"` or `"api"` |
-| `reranker.model` | `"BAAI/bge-reranker-v2-m3"` | Cross-encoder reranker |
-| `k_standard` | `40` | Chunks retrieved in standard mode |
-| `k_deep_dive` | `60` | Chunks retrieved in deep dive mode |
+| `reranker` | `null` | Set to `null` to disable. Enable with `{"model": "BAAI/bge-reranker-v2-m3", "type": "local"}` |
+| `agentic` | `null` | Set to `null` to disable. Enable with `{"page_index_path": "...", ...}` (see below) |
+| `k_standard` | `40` | Chunks retrieved in standard mode (RAG) |
+| `k_deep_dive` | `60` | Chunks retrieved in deep dive mode (RAG) |
+| `top_n_after_rerank` | `15` | Docs kept after cross-encoder reranking |
 | `temperature` | `0.0` | LLM temperature |
 | `max_tokens` | `2000` | Max tokens per response |
 
@@ -43,23 +49,44 @@ Config is loaded in this priority order: CLI arguments > `config.json` > default
 
 **`embedding.model` must be identical to `extraction/config.json`** — mismatch causes wrong retrieval with no error.
 
-Remove the `reranker` block entirely to disable reranking.
+### Agentic config block
+
+```json
+"agentic": {
+  "page_index_path": "../extraction/my_project_docs_extracted/page_index.json",
+  "max_chars_per_page": 8000,
+  "max_pages_per_round": 3,
+  "max_pages_round2": 2
+}
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `page_index_path` | required | Path to `page_index.json` (relative to `chatbot/` or absolute) |
+| `max_chars_per_page` | `8000` | Max characters read per HTML page |
+| `max_pages_per_round` | `3` | Pages selected and read in Round 1 |
+| `max_pages_round2` | `2` | Additional pages read in Round 2 (if NEED_MORE_INFO triggered) |
+
+`page_index.json` is generated automatically when running `extraction/process_docs.py`.
 
 ## Usage
 
 ### Terminal Interface
 
 ```bash
-# Interactive mode
+# Interactive mode (RAG, default)
 python chatbot.py
+
+# Agentic mode
+python chatbot.py --mode agentic
 
 # Single question
 python chatbot.py --question "How do I create a mesh?"
 
-# With filters
+# With filters (RAG mode only)
 python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type user
 
-# Deep dive mode
+# Deep dive mode (RAG mode only)
 python chatbot.py --question "Explain the full workflow" --deep-dive
 ```
 
@@ -87,6 +114,8 @@ python chatbot.py --web --port 8080
 python chatbot.py --web --share
 ```
 
+The web UI includes a **Mode** toggle (RAG / Agentic). Agentic mode is only available if `config.agentic` is set.
+
 ### CLI Overrides
 
 ```bash
@@ -102,25 +131,24 @@ python chatbot.py --config /path/to/my_config.json
 Run from inside the `chatbot/` directory:
 
 ```python
-from core import ChatbotConfig, DocumentationChatbot
+from core import ChatbotConfig, DocumentationChatbot, AgenticChatbot
 
 config = ChatbotConfig.load("config.json")
+
+# --- RAG mode ---
 chatbot = DocumentationChatbot(config)
 
-# Basic query
 result = chatbot.ask("How do I create a mesh?")
 print(result["answer"])
 for source in result["sources"]:
     print(f"  - {source['title']}")
 
-# With filters
 result = chatbot.ask(
     "Show mesh generation examples",
     module="MODULE_A",
     doc_type="user"
 )
 
-# Custom parameters
 result = chatbot.ask(
     "Explain the full workflow",
     deep_dive=True,
@@ -131,7 +159,18 @@ result = chatbot.ask(
 
 stats = chatbot.get_stats()
 print(f"Modules: {stats['available_modules']}")
+
+# --- Agentic mode (requires config.agentic to be set) ---
+agentic = AgenticChatbot(config)
+
+result = agentic.ask("How do I create a mesh?")
+print(result["answer"])
+print(result["filters"]["rounds_used"])  # 1 or 2
+for source in result["sources"]:
+    print(f"  - {source['title']} ({source['module']}/{source['doc_category']})")
 ```
+
+Both `.ask()` methods return the same dict shape: `{answer, sources, filters, error}`.
 
 ## Response Styles (Web UI)
 

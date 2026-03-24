@@ -1,16 +1,17 @@
 # Documentation RAG Chatbot
 
-A Retrieval-Augmented Generation (RAG) chatbot for any project with HTML documentation (Sphinx, Doxygen). Point it at your docs, configure a few JSON fields, and get an intelligent chatbot with multi-module support, cross-encoder reranking, and dual interfaces (terminal + web).
+A chatbot for any project with HTML documentation (Sphinx, Doxygen). Point it at your docs, configure a few JSON fields, and get an intelligent chatbot with multi-module support, dual retrieval modes, and dual interfaces (terminal + web).
 
 ## Overview
 
 **Workflow:**
-1. **Extract** — parse your HTML docs into a ChromaDB vector database
-2. **Chat** — query the database through a terminal or web interface
+1. **Extract** — parse your HTML docs into a ChromaDB vector database (and a page index for agentic mode)
+2. **Chat** — query the docs through a terminal or web interface, in RAG or Agentic mode
 
 **Key Features:**
 - Works with any HTML documentation (Sphinx, Doxygen, or custom)
 - Multi-module support — query across multiple doc sets simultaneously
+- Two chatbot modes: **RAG** (vector retrieval + reranking) and **Agentic** (page-browsing pipeline)
 - Token-aware chunking (prevents embedding truncation)
 - Cross-encoder reranking (`BAAI/bge-reranker-v2-m3`) for better result ranking
 - Quality scoring (filters low-value content)
@@ -23,14 +24,16 @@ A Retrieval-Augmented Generation (RAG) chatbot for any project with HTML documen
 ```
 rag_and_chatbot/
 ├── extraction/              # Documentation processing pipeline
-│   ├── process_docs.py      # Main extractor
+│   ├── process_docs.py      # Main extractor (ChromaDB + page_index.json)
+│   ├── html_parser.py       # Shared HTML parsing utilities
 │   ├── config.example.json
 │   └── README.md
 │
-├── chatbot/                 # RAG chatbot
+├── chatbot/                 # Chatbot (RAG and Agentic modes)
 │   ├── core/
-│   │   ├── config.py        # Configuration (ChatbotConfig, LLMConfig, ...)
-│   │   └── rag_chatbot.py   # RAG logic (DocumentationChatbot)
+│   │   ├── config.py        # Configuration (ChatbotConfig, AgenticConfig, ...)
+│   │   ├── rag_chatbot.py   # RAG mode (DocumentationChatbot)
+│   │   └── agentic_chatbot.py  # Agentic mode (AgenticChatbot)
 │   ├── ui/
 │   │   ├── terminal.py      # CLI interface
 │   │   └── web.py           # Gradio web UI
@@ -80,7 +83,8 @@ python process_docs.py --config config.json
 ```
 
 **Expected output** (in `output_dir`):
-- `chromadb/` — vector database
+- `chromadb/` — vector database (used by RAG mode)
+- `page_index.json` — page catalogue (used by Agentic mode)
 - `{project_name}_docs.json` / `{project_name}_docs.jsonl` — processed chunks
 - `statistics.json` — extraction stats
 
@@ -95,10 +99,13 @@ cp config.example.json config.json
 ### 5. Run the Chatbot
 
 ```bash
-# Interactive terminal
+# Interactive terminal (RAG mode, default)
 python chatbot.py
 
-# Web interface (Gradio)
+# Agentic mode (reads HTML pages directly, no vector retrieval)
+python chatbot.py --mode agentic
+
+# Web interface (Gradio) — both modes available via UI toggle
 python chatbot.py --web
 
 # Single question
@@ -176,6 +183,13 @@ python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type 
   "reranker": {
     "model": "BAAI/bge-reranker-v2-m3",
     "type": "local"
+  },
+
+  "agentic": {
+    "page_index_path": "../extraction/my_project_docs_extracted/page_index.json",
+    "max_chars_per_page": 8000,
+    "max_pages_per_round": 3,
+    "max_pages_round2": 2
   }
 }
 ```
@@ -189,7 +203,9 @@ python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type 
 | Mistral | `https://api.mistral.ai/v1` | your key |
 | Any OpenAI-compatible | your endpoint | your key |
 
-**Reranker:** remove the `reranker` block entirely to disable reranking (faster, lower quality).
+**Reranker:** set to `null` or remove the block to disable reranking (faster, lower quality).
+
+**Agentic mode:** set `agentic` to `null` or remove the block to disable. When enabled, the web UI and `--mode agentic` CLI flag become available. Requires `page_index.json` produced by the extractor.
 
 ## Features
 
@@ -216,6 +232,9 @@ Filter: score >= 0.3
 
 ### Chatbot Pipeline
 
+Two modes are available and can be selected per-question from the web UI or via `--mode` in the CLI.
+
+**RAG mode (default):**
 ```
 Vector retrieval (large K)
         ↓
@@ -223,6 +242,28 @@ Cross-encoder reranking
         ↓
 LLM answer generation
 ```
+
+**Agentic mode:**
+```
+Keyword search on page index → candidate pages
+        ↓
+LLM selects most relevant pages (up to max_pages_per_round)
+by reading each candidate's title, module, and doc_category
+        ↓
+Selected HTML pages read + parsed (Round 1)
+        ↓
+LLM answers — appends NEED_MORE_INFO:<gap> if insufficient
+        ↓ (only if NEED_MORE_INFO)
+Keyword search using the identified gap → new candidates
+        ↓
+LLM selects more pages (up to max_pages_round2)
+        ↓
+All pages read + parsed (Round 2)
+        ↓
+LLM final answer
+```
+
+Agentic mode requires no ChromaDB at query time — it reads the original HTML files directly via the `page_index.json` catalogue produced during extraction.
 
 **Response Styles:**
 
@@ -255,24 +296,23 @@ Commands in interactive mode:
 Run from inside the `chatbot/` directory:
 
 ```python
-from core import ChatbotConfig, DocumentationChatbot
+from core import ChatbotConfig, DocumentationChatbot, AgenticChatbot
 
 config = ChatbotConfig.load("config.json")
+
+# --- RAG mode ---
 chatbot = DocumentationChatbot(config)
 
-# Basic query
 result = chatbot.ask("How do I create a mesh?")
 print(result['answer'])
 print(result['sources'])
 
-# With filters
 result = chatbot.ask(
     "Show mesh generation examples",
     module="MODULE_A",
     doc_type="user"
 )
 
-# Custom parameters
 result = chatbot.ask(
     "Explain the full workflow",
     deep_dive=True,
@@ -283,7 +323,18 @@ result = chatbot.ask(
 
 stats = chatbot.get_stats()
 print(f"Modules: {stats['available_modules']}")
+
+# --- Agentic mode (requires config.agentic to be set) ---
+agentic = AgenticChatbot(config)
+
+result = agentic.ask("How do I create a mesh?")
+print(result['answer'])
+print(result['filters']['rounds_used'])  # 1 or 2
+for source in result['sources']:
+    print(f"  - {source['title']} ({source['module']}/{source['doc_category']})")
 ```
+
+Both `.ask()` methods return the same dict shape: `{answer, sources, filters, error}`.
 
 ## Troubleshooting
 
@@ -346,3 +397,24 @@ The chatbot detects available modules automatically from the database at startup
 Any OpenAI-compatible LLM endpoint (OpenAI, Mistral, Ollama, local models).
 
 See [requirements.txt](requirements.txt) for exact versions.
+
+## RAG vs Agentic — When to Use Which
+
+| | RAG (no reranker) | RAG (+ reranker) | Agentic |
+|---|---|---|---|
+| **Retrieval** | Vector similarity search | Vector search + cross-encoder | Keyword search + LLM page selection |
+| **Context** | Chunks (sub-page fragments) | Chunks, re-scored and expanded | Full pages (up to `max_chars_per_page`) |
+| **LLM calls** | 1 | 1 | 2–4 (selection + answer, ×2 rounds) |
+| **Local inference** | Embeddings only | Embeddings + reranker (slow) | None beyond the LLM |
+| **Latency** | Fast | Can be slower than Agentic | Moderate |
+
+**Prefer RAG when:**
+- Your questions target specific facts buried inside long pages (chunk-level retrieval wins)
+- You want module/type filtering
+- You don't need the reranker and want the lowest latency
+
+**Prefer Agentic when:**
+- Your questions need the full context of a page (not just a chunk)
+- You want more transparent sourcing — the LLM explicitly chooses which pages to read
+- You don't want to maintain a ChromaDB (lighter setup for quick experiments)
+- RAG retrieval returns irrelevant chunks (e.g. poor embedding alignment with your docs)

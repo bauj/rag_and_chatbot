@@ -1,6 +1,8 @@
 # Documentation Extraction Pipeline
 
-Processes HTML documentation (Sphinx, Doxygen) into a ChromaDB vector database for use by the RAG chatbot.
+Processes HTML documentation (Sphinx, Doxygen) into:
+- a **ChromaDB vector database** for RAG mode
+- a **`page_index.json`** catalogue for Agentic mode
 
 ## Usage
 
@@ -95,11 +97,31 @@ Generated in `output_dir`:
 
 ```
 my_project_docs_extracted/
-├── chromadb/                    # Vector database (used by chatbot)
+├── chromadb/                    # Vector database (used by RAG mode)
+├── page_index.json              # Page catalogue (used by Agentic mode)
 ├── my_project_docs.json         # All chunks (JSON)
 ├── my_project_docs.jsonl        # All chunks (JSONL, one per line)
 └── statistics.json              # Per-module chunk counts and quality stats
 ```
+
+### page_index.json
+
+A flat list of all processed HTML pages with metadata used by `AgenticChatbot` to search and select pages at query time:
+
+```json
+[
+  {
+    "filename": "classModelAPI__Feature.html",
+    "filepath": "/abs/path/to/module_a/html/classModelAPI__Feature.html",
+    "title": "ModelAPI_Feature Class Reference",
+    "module": "MODULE_A",
+    "doc_category": "dev"
+  },
+  ...
+]
+```
+
+Point `chatbot/config.json → agentic.page_index_path` at this file to enable Agentic mode.
 
 ## Pipeline
 
@@ -108,15 +130,18 @@ HTML files (Doxygen + Sphinx)
         ↓
 Content extraction (format-specific parsers, navigation removed)
         ↓
+Section splitting (h2/h3 boundaries → section_id + section_text stored in metadata)
+        ↓
 Code block extraction (<pre>/<code> tags → stored in metadata)
         ↓
 Quality scoring (filter score < min_score)
         ↓
 Chunking (token-aware or character-based)
         ↓
-Metadata enrichment (module, doc_category, parent_doc_id, position, quality_score, has_code)
+Metadata enrichment (module, doc_category, parent_doc_id, section_id, position, quality_score, has_code)
         ↓
-ChromaDB storage (cosine similarity, persistent)
+ChromaDB storage (cosine similarity, persistent)   ← RAG mode
+page_index.json (flat page catalogue)              ← Agentic mode
 ```
 
 ## Chunk Metadata
@@ -130,6 +155,8 @@ Each chunk stored in ChromaDB includes:
 | `doc_type` | Detected type | `"class"`, `"tutorial"`, `"guide"` |
 | `title` | Document title | `"FeatureAPI Class Reference"` |
 | `parent_doc_id` | Source document ID | `"MODULE_A:dev:FeatureAPI"` |
+| `section_id` | Section anchor within the page | `"classFeatureAPI#createFeature"` |
+| `section_text` | Full section text (up to 5000 chars, for reranker expansion) | `"createFeature(...)..."` |
 | `chunk_position` | Position within parent | `"3/7"` |
 | `quality_score` | Content quality (0–1) | `0.85` |
 | `has_code` | Contains code blocks | `true` |
