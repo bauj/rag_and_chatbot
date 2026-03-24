@@ -282,12 +282,15 @@ Agentic mode requires no ChromaDB at query time — it reads the original HTML f
 
 ```
 Commands in interactive mode:
-  module:MODULE_A   - Filter by module
-  type:dev          - Filter developer docs only
-  type:user         - Filter user docs only
-  deep              - Toggle deep dive mode
+  mode:rag          - Switch to RAG mode (vector retrieval)
+  mode:agentic      - Switch to Agentic mode (reads HTML pages directly)
+  module:MODULE_A   - Filter by module (RAG only)
+  type:dev          - Filter developer docs only (RAG only)
+  type:user         - Filter user docs only (RAG only)
+  deep              - Toggle Deep Dive mode (RAG only)
+  reranker          - Toggle cross-encoder reranker on/off (RAG only)
   clear             - Clear all filters
-  stats             - Show database statistics
+  stats             - Show database statistics (RAG only)
   exit              - Exit
 ```
 
