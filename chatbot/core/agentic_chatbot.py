@@ -135,18 +135,19 @@ class AgenticChatbot:
             return candidates[:max_pages]
         return result
 
-    def _read_pages(self, entries: List[dict]) -> List[dict]:
+    def _read_pages(self, entries: List[dict], max_chars: Optional[int] = None) -> List[dict]:
         """
         Read and parse each page. Returns entries enriched with 'content' key.
         Skips pages that can't be read (FileNotFoundError) with a warning.
         """
+        limit = max_chars if max_chars is not None else self._agentic_cfg.max_chars_per_page
         result = []
         for entry in entries:
             try:
                 content = parse_page(
                     entry['filepath'],
                     entry['doc_category'],
-                    max_chars=self._agentic_cfg.max_chars_per_page,
+                    max_chars=limit,
                 )
                 result.append({**entry, 'content': content})
             except FileNotFoundError:
@@ -203,15 +204,30 @@ class AgenticChatbot:
             lines = lines[:-1]
         return "\n".join(lines).rstrip()
 
-    def ask(self, question: str, **kwargs) -> Dict[str, Any]:
+    def ask(self, question: str,
+            max_chars_per_page: Optional[int] = None,
+            max_pages_per_round: Optional[int] = None,
+            max_pages_round2: Optional[int] = None,
+            max_tokens: Optional[int] = None,
+            **kwargs) -> Dict[str, Any]:
         """
         Answer a question by searching the page index and reading HTML files.
 
-        kwargs are accepted but ignored (for interface compatibility with DocumentationChatbot).
+        Args:
+            max_chars_per_page: Override config value at runtime.
+            max_pages_per_round: Override config value at runtime.
+            max_pages_round2: Override config value at runtime.
+            max_tokens: Override LLM max_tokens at runtime (not yet wired; reserved).
+            **kwargs: Accepted for interface compatibility; ignored.
 
         Returns:
             {answer, sources, filters, error}
         """
+        cfg = self._agentic_cfg
+        _max_chars = max_chars_per_page if max_chars_per_page is not None else cfg.max_chars_per_page
+        _max_pages_r1 = max_pages_per_round if max_pages_per_round is not None else cfg.max_pages_per_round
+        _max_pages_r2 = max_pages_round2 if max_pages_round2 is not None else cfg.max_pages_round2
+
         def _error_response(err):
             return {
                 "answer": None,
@@ -228,10 +244,8 @@ class AgenticChatbot:
         if not candidates:
             return _error_response("No relevant pages found for query.")
 
-        selected = self._select_pages(
-            candidates, question, self._agentic_cfg.max_pages_per_round
-        )
-        read_entries = self._read_pages(selected)
+        selected = self._select_pages(candidates, question, _max_pages_r1)
+        read_entries = self._read_pages(selected, max_chars=_max_chars)
         context = self._build_context(read_entries)
         read_filepaths = {e['filepath'] for e in read_entries}
 
@@ -249,10 +263,8 @@ class AgenticChatbot:
                 self._page_index, missing_info, exclude_filepaths=read_filepaths
             )
             if r2_candidates:
-                r2_selected = self._select_pages(
-                    r2_candidates, missing_info, self._agentic_cfg.max_pages_round2
-                )
-                r2_read = self._read_pages(r2_selected)
+                r2_selected = self._select_pages(r2_candidates, missing_info, _max_pages_r2)
+                r2_read = self._read_pages(r2_selected, max_chars=_max_chars)
                 read_entries.extend(r2_read)
                 context2 = self._build_context(read_entries)
                 try:

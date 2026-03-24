@@ -16,30 +16,32 @@ except ImportError:
 class TerminalUI:
     """Interactive terminal interface for documentation chatbot"""
 
-    def __init__(self, chatbot: DocumentationChatbot):
-        """
-        Initialize terminal UI
-
-        Args:
-            chatbot: DocumentationChatbot instance
-        """
+    def __init__(self, chatbot: DocumentationChatbot, agentic_chatbot=None):
         self.chatbot = chatbot
+        self.agentic_chatbot = agentic_chatbot
 
     def _print_header(self):
         """Print welcome header"""
         project = self.chatbot.config.project_name
+        has_agentic = self.agentic_chatbot is not None
+        has_reranker = self.chatbot.reranker is not None
         print("=" * 70)
         print(f"{project} Documentation Chatbot")
         print("=" * 70)
         print(f"Modules: {', '.join(self.chatbot.available_modules)}")
         print("\nCommands:")
+        if has_agentic:
+            print("  mode:rag          - Switch to RAG mode (vector retrieval)")
+            print("  mode:agentic      - Switch to Agentic mode (reads HTML pages directly)")
         for mod in self.chatbot.available_modules:
-            print(f"  module:{mod:<12} - Filter by {mod}")
-        print("  type:dev          - Filter developer docs only")
-        print("  type:user         - Filter user docs only")
-        print("  deep              - Toggle DEEP DIVE mode (comprehensive analysis)")
+            print(f"  module:{mod:<12} - Filter by {mod} (RAG only)")
+        print("  type:dev          - Filter developer docs only (RAG only)")
+        print("  type:user         - Filter user docs only (RAG only)")
+        print("  deep              - Toggle Deep Dive mode (RAG only)")
+        if has_reranker:
+            print("  reranker          - Toggle cross-encoder reranker on/off (RAG only)")
         print("  clear             - Clear all filters")
-        print("  stats             - Show statistics")
+        print("  stats             - Show statistics (RAG only)")
         print("  exit/quit         - Exit\n")
 
     def _print_answer(self, result: dict):
@@ -66,14 +68,15 @@ class TerminalUI:
                 filter_strs.append(f"type={filters['doc_type']}")
             if filters.get('deep_dive'):
                 filter_strs.append("DEEP DIVE")
-            print(f"Filters: Filters: {', '.join(filter_strs)}")
+            if filter_strs:
+                print(f"Filters: {', '.join(filter_strs)}")
 
         # Print answer
         print(f"\nAnswer:\n{answer}\n")
 
         # Show sources
         if sources:
-            print("Sources: Sources:")
+            print("Sources:")
             modules_used = set()
             doc_types_used = set()
 
@@ -119,87 +122,126 @@ class TerminalUI:
         """Run interactive chat session"""
         self._print_header()
 
+        current_mode = "rag"        # "rag" or "agentic"
         current_module = None
         current_type = None
         deep_dive_mode = False
+        reranker_enabled = self.chatbot.reranker is not None
 
         while True:
             try:
-                # Build prompt with filters
+                # Build prompt
                 prompt_parts = ["You"]
-                if current_module:
-                    prompt_parts.append(f"[{current_module}]")
-                if current_type:
-                    prompt_parts.append(f"[{current_type}]")
-                if deep_dive_mode:
-                    prompt_parts.append("[DEEP DIVE]")
-                if not current_module and not current_type and not deep_dive_mode:
-                    prompt_parts.append("[all]")
+                if current_mode == "agentic":
+                    prompt_parts.append("[AGENTIC]")
+                else:
+                    if current_module:
+                        prompt_parts.append(f"[{current_module}]")
+                    if current_type:
+                        prompt_parts.append(f"[{current_type}]")
+                    if deep_dive_mode:
+                        prompt_parts.append("[DEEP DIVE]")
+                    if not reranker_enabled:
+                        prompt_parts.append("[no reranker]")
+                    if not current_module and not current_type and not deep_dive_mode:
+                        prompt_parts.append("[all]")
 
                 prompt = " ".join(prompt_parts) + ": "
                 user_input = input(prompt).strip()
 
                 # Handle exit
                 if user_input.lower() in ['exit', 'quit', 'q']:
-                    print("\nGoodbye !")
+                    print("\nGoodbye!")
                     break
 
                 # Handle empty
                 if not user_input:
                     continue
 
-                # Handle stats
-                if user_input.lower() == 'stats':
-                    self._print_stats()
-                    continue
-
-                # Handle deep dive toggle
-                if user_input.lower() == 'deep':
-                    deep_dive_mode = not deep_dive_mode
-                    status = "enabled" if deep_dive_mode else "disabled"
-                    print(f" DEEP DIVE mode {status}\n")
-                    continue
-
-                # Handle clear
-                if user_input.lower() == 'clear':
-                    current_module = None
-                    current_type = None
-                    deep_dive_mode = False
-                    print("OK: Cleared all filters\n")
-                    continue
-
-                # Handle module filter
-                if user_input.lower().startswith('module:'):
-                    module = user_input.split(':', 1)[1].strip().upper()
-                    if module in self.chatbot.available_modules:
-                        current_module = module
-                        print(f"OK: Module filter: {module}\n")
+                # Handle mode switch
+                if user_input.lower().startswith('mode:'):
+                    requested = user_input.split(':', 1)[1].strip().lower()
+                    if requested == 'agentic':
+                        if self.agentic_chatbot is None:
+                            print("Warning: Agentic mode is not configured (add 'agentic' block to config.json)\n")
+                        else:
+                            current_mode = "agentic"
+                            print("OK: Switched to Agentic mode\n")
+                    elif requested == 'rag':
+                        current_mode = "rag"
+                        print("OK: Switched to RAG mode\n")
                     else:
-                        print(f"Warning: Unknown module: {module}")
-                        print(f"Available: {', '.join(self.chatbot.available_modules)}\n")
+                        print("Warning: Unknown mode (use: rag or agentic)\n")
                     continue
 
-                # Handle type filter
-                if user_input.lower().startswith('type:'):
-                    dtype = user_input.split(':', 1)[1].strip().lower()
-                    if dtype in ['dev', 'user']:
-                        current_type = dtype
-                        print(f"OK: Doc type filter: {dtype}\n")
+                # Handle reranker toggle (RAG only)
+                if user_input.lower() == 'reranker':
+                    if self.chatbot.reranker is None:
+                        print("Warning: No reranker model is configured\n")
                     else:
-                        print("Warning: Unknown type (use: dev or user)\n")
+                        reranker_enabled = not reranker_enabled
+                        status = "enabled" if reranker_enabled else "disabled"
+                        print(f"OK: Reranker {status}\n")
                     continue
+
+                # RAG-only commands
+                if current_mode == "rag":
+                    # Handle stats
+                    if user_input.lower() == 'stats':
+                        self._print_stats()
+                        continue
+
+                    # Handle deep dive toggle
+                    if user_input.lower() == 'deep':
+                        deep_dive_mode = not deep_dive_mode
+                        status = "enabled" if deep_dive_mode else "disabled"
+                        print(f"OK: Deep Dive mode {status}\n")
+                        continue
+
+                    # Handle clear
+                    if user_input.lower() == 'clear':
+                        current_module = None
+                        current_type = None
+                        deep_dive_mode = False
+                        print("OK: Cleared all filters\n")
+                        continue
+
+                    # Handle module filter
+                    if user_input.lower().startswith('module:'):
+                        module = user_input.split(':', 1)[1].strip().upper()
+                        if module in self.chatbot.available_modules:
+                            current_module = module
+                            print(f"OK: Module filter: {module}\n")
+                        else:
+                            print(f"Warning: Unknown module: {module}")
+                            print(f"Available: {', '.join(self.chatbot.available_modules)}\n")
+                        continue
+
+                    # Handle type filter
+                    if user_input.lower().startswith('type:'):
+                        dtype = user_input.split(':', 1)[1].strip().lower()
+                        if dtype in ['dev', 'user']:
+                            current_type = dtype
+                            print(f"OK: Doc type filter: {dtype}\n")
+                        else:
+                            print("Warning: Unknown type (use: dev or user)\n")
+                        continue
 
                 # Ask question
-                result = self.chatbot.ask(
-                    user_input,
-                    module=current_module,
-                    doc_type=current_type,
-                    deep_dive=deep_dive_mode
-                )
+                if current_mode == "agentic" and self.agentic_chatbot is not None:
+                    result = self.agentic_chatbot.ask(user_input)
+                else:
+                    result = self.chatbot.ask(
+                        user_input,
+                        module=current_module,
+                        doc_type=current_type,
+                        deep_dive=deep_dive_mode,
+                        reranker_enabled=reranker_enabled,
+                    )
                 self._print_answer(result)
 
             except KeyboardInterrupt:
-                print("\n\nGoodbye! Goodbye!")
+                print("\n\nGoodbye!")
                 break
             except Exception as e:
                 print(f"\nError: {e}\n")

@@ -150,24 +150,28 @@ class DocumentationChatbot:
         print(f"DEBUG : load reranker ({model}) ...")
         return CrossEncoder(model)
 
-    def _rerank_and_expand(self, query: str, docs: List) -> List:
+    def _rerank_and_expand(self, query: str, docs: List,
+                           reranker_enabled: bool = True,
+                           top_n: Optional[int] = None) -> List:
         """
         Rerank docs with cross-encoder, expand to section context, deduplicate.
 
-        If no reranker is configured, returns docs unchanged.
+        If no reranker is configured or reranker_enabled is False, returns docs unchanged.
         Otherwise:
           1. Scores all (query, page_content) pairs.
           2. Sorts by score descending.
           3. Deduplicates by section_id (keeps highest-scored chunk per section).
           4. Expands each surviving doc to its full section_text if available.
-          5. Returns at most config.top_n_after_rerank docs.
+          5. Returns at most top_n (or config.top_n_after_rerank) docs.
 
         Note: docs with an empty section_id (e.g. old ChromaDB databases without
         section metadata) bypass deduplication — all such docs pass through. This
         is intentional backward-compatibility behaviour.
         """
-        if self.reranker is None:
+        if self.reranker is None or not reranker_enabled:
             return docs
+
+        limit = top_n if top_n is not None else self.config.top_n_after_rerank
 
         pairs = [(query, doc.page_content) for doc in docs]
         scores = self.reranker.predict(pairs)
@@ -178,7 +182,7 @@ class DocumentationChatbot:
         seen_sections: set = set()
 
         for _score, doc in scored:
-            if len(result) >= self.config.top_n_after_rerank:
+            if len(result) >= limit:
                 break
             section_id = doc.metadata.get('section_id', '')
             if section_id and section_id in seen_sections:
@@ -231,7 +235,9 @@ Answer (based strictly on the documentation above):"""
                      deep_dive: bool = False,
                      k: Optional[int] = None,
                      temperature: Optional[float] = None,
-                     max_tokens: Optional[int] = None):
+                     max_tokens: Optional[int] = None,
+                     reranker_enabled: bool = True,
+                     top_n: Optional[int] = None):
         """
         Create RAG chain with optional filtering
 
@@ -321,7 +327,11 @@ Answer (based strictly on the documentation above):"""
             # them for source attribution without a second retrieval + reranking pass.
             def retrieve_and_format(question: str) -> str:
                 raw_docs = retriever.invoke(question)
-                reranked = self._rerank_and_expand(question, raw_docs)
+                reranked = self._rerank_and_expand(
+                    question, raw_docs,
+                    reranker_enabled=reranker_enabled,
+                    top_n=top_n,
+                )
                 self._last_reranked_docs = reranked  # cache for source attribution
                 return "\n\n".join(doc.page_content for doc in reranked)
 
@@ -344,7 +354,9 @@ Answer (based strictly on the documentation above):"""
             deep_dive: bool = False,
             k: Optional[int] = None,
             temperature: Optional[float] = None,
-            max_tokens: Optional[int] = None) -> Dict[str, Any]:
+            max_tokens: Optional[int] = None,
+            reranker_enabled: bool = True,
+            top_n: Optional[int] = None) -> Dict[str, Any]:
         """
         Ask a question and get an answer with sources
 
@@ -394,7 +406,8 @@ Answer (based strictly on the documentation above):"""
             # Create chain and get answer (pass runtime overrides)
             chain, retriever = self._create_chain(
                 module, doc_type, deep_dive,
-                k=k, temperature=temperature, max_tokens=max_tokens
+                k=k, temperature=temperature, max_tokens=max_tokens,
+                reranker_enabled=reranker_enabled, top_n=top_n,
             )
             answer = chain.invoke(question)
             # Reuse docs already retrieved+reranked inside the standard chain.
@@ -404,7 +417,11 @@ Answer (based strictly on the documentation above):"""
                 source_docs = self._last_reranked_docs
             else:
                 raw_source_docs = retriever.invoke(question)
-                source_docs = self._rerank_and_expand(question, raw_source_docs)
+                source_docs = self._rerank_and_expand(
+                    question, raw_source_docs,
+                    reranker_enabled=reranker_enabled,
+                    top_n=top_n,
+                )
 
             # Format sources
             sources = []

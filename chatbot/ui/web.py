@@ -71,18 +71,31 @@ class WebUI:
         self,
         message: str,
         history: List,
+        mode: str,
+        # RAG params
         module_filter: str,
         doc_type_filter: str,
         response_style: str,
         deep_dive: bool,
         search_depth: int,
+        reranker_enabled: bool,
+        top_n: int,
         answer_length: int,
-        mode: str = "RAG",          # "RAG" or "Agentic"
+        # Agentic params
+        max_chars_per_page: int,
+        max_pages_per_round: int,
+        max_pages_round2: int,
     ) -> str:
         """Handle incoming chat message."""
         if mode == "Agentic" and self.agentic_chatbot is not None:
             try:
-                result = self.agentic_chatbot.ask(message)
+                result = self.agentic_chatbot.ask(
+                    message,
+                    max_chars_per_page=max_chars_per_page,
+                    max_pages_per_round=max_pages_per_round,
+                    max_pages_round2=max_pages_round2,
+                    max_tokens=answer_length,
+                )
                 return self._format_answer_markdown(result)
             except Exception as e:
                 return f"**Error:** {str(e)}"
@@ -103,6 +116,8 @@ class WebUI:
                 k=search_depth,
                 temperature=temperature,
                 max_tokens=answer_length,
+                reranker_enabled=reranker_enabled,
+                top_n=top_n,
             )
 
             return self._format_answer_markdown(result)
@@ -128,6 +143,10 @@ class WebUI:
         k_default = self.chatbot.config.k_standard
 
         # Build interface
+        has_agentic = self.agentic_chatbot is not None
+        has_reranker = self.chatbot.reranker is not None
+        agentic_cfg = self.agentic_chatbot._agentic_cfg if has_agentic else None
+
         with gr.Blocks(title=f"{project} Documentation Chatbot") as demo:
             with gr.Row():
                 with gr.Column(scale=10):
@@ -137,42 +156,114 @@ class WebUI:
 
             with gr.Row():
                 with gr.Column(scale=1, min_width=240):
-                    gr.Markdown("### Filters")
-                    module_filter = gr.Dropdown(
-                        choices=["All"] + self.chatbot.available_modules,
-                        value="All",
-                        label="Module",
-                        info="Restrict search to one module, or keep All to search across all.",
-                    )
-                    doc_type_filter = gr.Dropdown(
-                        choices=["All", "Dev", "User"],
-                        value="All",
-                        label="Doc Type",
-                        info="Dev = API reference & classes · User = tutorials & guides",
+
+                    # ── Mode toggle (only shown when agentic is available) ──────────
+                    mode_radio = gr.Radio(
+                        choices=["RAG", "Agentic"],
+                        value="RAG",
+                        label="Mode",
+                        info="RAG: vector retrieval · Agentic: reads HTML pages directly",
+                        visible=has_agentic,
                     )
 
+                    # ── RAG params ────────────────────────────────────────────────
+                    with gr.Column(visible=True) as rag_col:
+                        gr.Markdown("### Filters")
+                        module_filter = gr.Dropdown(
+                            choices=["All"] + self.chatbot.available_modules,
+                            value="All",
+                            label="Module",
+                            info="Restrict search to one module, or keep All to search across all.",
+                        )
+                        doc_type_filter = gr.Dropdown(
+                            choices=["All", "Dev", "User"],
+                            value="All",
+                            label="Doc Type",
+                            info="Dev = API reference & classes · User = tutorials & guides",
+                        )
+
+                        gr.Markdown("---")
+                        gr.Markdown("### Retrieval")
+                        search_depth = gr.Slider(
+                            minimum=10,
+                            maximum=80,
+                            value=k_default,
+                            step=5,
+                            label="Search depth (chunks)",
+                            info="How many documentation chunks to retrieve before ranking. More = broader context, slower.",
+                        )
+
+                        gr.Markdown("---")
+                        gr.Markdown("### Reranker")
+                        reranker_enabled = gr.Checkbox(
+                            label="Enable reranker",
+                            value=has_reranker,
+                            interactive=has_reranker,
+                            info="Cross-encoder reranking. Requires the reranker model to be configured." if not has_reranker else "Cross-encoder reranking (BAAI/bge-reranker-v2-m3).",
+                        )
+                        with gr.Column(visible=has_reranker) as top_n_col:
+                            top_n = gr.Slider(
+                                minimum=1,
+                                maximum=40,
+                                value=self.chatbot.config.top_n_after_rerank,
+                                step=1,
+                                label="Top-N after rerank",
+                                info="Docs kept after cross-encoder reranking.",
+                            )
+
+                        gr.Markdown("---")
+                        gr.Markdown("### Response")
+                        response_style = gr.Dropdown(
+                            choices=["Precise (Recommended)", "Balanced", "Comprehensive"],
+                            value="Precise (Recommended)",
+                            label="Style",
+                            info="Precise: temp=0.0 · Balanced: temp=0.2 · Comprehensive: temp=0.1",
+                        )
+                        deep_dive = gr.Checkbox(
+                            label="Deep Dive mode",
+                            value=False,
+                            info="Multi-step analysis: summaries per batch then a final synthesis. Slower but more thorough.",
+                        )
+
+                    # ── Agentic params ────────────────────────────────────────────
+                    with gr.Column(visible=False) as agentic_col:
+                        gr.Markdown("### Page index")
+                        gr.Textbox(
+                            value=agentic_cfg.page_index_path if agentic_cfg else "",
+                            label="page_index.json",
+                            interactive=False,
+                            info="Configured in config.json → agentic.page_index_path",
+                        )
+
+                        gr.Markdown("---")
+                        gr.Markdown("### Agentic params")
+                        max_chars_per_page = gr.Slider(
+                            minimum=1000,
+                            maximum=20000,
+                            value=agentic_cfg.max_chars_per_page if agentic_cfg else 8000,
+                            step=1000,
+                            label="Max chars per page",
+                            info="Characters read per HTML page. More = richer context, higher token cost.",
+                        )
+                        max_pages_per_round = gr.Slider(
+                            minimum=1,
+                            maximum=10,
+                            value=agentic_cfg.max_pages_per_round if agentic_cfg else 3,
+                            step=1,
+                            label="Pages per round 1",
+                            info="Pages selected and read in the first retrieval round.",
+                        )
+                        max_pages_round2 = gr.Slider(
+                            minimum=1,
+                            maximum=10,
+                            value=agentic_cfg.max_pages_round2 if agentic_cfg else 2,
+                            step=1,
+                            label="Pages per round 2",
+                            info="Additional pages read if NEED_MORE_INFO is triggered.",
+                        )
+
+                    # ── Shared ────────────────────────────────────────────────────
                     gr.Markdown("---")
-                    gr.Markdown("### Response")
-
-                    response_style = gr.Dropdown(
-                        choices=["Precise (Recommended)", "Balanced", "Comprehensive"],
-                        value="Precise (Recommended)",
-                        label="Style",
-                        info="Precise: temp=0.0 · Balanced: temp=0.2 · Comprehensive: temp=0.1",
-                    )
-                    deep_dive = gr.Checkbox(
-                        label="Deep Dive mode",
-                        value=False,
-                        info="Multi-step analysis: summaries per batch then a final synthesis. Slower but more thorough.",
-                    )
-                    search_depth = gr.Slider(
-                        minimum=10,
-                        maximum=80,
-                        value=k_default,
-                        step=5,
-                        label="Search depth (chunks)",
-                        info="How many documentation chunks to retrieve before ranking. More = broader context, slower.",
-                    )
                     answer_length = gr.Slider(
                         minimum=500,
                         maximum=4000,
@@ -180,31 +271,48 @@ class WebUI:
                         step=500,
                         label="Max answer length (tokens)",
                     )
-                    mode_radio = gr.Radio(
-                        choices=["RAG", "Agentic"],
-                        value="RAG",
-                        label="Mode",
-                        info="RAG: vector retrieval · Agentic: reads HTML pages directly",
-                        visible=self.agentic_chatbot is not None,
-                    )
 
                 with gr.Column(scale=3):
                     chatbot_interface = gr.ChatInterface(
                         fn=self._handle_message,
                         additional_inputs=[
+                            mode_radio,
                             module_filter,
                             doc_type_filter,
                             response_style,
                             deep_dive,
                             search_depth,
+                            reranker_enabled,
+                            top_n,
                             answer_length,
-                            mode_radio,
+                            max_chars_per_page,
+                            max_pages_per_round,
+                            max_pages_round2,
                         ],
                         examples=examples,
                         title=None,
                         description=None,
-                        chatbot=gr.Chatbot(height=1200),
+                        chatbot=gr.Chatbot(height=800),
                     )
+
+            # ── Event handlers ────────────────────────────────────────────────────
+            if has_agentic:
+                def _on_mode_change(mode):
+                    is_rag = mode == "RAG"
+                    return gr.update(visible=is_rag), gr.update(visible=not is_rag)
+
+                mode_radio.change(
+                    fn=_on_mode_change,
+                    inputs=[mode_radio],
+                    outputs=[rag_col, agentic_col],
+                )
+
+            if has_reranker:
+                reranker_enabled.change(
+                    fn=lambda enabled: gr.update(visible=enabled),
+                    inputs=[reranker_enabled],
+                    outputs=[top_n_col],
+                )
 
             js_toggle_light_dark = """
                 () => {

@@ -136,7 +136,7 @@ Examples:
 
     # Initialize agentic chatbot if requested
     agentic_chatbot = None
-    if args.mode == 'agentic' or (args.web and config.agentic is not None):
+    if args.mode == 'agentic' or config.agentic is not None:
         if config.agentic is None:
             print("\nError: --mode agentic requires an 'agentic' block in config.json")
             sys.exit(1)
@@ -162,7 +162,7 @@ Examples:
     else:
         from ui import TerminalUI
         # Terminal interface
-        terminal_ui = TerminalUI(chatbot)
+        terminal_ui = TerminalUI(chatbot, agentic_chatbot=agentic_chatbot)
 
         if args.question:
             if args.mode == 'agentic':
