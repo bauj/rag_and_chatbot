@@ -4,31 +4,31 @@
 # PyTorch (CPU-only to avoid large CUDA packages)
 # ============================================
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch>=2.0.0                    # CPU-only version (much smaller than CUDA)
+torch==2.0.0                    # CPU-only version (much smaller than CUDA)
 
 # ============================================
 # EXTRACTION (process_multi_module_salome_docs.py)
 # ============================================
-beautifulsoup4>=4.12.0          # HTML parsing
-chromadb>=0.4.0                 # Vector database
-transformers>=4.30.0            # Token-aware chunking (optional but recommended)
+beautifulsoup4==4.12.0          # HTML parsing
+chromadb==0.4.0                 # Vector database
+transformers==4.30.0            # Token-aware chunking (optional but recommended)
 
 # ============================================
 # CHATBOT CORE (core/salome_chatbot.py)
 # ============================================
 # LangChain components
-langchain-core>=0.1.0           # Core abstractions (prompts, runnables)
-langchain-chroma>=0.1.0         # ChromaDB integration
-langchain-openai>=0.0.5         # OpenAI-compatible API (for LiteLLM)
-langchain-huggingface>=0.0.1    # HuggingFace embeddings (replaces langchain-community)
+langchain-core==0.1.0           # Core abstractions (prompts, runnables)
+langchain-chroma==0.1.0         # ChromaDB integration
+langchain-openai==0.0.5         # OpenAI-compatible API (for LiteLLM)
+langchain-huggingface==0.0.1    # HuggingFace embeddings (replaces langchain-community)
 
 # Embeddings
-sentence-transformers>=2.2.0    # Embedding models (all-MiniLM-L6-v2)
+sentence-transformers==2.2.0    # Embedding models (all-MiniLM-L6-v2)
 
 # ============================================
 # WEB UI (ui/web.py) - OPTIONAL
 # ============================================
-gradio>=5.0.0                   # Web interface (optional, for --web mode)
+gradio==5.0.0                   # Web interface (optional, for --web mode)
 
 # ============================================
 # NOTES
