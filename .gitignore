@@ -43,3 +43,6 @@ docs/
 # Personal configuration files (might contain secrets)
 extraction/config.json
 chatbot/config.json
+evaluator/config.json
+evaluator/dataset.json
+evaluator/evaluation_results.json

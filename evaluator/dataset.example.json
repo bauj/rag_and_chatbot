@@ -1,0 +1,14 @@
+[
+  {
+    "inputs": {"question": "Question 1 ?"},
+    "outputs": {"answer": "Expected Answer 1."}
+  },
+  {
+    "inputs": {"question": "Question 2 ?"},
+    "outputs": {"answer": "Expected Answer 2."}
+  },
+  {
+    "inputs": {"question": "Question 3 ?"},
+    "outputs": {"answer": "Expected Answer 3."}
+  }
+]

@@ -5,6 +5,7 @@ Routes to terminal or web interface based on CLI arguments
 """
 
 import sys
+import json
 import argparse
 from pathlib import Path
 
@@ -56,6 +57,11 @@ Examples:
     parser.add_argument(
         '--question',
         help='Ask single question and exit (terminal only)'
+    )
+    parser.add_argument(
+        '--json-output',
+        action='store_true',
+        help='Return answer and sources as JSON (for evaluation mode)'
     )
     parser.add_argument(
         '--module',
@@ -167,15 +173,30 @@ Examples:
         if args.question:
             if args.mode == 'agentic':
                 result = agentic_chatbot.ask(args.question)
-                print(result['answer'] or result['error'])
+                if args.json_output:
+                    print(json.dumps(result, ensure_ascii=False, indent=2))
+                else:
+                    print(result['answer'] or result['error'])
             else:
                 # Single question mode
-                terminal_ui.run_single_question(
-                    args.question,
-                    module=args.module,
-                    doc_type=args.doc_type,
-                    deep_dive=args.deep_dive
-                )
+                if args.json_output:
+                    # JSON output for evaluation
+                    result = chatbot.ask(
+                        args.question,
+                        module=args.module,
+                        doc_type=args.doc_type,
+                        deep_dive=args.deep_dive
+                    )
+                    print(json.dumps(result, ensure_ascii=False, indent=2))
+                else:
+                    # Normal terminal output
+                    terminal_ui.run_single_question(
+                        args.question,
+                        module=args.module,
+                        doc_type=args.doc_type,
+                        deep_dive=args.deep_dive
+                    )
+
         else:
             # Interactive mode
             terminal_ui.run_interactive()
