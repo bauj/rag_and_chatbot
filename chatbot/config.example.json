@@ -25,7 +25,7 @@
   "_comment_reranker": "Set to null to disable. Enable with: {\"model\": \"BAAI/bge-reranker-v2-m3\", \"type\": \"local\"}. Requires sentence-transformers.",
 
   "agentic": null,
-  "_comment_agentic": "Set to null to disable. Enable with: {\"page_index_path\": \"../extraction/shaper_docs_extracted/page_index.json\", \"max_chars_per_page\": 8000, \"max_pages_per_round\": 3, \"max_pages_round2\": 2}. Requires re-running extraction to generate page_index.json.",
+  "_comment_agentic": "Set to null to disable. Enable with: {\"page_index_path\": \"../extraction/my_project_docs_extracted/page_index.json\", \"max_chars_per_page\": 8000, \"max_pages_per_round\": 3, \"max_pages_round2\": 2}. Requires re-running extraction to generate page_index.json.",
 
   "k_standard": 40,
   "k_deep_dive": 60,
