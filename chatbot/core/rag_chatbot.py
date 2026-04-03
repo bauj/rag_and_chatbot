@@ -212,6 +212,7 @@ Available modules:
 Each module has:
 - Dev docs: API reference (classes, methods, namespaces)
 - User docs: Tutorials, guides, usage examples
+- Methodology docs: Conceptual explanations, theory
 
 CRITICAL INSTRUCTIONS:
 1. You MUST base your answer ONLY on the documentation provided below
@@ -243,7 +244,7 @@ Answer (based strictly on the documentation above):"""
 
         Args:
             module_filter: Filter by module (or None)
-            doc_type_filter: Filter by doc type (dev, user, or None)
+            doc_type_filter: Filter by doc type (dev, user, methodology, or None)
             deep_dive: Use deep dive mode (more docs + summarization)
             k: Override number of chunks to retrieve (optional)
             temperature: Override LLM temperature (optional)
@@ -363,7 +364,7 @@ Answer (based strictly on the documentation above):"""
         Args:
             question: The question to ask
             module: Optional module filter
-            doc_type: Optional doc type filter (dev, user)
+            doc_type: Optional doc type filter (dev, user, methodology)
             deep_dive: Use deep dive mode for comprehensive analysis
             k: Override number of chunks to retrieve (higher priority than config/deep_dive)
             temperature: Override LLM temperature (higher priority than config)
@@ -385,12 +386,12 @@ Answer (based strictly on the documentation above):"""
                 "error": f"Unknown module: {module}. Available: {', '.join(self.available_modules)}"
             }
 
-        if doc_type and doc_type.lower() not in ['dev', 'user', 'all']:
+        if doc_type and doc_type.lower() not in ['dev', 'user', 'methodology', 'all']:
             return {
                 "answer": None,
                 "sources": [],
                 "filters": {},
-                "error": f"Unknown doc type: {doc_type}. Available: dev, user"
+                "error": f"Unknown doc type: {doc_type}. Available: dev, user, methodology"
             }
 
         # Track applied filters
@@ -471,8 +472,8 @@ Answer (based strictly on the documentation above):"""
                 module = meta.get('module', 'Unknown')
                 doc_cat = meta.get('doc_category', 'Unknown')
                 if module not in stats:
-                    stats[module] = {'dev': 0, 'user': 0, 'total': 0}
-                if doc_cat in ['dev', 'user']:
+                    stats[module] = {'dev': 0, 'user': 0, 'methodology': 0, 'total': 0}
+                if doc_cat in ['dev', 'user', 'methodology']:
                     stats[module][doc_cat] += 1
                 stats[module]['total'] += 1
             total_chunks += len(batch['metadatas'])

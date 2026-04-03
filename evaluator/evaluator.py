@@ -2,6 +2,7 @@ import subprocess
 import sys
 import json
 import os
+import re
 from pathlib import Path
 
 from typing_extensions import Annotated, TypedDict
@@ -105,46 +106,57 @@ class MistralLLM:
         return self
 
 
-def _extract_bool_from_grade(grade: dict, keys: list) -> bool:
-    """Try multiple possible keys in the judge output to determine boolean score."""
+def _normalize_score_value(value: Any) -> float:
+    if isinstance(value, bool):
+        return 10.0 if value else 0.0
+    if isinstance(value, (int, float)):
+        score = float(value)
+        if 0.0 <= score <= 1.0:
+            return score * 10.0
+        if 0.0 <= score <= 10.0:
+            return score
+        if 0.0 <= score <= 100.0:
+            return score / 10.0
+        return max(0.0, min(score, 10.0))
+    if isinstance(value, str):
+        text = value.strip()
+        if text.endswith("%"):
+            text = text[:-1].strip()
+        if text.lower() in ("true", "yes"):
+            return 10.0
+        if text.lower() in ("false", "no"):
+            return 0.0
+        try:
+            return _normalize_score_value(float(text))
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _extract_score_from_grade(grade: dict, keys: list) -> float:
+    """Try multiple possible keys in the judge output to determine a normalized score on 0-10."""
     if not isinstance(grade, dict):
-        return False
+        return 0.0
+    if "score" in grade:
+        return _normalize_score_value(grade["score"])
     for k in keys:
         if k in grade:
-            v = grade[k]
-            if isinstance(v, bool):
-                return v
-            if isinstance(v, (int, float)):
-                return bool(v)
-            if isinstance(v, str):
-                lv = v.strip().lower()
-                if lv in ("true", "yes", "1"):
-                    return True
-                if lv in ("false", "no", "0"):
-                    return False
+            return _normalize_score_value(grade[k])
     # try nested common wrappers
     for wrapper in ("result", "data", "value"):
         if wrapper in grade and isinstance(grade[wrapper], dict):
+            if "score" in grade[wrapper]:
+                return _normalize_score_value(grade[wrapper]["score"])
             for k in keys:
                 if k in grade[wrapper]:
-                    v = grade[wrapper][k]
-                    if isinstance(v, bool):
-                        return v
-                    if isinstance(v, (int, float)):
-                        return bool(v)
-                    if isinstance(v, str):
-                        lv = v.strip().lower()
-                        if lv in ("true", "yes", "1"):
-                            return True
-                        if lv in ("false", "no", "0"):
-                            return False
-    return False
+                    return _normalize_score_value(grade[wrapper][k])
+    return 0.0
 
 
 def _run_structured_eval(llm: MistralLLM, instructions: str, content: str, score_keys: list):
     """Run a structured evaluator LLM and normalize the output.
 
-    Returns: {score: bool, explanation: str, explanation_raw: Any}
+    Returns: {score: float, explanation: str, explanation_raw: Any}
     """
     try:
         grade = llm.invoke([
@@ -155,17 +167,17 @@ def _run_structured_eval(llm: MistralLLM, instructions: str, content: str, score
         explanation_raw = None
         if isinstance(grade, dict):
             explanation_raw = grade
-            score = _extract_bool_from_grade(grade, score_keys)
+            score = _extract_score_from_grade(grade, score_keys)
             explanation_text = grade.get("explanation") or grade.get("content") or ""
             if not explanation_text and "reasoning" in grade:
                 explanation_text = grade.get("reasoning")
         else:
-            score = False
             explanation_text = getattr(grade, "content", "") or ""
+            score = _normalize_score_value(explanation_text)
             explanation_raw = {"content": explanation_text}
         return {"score": score, "explanation": explanation_text, "explanation_raw": explanation_raw}
     except Exception as e:
-        return {"score": False, "explanation": str(e), "explanation_raw": None}
+        return {"score": 0.0, "explanation": str(e), "explanation_raw": None}
 
 
 def correctness(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
@@ -269,27 +281,29 @@ def rag_bot(question: str) -> dict:
 
 # Load the examples for the dataset from JSON file
 dataset_file = "dataset.json"
-with open(dataset_file, "r", encoding="utf-8") as f:
-    examples = json.load(f)
+
+def _load_examples():
+    with open(dataset_file, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 # Grade output schema
 class CorrectnessGrade(TypedDict):
     # Note that the order in the fields are defined is the order in which the model will generate them.
     # It is useful to put explanations before responses because it forces the model to think through
     # its final response before generating it:
-    explanation: Annotated[str, ..., "Explain your reasoning for the score"]
+    explanation: Annotated[str, ..., "Expliquez votre raisonnement pour la note"]
+    score: Annotated[float, ..., "Note entre 0 et 10"]
     correct: Annotated[bool, ..., "True if the answer is correct, False otherwise."]
 
 # Grade prompt
-correctness_instructions = """You are a teacher grading a quiz. You will be given a QUESTION, the GROUND TRUTH (correct) ANSWER, and the STUDENT ANSWER. Here is the grade criteria to follow:
-(1) Grade the student answers based ONLY on their factual accuracy relative to the ground truth answer. (2) Ensure that the student answer does not contain any conflicting statements.
-(3) It is OK if the student answer contains more information than the ground truth answer, as long as it is factually accurate relative to the ground truth answer.
+correctness_instructions = """Vous êtes un professeur qui note un quiz. Vous recevrez une QUESTION, la RÉPONSE DE RÉFÉRENCE et la RÉPONSE DE L'ÉTUDIANT. Utilisez une note entre 0 et 10 pour évaluer la précision factuelle de la réponse.
 
-Correctness:
-A correctness value of True means that the student's answer meets all of the criteria.
-A correctness value of False means that the student's answer does not meet all of the criteria.
+Critères de correction :
+(1) Évaluez uniquement la précision factuelle par rapport à la réponse de référence.
+(2) Vérifiez que la réponse de l'étudiant ne contient pas de contradictions internes.
+(3) Il est acceptable que la réponse contienne plus d'informations que la réponse de référence, tant qu'elles sont factuellement exactes.
 
-Explain your reasoning in a step-by-step manner to ensure your reasoning and conclusion are correct. Avoid simply stating the correct answer at the outset."""
+Répondez en français uniquement. Donnez la note dans la clé `score` comme un nombre entre 0 et 10. Dans `explanation`, donnez uniquement votre commentaire de notation, sans répéter la question, la réponse de référence ou la réponse de l'étudiant."""
 
 # Grader LLM
 grader_llm = MistralLLM(api_url=LLM_API_URL, model=LLM_MODEL, api_key=LLM_API_KEY, temperature=0).with_structured_output(CorrectnessGrade, method="json_schema", strict=True)
@@ -297,21 +311,20 @@ grader_llm = MistralLLM(api_url=LLM_API_URL, model=LLM_MODEL, api_key=LLM_API_KE
 
 # Grade output schema
 class RelevanceGrade(TypedDict):
-    explanation: Annotated[str, ..., "Explain your reasoning for the score"]
+    explanation: Annotated[str, ..., "Expliquez votre raisonnement pour la note"]
+    score: Annotated[float, ..., "Note entre 0 et 10"]
     relevant: Annotated[
         bool, ..., "Provide the score on whether the answer addresses the question"
     ]
 
 # Grade prompt
-relevance_instructions = """You are a teacher grading a quiz. You will be given a QUESTION and a STUDENT ANSWER. Here is the grade criteria to follow:
-(1) Ensure the STUDENT ANSWER is concise and relevant to the QUESTION
-(2) Ensure the STUDENT ANSWER helps to answer the QUESTION
+relevance_instructions = """Vous êtes un professeur qui note un quiz. Vous recevrez une QUESTION et une RÉPONSE DE L'ÉTUDIANT. Utilisez une note entre 0 et 10 pour évaluer la pertinence de la réponse.
 
-Relevance:
-A relevance value of True means that the student's answer meets all of the criteria.
-A relevance value of False means that the student's answer does not meet all of the criteria.
+Critères de pertinence :
+(1) La réponse doit être concise et directement liée à la question.
+(2) La réponse doit aider à répondre à la question.
 
-Explain your reasoning in a step-by-step manner to ensure your reasoning and conclusion are correct. Avoid simply stating the correct answer at the outset."""
+Répondez en français uniquement. Donnez la note dans la clé `score` comme un nombre entre 0 et 10. Dans `explanation`, donnez uniquement votre commentaire de notation, sans répéter la question ou la réponse de l'étudiant."""
 
 # Grader LLM
 relevance_llm = MistralLLM(
@@ -331,20 +344,20 @@ def relevance(inputs: dict, outputs: dict) -> bool:
 
 # Grade output schema
 class GroundedGrade(TypedDict):
-    explanation: Annotated[str, ..., "Explain your reasoning for the score"]
+    explanation: Annotated[str, ..., "Expliquez votre raisonnement pour la note"]
+    score: Annotated[float, ..., "Note entre 0 et 10"]
     grounded: Annotated[
         bool, ..., "Provide the score on if the answer hallucinates from the documents"
     ]
 
 # Grade prompt
-grounded_instructions = """You are a teacher grading a quiz. You will be given FACTS and a STUDENT ANSWER. Here is the grade criteria to follow:
-(1) Ensure the STUDENT ANSWER is grounded in the FACTS. (2) Ensure the STUDENT ANSWER does not contain "hallucinated" information outside the scope of the FACTS.
+grounded_instructions = """Vous êtes un professeur qui note un quiz. Vous recevrez des FAITS et une RÉPONSE DE L'ÉTUDIANT. Utilisez une note entre 0 et 10 pour évaluer si la réponse est fondée sur les faits.
 
-Grounded:
-A grounded value of True means that the student's answer meets all of the criteria.
-A grounded value of False means that the student's answer does not meet all of the criteria.
+Critères de fondement :
+(1) La réponse doit être ancrée dans les FAITS fournis.
+(2) La réponse ne doit pas contenir d'informations « hallucinées » hors du champ des FAITS.
 
-Explain your reasoning in a step-by-step manner to ensure your reasoning and conclusion are correct. Avoid simply stating the correct answer at the outset."""
+Répondez en français uniquement. Donnez la note dans la clé `score` comme un nombre entre 0 et 10. Dans `explanation`, donnez uniquement votre commentaire de notation, sans répéter les faits ou la réponse de l'étudiant."""
 
 # Grader LLM
 grounded_llm = MistralLLM(
@@ -366,7 +379,8 @@ def groundedness(inputs: dict, outputs: dict) -> bool:
 
 # Grade output schema
 class RetrievalRelevanceGrade(TypedDict):
-    explanation: Annotated[str, ..., "Explain your reasoning for the score"]
+    explanation: Annotated[str, ..., "Expliquez votre raisonnement pour la note"]
+    score: Annotated[float, ..., "Note entre 0 et 10"]
     relevant: Annotated[
         bool,
         ...,
@@ -374,16 +388,14 @@ class RetrievalRelevanceGrade(TypedDict):
     ]
 
 # Grade prompt
-retrieval_relevance_instructions = """You are a teacher grading a quiz. You will be given a QUESTION and a set of FACTS provided by the student. Here is the grade criteria to follow:
-(1) You goal is to identify FACTS that are completely unrelated to the QUESTION
-(2) If the facts contain ANY keywords or semantic meaning related to the question, consider them relevant
-(3) It is OK if the facts have SOME information that is unrelated to the question as long as (2) is met
+retrieval_relevance_instructions = """Vous êtes un professeur qui note un quiz. Vous recevrez une QUESTION et un ensemble de DOCUMENTS fournis par l'étudiant. Utilisez une note entre 0 et 10 pour évaluer la pertinence de ces documents.
 
-Relevance:
-A relevance value of True means that the FACTS contain ANY keywords or semantic meaning related to the QUESTION and are therefore relevant.
-A relevance value of False means that the FACTS are completely unrelated to the QUESTION.
+Critères de pertinence :
+(1) Identifiez les DOCUMENTS qui sont complètement sans rapport avec la QUESTION.
+(2) Si les documents contiennent des mots-clés ou un sens sémantique lié à la question, considérez-les comme pertinents.
+(3) Il est acceptable que les documents contiennent des informations partiellement sans rapport tant que le critère (2) est respecté.
 
-Explain your reasoning in a step-by-step manner to ensure your reasoning and conclusion are correct. Avoid simply stating the correct answer at the outset."""
+Répondez en français uniquement. Donnez la note dans la clé `score` comme un nombre entre 0 et 10. Dans `explanation`, donnez uniquement votre commentaire de notation, sans répéter la question ou les documents fournis."""
 
 # Grader LLM
 retrieval_relevance_llm = MistralLLM(
@@ -394,10 +406,58 @@ retrieval_relevance_llm = MistralLLM(
 ).with_structured_output(RetrievalRelevanceGrade, method="json_schema", strict=True)
 
 def retrieval_relevance(inputs: dict, outputs: dict) -> bool:
-    """An evaluator for document relevance"""
-    docs = outputs.get("documents") or []
+    """An evaluator for document relevance using agentic mode sources"""
+    # Always use agentic mode sources for evaluation
+    try:
+        agentic_result = subprocess.run(
+            [sys.executable, "chatbot.py", "--mode", "agentic", "--question", inputs['question'], "--json-output"],
+            cwd=CHATBOT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        if agentic_result.returncode == 0:
+            stdout = agentic_result.stdout.strip()
+            json_start = stdout.find('{')
+            if json_start >= 0:
+                json_str = stdout[json_start:]
+                json_end = json_str.rfind('}')
+                if json_end >= 0:
+                    json_str = json_str[:json_end + 1]
+                    chatbot_result = json.loads(json_str)
+                    sources = chatbot_result.get("sources", [])
+                else:
+                    sources = []
+            else:
+                sources = []
+        else:
+            sources = []
+    except:
+        sources = []
+    
+    # Convert sources to document objects
+    documents = []
+    for source in sources:
+        class Document:
+            def __init__(self, content, metadata):
+                self.page_content = content
+                self.metadata = metadata
+        
+        doc = Document(
+            content=source.get("content", ""),
+            metadata={
+                "title": source.get("title", "Unknown"),
+                "module": source.get("module", "Unknown"),
+                "doc_category": source.get("doc_category", "Unknown"),
+                "doc_type": source.get("doc_type", "Unknown"),
+                "url": source.get("url", "")
+            }
+        )
+        documents.append(doc)
+    
+    docs = documents
     doc_string = "\n\n".join(getattr(doc, "page_content", str(doc)) for doc in docs)
-    answer = f"FACTS: {doc_string}\nQUESTION: {inputs['question']}"
+    answer = f"DOCUMENTS: {doc_string}\nQUESTION: {inputs['question']}"
     # Run evaluator
     return _run_structured_eval(retrieval_relevance_llm, retrieval_relevance_instructions, answer, ["relevant", "relevance", "result"])
 
@@ -408,130 +468,192 @@ def target(inputs: dict) -> dict:
 print("Testing RAG system...")
 print("=" * 80)
 
-results = []
-def _sanitize_eval_result(ev, include_raw_if_empty: bool = False):
+def _extract_explanation_from_raw(raw):
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw.strip()
+    if isinstance(raw, list):
+        parts = [_extract_explanation_from_raw(item) for item in raw]
+        return " \n".join(part for part in parts if part)
+    if isinstance(raw, dict):
+        for key in ("explanation", "reasoning", "REASONING", "reason", "message", "content", "text", "output"):
+            if key in raw and raw[key]:
+                return _extract_explanation_from_raw(raw[key])
+
+        if "error" in raw and raw["error"]:
+            error = raw["error"]
+            if isinstance(error, str):
+                return error.strip()
+            if isinstance(error, dict):
+                for key in ("message", "reason", "description", "details"):
+                    if key in error and error[key]:
+                        return _extract_explanation_from_raw(error[key])
+
+        if "evaluation" in raw and isinstance(raw["evaluation"], dict):
+            return _extract_explanation_from_raw(raw["evaluation"])
+
+        parts = []
+        for value in raw.values():
+            candidate = _extract_explanation_from_raw(value)
+            if candidate and candidate not in parts:
+                parts.append(candidate)
+        return " \n".join(parts)
+
+    return ""
+
+
+def _clean_explanation_text(text) -> str:
+    if not text:
+        return ""
+    
+    # Handle dict inputs by extracting string content
+    if isinstance(text, dict):
+        text = _extract_explanation_from_raw(text)
+    
+    # Ensure we have a string now
+    if not isinstance(text, str):
+        text = str(text)
+    
+    cleaned = text.replace("\r\n", "\n").strip()
+    patterns = [
+        r"(?ims)^question\s*:\s*.*?(?=\n(?:ground truth answer|student answer|facts|evaluation|$))",
+        r"(?ims)^ground truth answer\s*:\s*.*?(?=\n(?:question|student answer|facts|evaluation|$))",
+        r"(?ims)^student answer\s*:\s*.*?(?=\n(?:question|ground truth answer|facts|evaluation|$))",
+        r"(?ims)^facts\s*:\s*.*?(?=\n(?:question|ground truth answer|student answer|evaluation|$))",
+        r"(?ims)^question\s*[-]\s*.*?(?=\n(?:ground truth answer|student answer|facts|evaluation|$))",
+    ]
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned)
+
+    marker_patterns = [
+        r"(?i)la réponse de l['’]étudiant",
+        r"(?i)la réponse de l['’]étudiant·e",
+        r"(?i)l['’]étudiant",
+        r"(?i)l['’]étudiante",
+        r"(?i)le modèle",
+        r"(?i)la réponse est",
+        r"(?i)en accord avec la vérité terre?rain",
+    ]
+    for marker in marker_patterns:
+        m = re.search(marker, cleaned)
+        if m:
+            cleaned = cleaned[m.start():].strip()
+            break
+
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
+
+
+def _sanitize_eval_result(ev):
+    """Extract score and explanation from evaluation result, always preserving LLM explanations."""
     if not isinstance(ev, dict):
         return {"score": bool(ev)}
-    out = {"score": bool(ev.get("score", False))}
+    
+    out = {"score": _normalize_score_value(ev.get("score", False))}
     expl = ev.get("explanation") or ""
     if expl:
-        out["explanation"] = expl
+        out["explanation"] = _clean_explanation_text(expl)
         return out
-
-    if include_raw_if_empty:
-        raw = ev.get("explanation_raw")
-        if raw:
-            # try to extract readable text from common keys
-            if isinstance(raw, dict):
-                for k in ("explanation", "reasoning", "REASONING", "reason", "content", "text"):
-                    if k in raw and raw[k]:
-                        val = raw[k]
-                        if isinstance(val, list):
-                            out["explanation"] = " \n".join(str(x) for x in val)
-                        else:
-                            out["explanation"] = str(val)
-                        return out
-                # try to find any list of strings in values
-                for v in raw.values():
-                    if isinstance(v, list) and all(isinstance(x, str) for x in v):
-                        out["explanation"] = " \n".join(v)
-                        return out
-            # fallback to JSON dump
-            try:
-                out["explanation"] = json.dumps(raw, ensure_ascii=False)
-                return out
-            except Exception:
-                pass
-
+    
+    expl = _extract_explanation_from_raw(ev.get("explanation_raw"))
+    out["explanation"] = _clean_explanation_text(expl)
     return out
 
-for i, example in enumerate(examples, 1):
-    print(f"\n{'=' * 80}")
-    print(f"Example {i}:")
-    print(f"{'=' * 80}")
-    q = example['inputs']['question']
-    expected = example['outputs']['answer']
-    print(f"\nQuestion: {q}\n")
-    print(f"Expected Answer: {expected}\n")
+def main():
+    examples = _load_examples()
+    results = []
+    for i, example in enumerate(examples, 1):
+        print(f"\n{'=' * 80}")
+        print(f"Example {i}:")
+        print(f"{'=' * 80}")
+        q = example['inputs']['question']
+        expected = example['outputs']['answer']
+        print(f"\nQuestion: {q}\n")
+        print(f"Expected Answer: {expected}\n")
 
-    # Get RAG response
-    output = target(example["inputs"])
-    rag_answer = output.get('answer') if isinstance(output, dict) else str(output)
-    # Display only the first 100 characters of RAG answer to keep terminal readable
-    rag_answer_preview = rag_answer[:100] + "..." if len(rag_answer) > 100 else rag_answer
-    print(f"RAG Answer (preview): {rag_answer_preview}\n")
-    print("-" * 80)
+        # Get RAG response
+        output = target(example["inputs"])
+        rag_answer = output.get('answer') if isinstance(output, dict) else str(output)
+        # Display only the first 100 characters of RAG answer to keep terminal readable
+        rag_answer_preview = rag_answer[:100] + "..." if len(rag_answer) > 100 else rag_answer
+        print(f"RAG Answer (preview): {rag_answer_preview}\n")
+        print("-" * 80)
 
-    # Run evaluators and collect structured results
-    print("EVALUATION SCORES:")
-    print("-" * 80)
-    try:
-        correct = correctness(example["inputs"], output, example["outputs"])
-        print(f"  Correctness:         {correct['score']}")
-    except Exception as e:
-        correct = {"score": False, "explanation": str(e)}
-        print(f"  Correctness eval error: {e}")
+        # Run evaluators and collect structured results
+        print("EVALUATION SCORES:")
+        print("-" * 80)
+        try:
+            correct = correctness(example["inputs"], output, example["outputs"])
+            print(f"  Correctness:         {correct['score']}")
+        except Exception as e:
+            correct = {"score": False, "explanation": str(e)}
+            print(f"  Correctness eval error: {e}")
 
-    try:
-        relevant = relevance(example["inputs"], output)
-        print(f"  Relevance:           {relevant['score']}")
-    except Exception as e:
-        relevant = {"score": False, "explanation": str(e)}
-        print(f"  Relevance eval error: {e}")
+        try:
+            relevant = relevance(example["inputs"], output)
+            print(f"  Relevance:           {relevant['score']}")
+        except Exception as e:
+            relevant = {"score": False, "explanation": str(e)}
+            print(f"  Relevance eval error: {e}")
 
-    try:
-        grounded = groundedness(example["inputs"], output)
-        print(f"  Groundedness:        {grounded['score']}")
-    except Exception as e:
-        grounded = {"score": False, "explanation": str(e)}
-        print(f"  Groundedness eval error: {e}")
+        try:
+            grounded = groundedness(example["inputs"], output)
+            print(f"  Groundedness:        {grounded['score']}")
+        except Exception as e:
+            grounded = {"score": False, "explanation": str(e)}
+            print(f"  Groundedness eval error: {e}")
 
-    try:
-        retrieval_rel = retrieval_relevance(example["inputs"], output)
-        print(f"  Retrieval Relevance: {retrieval_rel['score']}")
-    except Exception as e:
-        retrieval_rel = {"score": False, "explanation": str(e)}
-        print(f"  Retrieval Relevance eval error: {e}")
+        try:
+            retrieval_rel = retrieval_relevance(example["inputs"], output)
+            print(f"  Retrieval Relevance: {retrieval_rel['score']}")
+        except Exception as e:
+            retrieval_rel = {"score": False, "explanation": str(e)}
+            print(f"  Retrieval Relevance eval error: {e}")
 
-    # Append structured result (sanitize to remove explanation_raw and empty explanations)
-    results.append({
-        "question": q,
-        "expected_answer": expected,
-        "rag_answer": rag_answer,
-        "evaluations": {
-            "correctness": _sanitize_eval_result(correct),
-            "relevance": _sanitize_eval_result(relevant),
-            "groundedness": _sanitize_eval_result(grounded),
-            "retrieval_relevance": _sanitize_eval_result(retrieval_rel, include_raw_if_empty=True),
-        }
-    })
+        # Append structured result (sanitize to remove explanation_raw and empty explanations)
+        results.append({
+            "question": q,
+            "expected_answer": expected,
+            "rag_answer": rag_answer,
+            "evaluations": {
+                "correctness": _sanitize_eval_result(correct),
+                "relevance": _sanitize_eval_result(relevant),
+                "groundedness": _sanitize_eval_result(grounded),
+                "retrieval_relevance": _sanitize_eval_result(retrieval_rel),
+            }
+        })
 
-    print("-" * 80)
+        # Save results incrementally after each question
+        results_file = "evaluation_results.json"
+        with open(results_file, "w", encoding="utf-8") as rf:
+            json.dump(results, rf, ensure_ascii=False, indent=2)
 
-# Save results to JSON
-results_file = "evaluation_results.json"
-with open(results_file, "w", encoding="utf-8") as rf:
-    json.dump(results, rf, ensure_ascii=False, indent=2)
+        print("-" * 80)
 
-print(f"Saved evaluation results to {results_file}")
+    print(f"\nEvaluation complete. Results saved to {results_file}")
 
-# Calculate and display average scores
-print("\n" + "=" * 80)
-print("EVALUATION SUMMARY - AVERAGE SCORES")
-print("=" * 80)
+    # Calculate and display average scores
+    print("\n" + "=" * 80)
+    print("EVALUATION SUMMARY - AVERAGE SCORES")
+    print("=" * 80)
 
-if results:
-    avg_correctness = sum(1 for r in results if r["evaluations"]["correctness"].get("score", False)) / len(results)
-    avg_relevance = sum(1 for r in results if r["evaluations"]["relevance"].get("score", False)) / len(results)
-    avg_groundedness = sum(1 for r in results if r["evaluations"]["groundedness"].get("score", False)) / len(results)
-    avg_retrieval_relevance = sum(1 for r in results if r["evaluations"]["retrieval_relevance"].get("score", False)) / len(results)
-    
-    print(f"Total examples evaluated: {len(results)}\n")
-    print(f"Correctness:         {avg_correctness:.2%}")
-    print(f"Relevance:           {avg_relevance:.2%}")
-    print(f"Groundedness:        {avg_groundedness:.2%}")
-    print(f"Retrieval Relevance: {avg_retrieval_relevance:.2%}")
-    
-    avg_overall = (avg_correctness + avg_relevance + avg_groundedness + avg_retrieval_relevance) / 4
-    print(f"\nOverall Average:     {avg_overall:.2%}")
+    if results:
+        avg_correctness = sum(r["evaluations"]["correctness"].get("score", 0.0) for r in results) / len(results)
+        avg_relevance = sum(r["evaluations"]["relevance"].get("score", 0.0) for r in results) / len(results)
+        avg_groundedness = sum(r["evaluations"]["groundedness"].get("score", 0.0) for r in results) / len(results)
+        avg_retrieval_relevance = sum(r["evaluations"]["retrieval_relevance"].get("score", 0.0) for r in results) / len(results)
+        
+        print(f"Total examples evaluated: {len(results)}\n")
+        print(f"Correctness:         {avg_correctness:.1f}/10")
+        print(f"Relevance:           {avg_relevance:.1f}/10")
+        print(f"Groundedness:        {avg_groundedness:.1f}/10")
+        print(f"Retrieval Relevance: {avg_retrieval_relevance:.1f}/10")
+        
+        avg_overall = (avg_correctness + avg_relevance + avg_groundedness + avg_retrieval_relevance) / 4
+        print(f"\nOverall Average:     {avg_overall:.1f}/10")
+
+
+if __name__ == "__main__":
+    main()
     print("=" * 80)

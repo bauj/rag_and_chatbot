@@ -70,7 +70,7 @@ Examples:
     parser.add_argument(
         '--type',
         dest='doc_type',
-        choices=['dev', 'user'],
+        choices=['dev', 'user', 'methodology'],
         help='Filter by doc type (terminal single-question mode)'
     )
     parser.add_argument(
