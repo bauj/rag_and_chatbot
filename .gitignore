@@ -49,4 +49,5 @@ evaluator/base/dataset.json
 
 # Results
 evaluator/benchmark/benchmark_results/
+evaluator/benchmark/graphs/
 evaluator/base/evaluation_results.json

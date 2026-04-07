@@ -1,7 +1,7 @@
 {
   "project_name": "my_project",
   "_comment_project_name": "No spaces — used as ChromaDB collection name. Use underscores.",
-  "chatbot_path": "your_chatbot_dir_path_here", // Default: "../chatbot"
+  "chatbot_path": "your_chatbot_dir_path_here", // Default: "../../chatbot"
   
   "llm": 
   {  

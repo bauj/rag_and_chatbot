@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from datetime import datetime
 
+try:
+    import matplotlib.pyplot as plt
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
 
 class BenchmarkAnalyzer:
     """Analyze and compare benchmark results"""
@@ -243,7 +249,7 @@ class BenchmarkAnalyzer:
             for k, v in scores.items()
         ])
     
-    def generate_full_report(self):
+    def generate_full_report(self, include_graphs: bool = False):
         """Generate complete analysis report"""
         self.print_header()
         self.print_summary_table()
@@ -252,9 +258,141 @@ class BenchmarkAnalyzer:
         self.print_metric_statistics()
         self.print_per_question_analysis()
         
+        if include_graphs:
+            self.generate_graphs()
+        
         print(f"{'='*100}")
         print("ANALYSIS COMPLETE")
         print(f"{'='*100}\n")
+    
+    def generate_graphs(self, output_dir: str = "graphs"):
+        """Generate various analysis graphs"""
+        if not HAS_MATPLOTLIB:
+            print("Matplotlib not available. Install with: pip install matplotlib")
+            return
+        
+        output_path = Path(output_dir)
+        output_path.mkdir(exist_ok=True)
+        
+        print(f"\nGenerating graphs in {output_path}...")
+        
+        self._graph_scores_by_question(output_path)
+        self._graph_metric_distributions(output_path)
+        self._graph_scores_by_tag(output_path)
+        
+        print("Graphs generated successfully!")
+    
+    def _graph_scores_by_question(self, output_path: Path):
+        """Generate bar chart of average scores per question"""
+        questions_data = {}
+        
+        for run in self.data["results"]:
+            for q_data in run["questions"]:
+                q_id = q_data["question_id"]
+                if q_id not in questions_data:
+                    questions_data[q_id] = {
+                        "question": q_data["question"][:50] + "..." if len(q_data["question"]) > 50 else q_data["question"],
+                        "scores": {"correctness": [], "relevance": [], "groundedness": [], "retrieval_relevance": []}
+                    }
+                
+                for metric, eval_data in q_data["evaluations"].items():
+                    score = eval_data.get("score", 0)
+                    questions_data[q_id]["scores"][metric].append(score)
+        
+        # Calculate averages
+        question_ids = sorted(questions_data.keys())
+        metrics = ["correctness", "relevance", "groundedness", "retrieval_relevance"]
+        
+        fig, ax = plt.subplots(figsize=(15, 8))
+        x = range(len(question_ids))
+        width = 0.2
+        
+        for i, metric in enumerate(metrics):
+            scores = [sum(questions_data[q]["scores"][metric]) / len(questions_data[q]["scores"][metric]) 
+                     for q in question_ids]
+            ax.bar([xi + i*width for xi in x], scores, width, label=metric.title())
+        
+        ax.set_xlabel('Question ID')
+        ax.set_ylabel('Average Score')
+        ax.set_title('Average Scores by Question and Metric')
+        ax.set_xticks([xi + width*1.5 for xi in x])
+        ax.set_xticklabels(question_ids)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(output_path / "scores_by_question.png", dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _graph_metric_distributions(self, output_path: Path):
+        """Generate histograms of score distributions per metric"""
+        metrics = ["correctness", "relevance", "groundedness", "retrieval_relevance"]
+        
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        axes = axes.ravel()
+        
+        for i, metric in enumerate(metrics):
+            scores = []
+            for run in self.data["results"]:
+                for q_data in run["questions"]:
+                    score = q_data["evaluations"].get(metric, {}).get("score", 0)
+                    scores.append(score)
+            
+            axes[i].hist(scores, bins=20, alpha=0.7, edgecolor='black')
+            axes[i].set_title(f'{metric.title()} Distribution')
+            axes[i].set_xlabel('Score')
+            axes[i].set_ylabel('Frequency')
+            axes[i].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(output_path / "metric_distributions.png", dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _graph_scores_by_tag(self, output_path: Path):
+        """Generate bar chart of average scores by tag"""
+        tag_data = {}
+        
+        for run in self.data["results"]:
+            for q_data in run["questions"]:
+                tags = q_data.get("tags", [])
+                if not tags:
+                    tags = ["untagged"]
+                
+                for tag in tags:
+                    if tag not in tag_data:
+                        tag_data[tag] = {"correctness": [], "relevance": [], "groundedness": [], "retrieval_relevance": []}
+                    
+                    for metric, eval_data in q_data["evaluations"].items():
+                        score = eval_data.get("score", 0)
+                        tag_data[tag][metric].append(score)
+        
+        if not tag_data:
+            return
+        
+        # Calculate averages
+        tags = sorted(tag_data.keys())
+        metrics = ["correctness", "relevance", "groundedness", "retrieval_relevance"]
+        
+        fig, ax = plt.subplots(figsize=(12, 6))
+        x = range(len(tags))
+        width = 0.2
+        
+        for i, metric in enumerate(metrics):
+            scores = [sum(tag_data[tag][metric]) / len(tag_data[tag][metric]) if tag_data[tag][metric] else 0
+                     for tag in tags]
+            ax.bar([xi + i*width for xi in x], scores, width, label=metric.title())
+        
+        ax.set_xlabel('Tag')
+        ax.set_ylabel('Average Score')
+        ax.set_title('Average Scores by Tag and Metric')
+        ax.set_xticks([xi + width*1.5 for xi in x])
+        ax.set_xticklabels(tags, rotation=45, ha='right')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(output_path / "scores_by_tag.png", dpi=300, bbox_inches='tight')
+        plt.close()
 
 
 def main():
@@ -265,6 +403,7 @@ def main():
     parser.add_argument("results_file", nargs="?", help="Results JSON file to analyze")
     parser.add_argument("--list", action="store_true", help="List available results files")
     parser.add_argument("--latest", action="store_true", help="Analyze latest results file")
+    parser.add_argument("--graphs", action="store_true", help="Generate analysis graphs (requires matplotlib)")
     
     args = parser.parse_args()
     
@@ -317,7 +456,7 @@ def main():
     
     # Analyze
     analyzer = BenchmarkAnalyzer(str(results_file))
-    analyzer.generate_full_report()
+    analyzer.generate_full_report(include_graphs=args.graphs)
 
 
 if __name__ == "__main__":

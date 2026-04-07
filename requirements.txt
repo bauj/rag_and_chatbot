@@ -31,9 +31,19 @@ sentence-transformers==5.3.0    # Embedding models (all-MiniLM-L6-v2)
 gradio==6.10.0                  # Web interface (optional, for --web mode)
 
 # ============================================
+# BENCHMARK & EVALUATION
+# ============================================
+matplotlib==3.8.4               # Graphing and visualization (for --graphs option)
+
+# ============================================
+# TESTING
+# ============================================
+pytest==7.4.4                   # Testing framework
+
+# ============================================
 # NOTES
 # ============================================
 # - numpy and other deps are pulled in transitively
 # - No need for top-level 'langchain' package (using specific components)
 # - openai package is included in langchain-openai
-# - requests removed (not used in current code)
+# - matplotlib is optional but recommended for benchmark analysis graphs

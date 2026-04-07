@@ -323,6 +323,7 @@ def run_benchmark(
                     question_result = {
                         "question_id": q_idx,
                         "question": question,
+                        "tags": example.get("tags", []),
                         "reference_answer": reference_answer,
                         "generated_answer": answer_dict.get("answer", ""),
                         "evaluations": evaluations
@@ -388,6 +389,7 @@ def run_benchmark(
                     question_result = {
                         "question_id": q_idx,
                         "question": question,
+                        "tags": example.get("tags", []),
                         "reference_answer": reference_answer,
                         "generated_answer": answer_dict.get("answer", ""),
                         "evaluations": evaluations
