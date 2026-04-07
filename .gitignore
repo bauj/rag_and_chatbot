@@ -44,6 +44,7 @@ docs/
 extraction/config.json
 chatbot/config.json
 evaluator/config.json
+evaluator/benchmark_config.json
 evaluator/dataset.json
 evaluator/benchmark.py
 

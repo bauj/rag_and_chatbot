@@ -1,0 +1,13 @@
+{
+  "modes": ["rag", "agentic"],
+  "rag_hyperparams": {
+    "k": [3, 5],
+    "temperature": [0.3, 0.7],
+    "reranker_enabled": [true],
+    "top_n": [5, 10],
+    "deep_dive": [false]
+  },
+  "agentic_hyperparams": {
+    "temperature": [0.3, 0.7]
+  }
+}

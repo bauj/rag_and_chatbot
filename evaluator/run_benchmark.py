@@ -74,21 +74,25 @@ Examples:
     if args.compare:
         compare_results(args.output_dir)
     else:
-        # Load examples and run benchmark
-        examples = _load_examples()
-        
-        if args.limit:
-            print(f"Testing with {args.limit} questions (out of {len(examples)})")
-        else:
-            print(f"Testing with all {len(examples)} questions")
-        
-        run_benchmark(
-            examples,
-            output_dir=args.output_dir,
-            modes=args.modes,
-            limit_questions=args.limit,
-            verbose=args.verbose
-        )
+        try:
+            # Load examples and run benchmark
+            examples = _load_examples()
+            
+            if args.limit:
+                print(f"Testing with {args.limit} questions (out of {len(examples)})")
+            else:
+                print(f"Testing with all {len(examples)} questions")
+            
+            run_benchmark(
+                examples,
+                output_dir=args.output_dir,
+                modes=args.modes,
+                limit_questions=args.limit,
+                verbose=args.verbose
+            )
+        except (FileNotFoundError, ValueError) as err:
+            print(f"Error: {err}")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
