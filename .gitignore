@@ -43,11 +43,10 @@ docs/
 # Personal configuration files (might contain secrets)
 extraction/config.json
 chatbot/config.json
-evaluator/config.json
-evaluator/benchmark_config.json
-evaluator/dataset.json
-evaluator/benchmark.py
+evaluator/base/config.json
+evaluator/benchmark/benchmark_config.json
+evaluator/base/dataset.json
 
 # Results
-evaluator/benchmark_results/
-evaluator/evaluation_results.json
+evaluator/benchmark/benchmark_results/
+evaluator/base/evaluation_results.json

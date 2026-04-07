@@ -7,8 +7,8 @@ import argparse
 import sys
 from pathlib import Path
 
-# Add evaluator directory to path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Add project root to path so the evaluator package can be imported
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from benchmark import run_benchmark, compare_results, _load_examples
 
@@ -40,8 +40,8 @@ Examples:
         "--modes",
         nargs="+",
         choices=["rag", "agentic"],
-        default=["rag", "agentic"],
-        help="Which modes to test (default: both)"
+        default=None,
+        help="Which modes to test (default: loaded from benchmark_config.json)"
     )
     
     parser.add_argument(

@@ -280,7 +280,7 @@ def rag_bot(question: str) -> dict:
         }
 
 # Load the examples for the dataset from JSON file
-dataset_file = "dataset.json"
+dataset_file = Path(__file__).resolve().parent / "dataset.json"
 
 def _load_examples():
     with open(dataset_file, "r", encoding="utf-8") as f:
