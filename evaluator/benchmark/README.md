@@ -5,17 +5,26 @@ Tools for testing and comparing RAG and agentic modes playing on the hyperparame
 ## Quick Start
 
 ```bash
+# Full test
+python benchmark.py
+
+# Run benchmark with 5 workers
+python benchmark.py --workers 5
+
 # Validate the setup
-python3 run_benchmark.py --help
+python benchmark.py --help
 
 # Quick test (2 questions)
-python3 run_benchmark.py --limit 2
+python benchmark.py --limit 2
 
-# Full test (13 questions/config, ~30 min/config)
-python3 run_benchmark.py
+# Compare existing benchmarks
+python benchmark.py --compare
 
 # Analyze results
-python3 analyze_results.py --latest
+python analyze_results.py benchmark_YYYYMMDD_HHMMSS.json
+
+# Analyze latest results and plot graphs
+python analyze_results.py --latest --graphs
 ```
 
 ## Configuration
@@ -40,8 +49,7 @@ Example structure:
 
 ## Scripts
 
-- **run_benchmark.py** - Run benchmarks
-  - `--modes rag|agentic` - Modes to test (default: both)
+- **benchmark.py** - Run benchmarks
   - `--limit N` - Limit to N questions
   - `--compare` - Compare previous results
 
@@ -50,15 +58,75 @@ Example structure:
   - `--list` - List all results
   - `--graphs` - Generate analysis graphs (requires matplotlib)
 
-- **benchmark.py** - Core module
+## Benchmark output
+
+The outputs are saved in a `benchmark_results` folder (created if it does not exist) as a JSON file named `benchmark_YYYYMMDD_HHMMSS.json`, in order to ensure traceability.
+
+This JSON file contains, for each configuration, all questions along with their corresponding expected answers, chatbot answers, scores, and explanations, in the following format:
+
+```json
+{
+  "metadata": {
+    "timestamp": "YYYYMMDD_HHMMSS",
+    "modes": [
+      "rag",
+      "agentic"
+    ],
+    "total_questions": 13,
+    "workers": 5
+  },
+  "results": [
+    {
+      "mode": "rag",
+      "configuration": {
+        "k": 3,
+        "temperature": 0.3,
+        "reranker_enabled": true,
+        "top_n": 5,
+        "deep_dive": false
+      },
+      "questions": [
+        {
+          "question_id": 1,
+          "question": "Question 1?",
+          "reference_answer": "Expected Answer 1.",
+          "generated_answer": "Chatbot Answer 1.",
+          "evaluations": {
+            "correctness": {
+              "score": 5.0,
+              "explanation": "Explanation of the correctness score."
+            },
+            "relevance": {
+              "score": 8.0,
+              "explanation": "Explanation of the relevance score."
+            },
+            "groundedness": {
+              "score": 2.0,
+              "explanation": "Explanation of the groundedness score."
+            },
+            "retrieval_relevance": {
+              "score": 10.0,
+              "explanation": "Explanation of the retrieval relevance score."
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
+```
 
 ## Analysis Graphs
 
 Use `--graphs` to generate visualizations:
 
-- **Scores per question**: Bar charts of average scores per question and metric
-- **Metric distributions**: Histograms of score distributions
-- **Scores by tag**: Average scores grouped by question tag
+- **Quality vs time**: Scatter plot revealing the trade-off between overall response quality and execution speed across different tested configurations
+- **Metric distribution**: Box plots showing the score dispersion for each evaluation metric (correctness, relevance, groundedness, retrieval) across configurations
+- **Performance heatmap**: Colored matrix providing a visual overview of average scores achieved by each configuration across all evaluated metrics
+- **Scores by question config**: Grouped bar chart comparing the overall performance of each configuration on the first 15 benchmark questions
+- **Scores by tag config**: Box plots organized by question categories (tags) to identify strengths and weaknesses of configurations according to question types
+- **Response time by config**: Bar chart displaying the average response times for each tested configuration
+- **Response time by question config**: Grouped bar chart detailing response time variations according to questions and configurations
 
 Graphs are saved in the `graphs/` folder.
 

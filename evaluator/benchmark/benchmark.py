@@ -4,7 +4,6 @@ Benchmark script for testing different modes and hyperparameters
 Tests RAG and agentic modes with multiple configurations
 """
 
-import subprocess
 import sys
 import json
 import os
@@ -18,7 +17,6 @@ import threading
 
 BENCHMARK_CONFIG_FILE = Path(__file__).resolve().parent / "benchmark_config.json"
 BENCHMARK_CONFIG_EXAMPLE_FILE = Path(__file__).resolve().parent / "benchmark_config.example.json"
-
 
 def load_benchmark_config() -> Dict[str, Any]:
     """Load benchmark parameters from JSON configuration."""
@@ -40,7 +38,7 @@ def load_benchmark_config() -> Dict[str, Any]:
 # Import from evaluator base package
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from evaluator.base.evaluator import (
-    CHATBOT_DIR,
+    _call_chatbot,
     correctness,
     relevance,
     groundedness,
@@ -48,90 +46,6 @@ from evaluator.base.evaluator import (
     _sanitize_eval_result,
     _load_examples
 )
-
-
-def call_chatbot_json(question: str, mode: str) -> Dict[str, Any]:
-    """Call chatbot.py with given parameters and return JSON result"""
-    cmd = [
-        sys.executable,
-        "chatbot.py",
-        "--mode", mode,
-        "--question", question,
-        "--json-output"
-    ]
-    
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=CHATBOT_DIR,
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-        
-        if result.returncode != 0:
-            return {
-                "answer": f"Error: {result.stderr}",
-                "documents": [],
-                "error": result.stderr
-            }
-        
-        # Parse JSON from output
-        stdout = result.stdout.strip()
-        json_start = stdout.find('{')
-        if json_start >= 0:
-            json_str = stdout[json_start:]
-            json_end = json_str.rfind('}')
-            if json_end >= 0:
-                json_str = json_str[:json_end + 1]
-                chatbot_result = json.loads(json_str)
-                
-                answer = chatbot_result.get("answer", "No answer")
-                sources = chatbot_result.get("sources", [])
-                
-                # Convert sources to document objects
-                documents = []
-                for source in sources:
-                    class Document:
-                        def __init__(self, content, metadata):
-                            self.page_content = content
-                            self.metadata = metadata
-                    
-                    doc = Document(
-                        content=source.get("content", ""),
-                        metadata={
-                            "title": source.get("title", "Unknown"),
-                            "module": source.get("module", "Unknown"),
-                            "doc_category": source.get("doc_category", "Unknown"),
-                            "doc_type": source.get("doc_type", "Unknown"),
-                            "url": source.get("url", "")
-                        }
-                    )
-                    documents.append(doc)
-                
-                return {
-                    "answer": answer,
-                    "documents": documents
-                }
-    except subprocess.TimeoutExpired:
-        return {
-            "answer": "Timeout",
-            "documents": [],
-            "error": "Chatbot request timed out"
-        }
-    except Exception as e:
-        return {
-            "answer": f"Error: {str(e)}",
-            "documents": [],
-            "error": str(e)
-        }
-    
-    return {
-        "answer": "Failed to parse response",
-        "documents": [],
-        "error": "JSON parsing failed"
-    }
-
 
 def run_evaluation(question: str, answer_dict: Dict, reference_answer: str) -> Dict[str, Dict]:
     """Run all evaluators on a single answer"""
@@ -169,7 +83,6 @@ def run_evaluation(question: str, answer_dict: Dict, reference_answer: str) -> D
     
     return evaluations
 
-
 def generate_rag_configs(hyperparams: Dict) -> List[Dict]:
     """Generate all RAG hyperparameter combinations"""
     keys = list(hyperparams.keys())
@@ -182,72 +95,84 @@ def generate_rag_configs(hyperparams: Dict) -> List[Dict]:
     
     return configs
 
+EVAL_METRICS = [
+    "correctness",
+    "relevance",
+    "groundedness",
+    "retrieval_relevance",
+]
+
+def calculate_average_scores(questions: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Return average score for each evaluation metric."""
+    averages = {}
+    for metric in EVAL_METRICS:
+        scores = [q["evaluations"][metric].get("score", 0) for q in questions]
+        averages[metric] = sum(scores) / len(scores) if scores else 0.0
+    return averages
 
 def run_benchmark(
     dataset: List[Dict],
-    output_dir: str = "benchmark_results",
-    modes: List[str] = None,
     limit_questions: int = None,
     verbose: bool = False,
     max_workers: int = 1
 ):
     """Run full benchmark with all configurations"""
-    
+
     config_data = load_benchmark_config()
-    if modes is None:
-        modes = config_data["modes"]
-    
+    modes = config_data["modes"]
+
     # Create output directory
-    output_path = Path(output_dir)
+    output_path = Path("benchmark_results")
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     # Timestamp for results
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
+
     all_results = {
         "metadata": {
             "timestamp": timestamp,
-            "modes": modes,
             "benchmark_config": config_data,
             "total_questions": len(dataset) if limit_questions is None else min(limit_questions, len(dataset)),
             "workers": max_workers
         },
         "results": []
     }
-    
-    # Limit dataset if requested
+
     if limit_questions:
         dataset = dataset[:limit_questions]
-    
-    # RAG configurations
-    rag_hyperparams = config_data["rag_hyperparams"]
-    agentic_hyperparams = config_data["agentic_hyperparams"]
-    rag_configs = generate_rag_configs(rag_hyperparams)
+
+    rag_configs = generate_rag_configs(config_data["rag_hyperparams"])
     agentic_configs = [
         {"temperature": temp}
-        for temp in agentic_hyperparams["temperature"]
+        for temp in config_data["agentic_hyperparams"]["temperature"]
     ]
-    
-    rag_runs = len(rag_configs) * len(dataset) if "rag" in modes else 0
-    agentic_runs = len(agentic_configs) * len(dataset) if "agentic" in modes else 0
-    total_runs = rag_runs + agentic_runs
-    
+
+    mode_configs = {
+        "rag": rag_configs,
+        "agentic": agentic_configs,
+    }
+
+    total_runs = sum(
+        len(mode_configs[mode]) * len(dataset)
+        for mode in modes
+    )
+
     print(f"\n{'='*80}")
     print("BENCHMARK CONFIGURATION")
     print(f"{'='*80}")
     print(f"Questions: {len(dataset)}")
-    if "rag" in modes:
-        print(f"RAG: {len(rag_configs)} configurations × {len(dataset)} questions = {rag_runs} runs")
-    if "agentic" in modes:
-        print(f"Agentic: {len(agentic_configs)} configurations × {len(dataset)} questions = {agentic_runs} runs")
+    for mode in modes:
+        print(
+            f"{mode.upper()}: {len(mode_configs[mode])} configurations × {len(dataset)} questions = "
+            f"{len(mode_configs[mode]) * len(dataset)} runs"
+        )
     if max_workers > 1:
         print(f"Workers: {max_workers}")
     print(f"{'─'*80}")
     print(f"Total: {total_runs} runs")
     print(f"Output: {output_path}")
     print(f"{'='*80}\n")
-    
-    current_run = 0
+
     progress_lock = threading.Lock()
     progress_state = {"count": 0}
 
@@ -259,8 +184,9 @@ def run_benchmark(
         question = example["inputs"]["question"]
         reference_answer = example["outputs"]["answer"]
 
-        answer_dict = call_chatbot_json(question, mode)
+        answer_dict = _call_chatbot(question, mode)
         evaluations = run_evaluation(question, answer_dict, reference_answer)
+        request_time = answer_dict.get("request_time", 0.0)
 
         with progress_lock:
             progress_state["count"] += 1
@@ -276,158 +202,67 @@ def run_benchmark(
         return {
             "question_id": question_id,
             "question": question,
+            "tags": example.get("tags", []),
             "reference_answer": reference_answer,
             "generated_answer": answer_dict.get("answer", ""),
-            "evaluations": evaluations
+            "evaluations": evaluations,
+            "request_time": request_time,
         }
-    
-    # Test RAG mode with different configurations
-    if "rag" in modes:
+
+    def _run_mode(mode: str, configs: List[Dict[str, Any]]):
         print(f"\n{'='*80}")
-        print("TESTING RAG MODE")
+        print(f"TESTING {mode.upper()} MODE")
         print(f"{'='*80}\n")
-        
-        for config_idx, rag_config in enumerate(rag_configs, 1):
-            print(f"\nRAG Configuration {config_idx}/{len(rag_configs)}: {rag_config}")
+
+        for config_idx, config in enumerate(configs, 1):
+            print(f"\n{mode.upper()} Configuration {config_idx}/{len(configs)}: {config}")
             print("-" * 80)
-            
-            config_results = {
-                "mode": "rag",
-                "configuration": rag_config,
-                "questions": []
-            }
-            
+
             if max_workers > 1:
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = [
-                        executor.submit(_run_question, q_idx, example, "rag")
+                        executor.submit(_run_question, q_idx, example, mode)
                         for q_idx, example in enumerate(dataset, 1)
                     ]
-                    config_results["questions"] = [future.result() for future in as_completed(futures)]
-                    config_results["questions"].sort(key=lambda x: x["question_id"])
+                    questions = [future.result() for future in as_completed(futures)]
+                    questions.sort(key=lambda x: x["question_id"])
             else:
-                for q_idx, example in enumerate(dataset, 1):
-                    current_run += 1
-                    question = example["inputs"]["question"]
-                    reference_answer = example["outputs"]["answer"]
-                    
-                    print(f"  [{current_run}/{total_runs}] Q{q_idx}: {question[:60]}...", end=" ", flush=True)
-                    
-                    # Call chatbot in RAG mode
-                    answer_dict = call_chatbot_json(question, "rag")
-                    
-                    # Run evaluations
-                    evaluations = run_evaluation(question, answer_dict, reference_answer)
-                    
-                    # Store results
-                    question_result = {
-                        "question_id": q_idx,
-                        "question": question,
-                        "tags": example.get("tags", []),
-                        "reference_answer": reference_answer,
-                        "generated_answer": answer_dict.get("answer", ""),
-                        "evaluations": evaluations
-                    }
-                    config_results["questions"].append(question_result)
-                    
-                    scores_str = " | ".join([
-                        f"{k}: {v.get('score', 0):.1f}"
-                        for k, v in evaluations.items()
-                    ])
-                    print(f"[{scores_str}]")
-            
-            # Calculate average scores for this configuration
-            avg_scores = {}
-            for metric in ["correctness", "relevance", "groundedness", "retrieval_relevance"]:
-                scores = [q["evaluations"][metric].get("score", 0) for q in config_results["questions"]]
-                avg_scores[metric] = sum(scores) / len(scores) if scores else 0
-            
-            config_results["average_scores"] = avg_scores
-            all_results["results"].append(config_results)
-            
-            print(f"  Average scores: {' | '.join([f'{k}: {v:.1f}' for k, v in avg_scores.items()])}")
-    
-    # Test agentic mode with different configurations
-    if "agentic" in modes:
-        print(f"\n{'='*80}")
-        print("TESTING AGENTIC MODE")
-        print(f"{'='*80}\n")
-        
-        for config_idx, agentic_config in enumerate(agentic_configs, 1):
-            print(f"\nAgentic Configuration {config_idx}/{len(agentic_configs)}: {agentic_config}")
-            print("-" * 80)
-            
+                questions = [
+                    _run_question(q_idx, example, mode)
+                    for q_idx, example in enumerate(dataset, 1)
+                ]
+
+            avg_scores = calculate_average_scores(questions)
+            avg_request_time = (
+                sum(q.get("request_time", 0.0) for q in questions) / len(questions)
+                if questions else 0.0
+            )
             config_results = {
-                "mode": "agentic",
-                "configuration": agentic_config,
-                "questions": []
+                "mode": mode,
+                "configuration": config,
+                "questions": questions,
+                "average_scores": avg_scores,
+                "average_request_time": avg_request_time,
             }
-            
-            if max_workers > 1:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [
-                        executor.submit(_run_question, q_idx, example, "agentic")
-                        for q_idx, example in enumerate(dataset, 1)
-                    ]
-                    config_results["questions"] = [future.result() for future in as_completed(futures)]
-                    config_results["questions"].sort(key=lambda x: x["question_id"])
-            else:
-                for q_idx, example in enumerate(dataset, 1):
-                    current_run += 1
-                    question = example["inputs"]["question"]
-                    reference_answer = example["outputs"]["answer"]
-                    
-                    print(f"  [{current_run}/{total_runs}] Q{q_idx}: {question[:60]}...", end=" ", flush=True)
-                    
-                    # Call chatbot in agentic mode
-                    answer_dict = call_chatbot_json(question, "agentic")
-                    
-                    # Run evaluations
-                    evaluations = run_evaluation(question, answer_dict, reference_answer)
-                    
-                    # Store results
-                    question_result = {
-                        "question_id": q_idx,
-                        "question": question,
-                        "tags": example.get("tags", []),
-                        "reference_answer": reference_answer,
-                        "generated_answer": answer_dict.get("answer", ""),
-                        "evaluations": evaluations
-                    }
-                    config_results["questions"].append(question_result)
-                    
-                    scores_str = " | ".join([
-                        f"{k}: {v.get('score', 0):.1f}"
-                        for k, v in evaluations.items()
-                    ])
-                    print(f"[{scores_str}]")
-            
-            # Calculate average scores for this agentic configuration
-            avg_scores = {}
-            for metric in ["correctness", "relevance", "groundedness", "retrieval_relevance"]:
-                scores = [q["evaluations"][metric].get("score", 0) for q in config_results["questions"]]
-                avg_scores[metric] = sum(scores) / len(scores) if scores else 0
-            
-            config_results["average_scores"] = avg_scores
             all_results["results"].append(config_results)
-            
+
             print(f"  Average scores: {' | '.join([f'{k}: {v:.1f}' for k, v in avg_scores.items()])}")
-    
-    # Save results
+            print(f"  Average request time: {avg_request_time:.3f}s")
+
+    for mode in modes:
+        _run_mode(mode, mode_configs[mode])
+
     results_file = output_path / f"benchmark_{timestamp}.json"
     with open(results_file, "w", encoding="utf-8") as f:
         json.dump(all_results, f, ensure_ascii=False, indent=2)
-    
+
     print(f"\n{'='*80}")
     print("BENCHMARK COMPLETE")
     print(f"{'='*80}")
     print(f"Results saved to: {results_file}\n")
-    
-    # Print summary
-    print_benchmark_summary(all_results)
-    
-    return all_results
 
+    print_benchmark_summary(all_results)
+    return all_results
 
 def print_benchmark_summary(results: Dict):
     """Print summary of benchmark results"""
@@ -449,7 +284,6 @@ def print_benchmark_summary(results: Dict):
         
         overall = sum(avg_scores.values()) / len(avg_scores) if avg_scores else 0
         print(f"  Overall:             {overall:.1f}/10\n")
-
 
 def compare_results(results_dir: str = "benchmark_results"):
     """Compare multiple benchmark runs"""
@@ -496,15 +330,10 @@ def compare_results(results_dir: str = "benchmark_results"):
         
         print()
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark RAG and agentic modes")
-    parser.add_argument("--modes", nargs="+", default=["rag", "agentic"],
-                        help="Modes to test (rag, agentic)")
     parser.add_argument("--limit", type=int, default=None,
                         help="Limit number of questions to test")
-    parser.add_argument("--output-dir", default="benchmark_results",
-                        help="Output directory for results")
     parser.add_argument("--compare", action="store_true",
                         help="Compare existing results instead of running benchmark")
     parser.add_argument("--verbose", action="store_true",
@@ -519,14 +348,10 @@ if __name__ == "__main__":
     elif workers < -1:
         parser.error("--workers must be -1 or a positive integer")
     
-    if args.compare:
-        compare_results(args.output_dir)
     else:
         examples = _load_examples()
         run_benchmark(
             examples,
-            output_dir=args.output_dir,
-            modes=args.modes,
             limit_questions=args.limit,
             verbose=args.verbose,
             max_workers=workers

@@ -2,14 +2,17 @@ import subprocess
 import sys
 import json
 import os
-import re
+import time
 from pathlib import Path
 
 from typing_extensions import Annotated, TypedDict
 import requests
 from typing import Any
 
-# Load configuration from evaluator/config.json with fallback on environment variables
+############################################################################################
+### Load configuration from evaluator/config.json with fallback on environment variables ###
+############################################################################################
+
 def load_evaluator_config(config_path: Path = None) -> dict:
     if config_path is None:
         config_path = Path(__file__).resolve().parent / "config.json"
@@ -41,13 +44,11 @@ CHATBOT_DIR = os.getenv("CHATBOT_DIR", evaluator_config.get("chatbot_path"))
 
 evaluator_options = evaluator_config.get("evaluator_options", {})
 
-AGENTIC_MODE = evaluator_options.get("agentic_mode", evaluator_options.get("agentic_mode"))
+AGENTIC_MODE = bool(evaluator_options.get("agentic_mode", False))
 
-def traceable():
-    """No-op decorator placeholder (LangSmith tracing removed)."""
-    def decorator(func):
-        return func
-    return decorator
+############################################################################################
+################################ Custom Mistral LLM client #################################
+############################################################################################
 
 # Custom Mistral LLM client
 class MistralLLM:
@@ -105,344 +106,36 @@ class MistralLLM:
         self.structured_output_enabled = True
         return self
 
+def _run_structured_eval(llm: MistralLLM, instructions: str, content: str):
+    """Run a structured evaluator LLM and extract the output.
 
-def _normalize_score_value(value: Any) -> float:
-    if isinstance(value, bool):
-        return 10.0 if value else 0.0
-    if isinstance(value, (int, float)):
-        score = float(value)
-        if 0.0 <= score <= 1.0:
-            return score * 10.0
-        if 0.0 <= score <= 10.0:
-            return score
-        if 0.0 <= score <= 100.0:
-            return score / 10.0
-        return max(0.0, min(score, 10.0))
-    if isinstance(value, str):
-        text = value.strip()
-        if text.endswith("%"):
-            text = text[:-1].strip()
-        if text.lower() in ("true", "yes"):
-            return 10.0
-        if text.lower() in ("false", "no"):
-            return 0.0
-        try:
-            return _normalize_score_value(float(text))
-        except ValueError:
-            return 0.0
-    return 0.0
-
-
-def _extract_score_from_grade(grade: dict, keys: list) -> float:
-    """Try multiple possible keys in the judge output to determine a normalized score on 0-10."""
-    if not isinstance(grade, dict):
-        return 0.0
-    if "score" in grade:
-        return _normalize_score_value(grade["score"])
-    for k in keys:
-        if k in grade:
-            return _normalize_score_value(grade[k])
-    # try nested common wrappers
-    for wrapper in ("result", "data", "value"):
-        if wrapper in grade and isinstance(grade[wrapper], dict):
-            if "score" in grade[wrapper]:
-                return _normalize_score_value(grade[wrapper]["score"])
-            for k in keys:
-                if k in grade[wrapper]:
-                    return _normalize_score_value(grade[wrapper][k])
-    return 0.0
-
-
-def _run_structured_eval(llm: MistralLLM, instructions: str, content: str, score_keys: list):
-    """Run a structured evaluator LLM and normalize the output.
-
-    Returns: {score: float, explanation: str, explanation_raw: Any}
+    Returns: {score: float, explanation: str}
     """
     try:
         grade = llm.invoke([
             {"role": "system", "content": instructions},
             {"role": "user", "content": content},
         ])
-        explanation_text = ""
-        explanation_raw = None
         if isinstance(grade, dict):
-            explanation_raw = grade
-            score = _extract_score_from_grade(grade, score_keys)
-            explanation_text = grade.get("explanation") or grade.get("content") or ""
-            if not explanation_text and "reasoning" in grade:
-                explanation_text = grade.get("reasoning")
+            score = float(grade.get("score", 0.0))
+            explanation_text = grade.get("explanation", "")
         else:
-            explanation_text = getattr(grade, "content", "") or ""
-            score = _normalize_score_value(explanation_text)
-            explanation_raw = {"content": explanation_text}
-        return {"score": score, "explanation": explanation_text, "explanation_raw": explanation_raw}
+            # Fallback for non-structured responses
+            explanation_text = "Non-structured response ..."
+            score = 0.0
+        return {"score": score, "explanation": explanation_text}
     except Exception as e:
-        return {"score": 0.0, "explanation": str(e), "explanation_raw": None}
+        return {"score": 0.0, "explanation": str(e)}
 
-
-def correctness(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
-    """Evaluator for RAG answer accuracy (normalized return)."""
-    answers = f"QUESTION: {inputs['question']}\nGROUND TRUTH ANSWER: {reference_outputs['answer']}\nSTUDENT ANSWER: {outputs['answer']}"
-    return _run_structured_eval(grader_llm, correctness_instructions, answers, ["correct", "correctness", "result"])
-
-# Add decorator so this function is traced in LangSmith (no-op)
-@traceable()
-def rag_bot(question: str) -> dict:
-    """Call the external chatbot to answer the question and retrieve documents"""
-    try:
-        # Call the chatbot.py script with JSON output mode
-        # Redirect stderr to suppress debug prints from chatbot initialization
-        
-        if AGENTIC_MODE:
-            result = subprocess.run(
-                [sys.executable, "chatbot.py", "--mode", "agentic", "--question", question, "--json-output"],
-                cwd=CHATBOT_DIR,
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-        else:
-            result = subprocess.run(
-                [sys.executable, "chatbot.py", "--question", question, "--json-output"],
-                cwd=CHATBOT_DIR,
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-        
-        if result.returncode != 0:
-            return {
-                "answer": f"Error calling chatbot: {result.stderr}",
-                "documents": []
-            }
-        
-        try:
-            # Parse JSON response - try to extract JSON from stdout
-            # which may contain debug prints before the JSON
-            stdout = result.stdout.strip()
-            # Find the start of JSON (starts with '{')
-            json_start = stdout.find('{')
-            if json_start >= 0:
-                # Extract JSON from the line containing the start
-                json_str = stdout[json_start:]
-                # Find the end of the JSON object by finding the last '}'
-                json_end = json_str.rfind('}')
-                if json_end >= 0:
-                    json_str = json_str[:json_end + 1]
-                    chatbot_result = json.loads(json_str)
-                else:
-                    raise ValueError("Invalid JSON format")
-            else:
-                raise ValueError("No JSON found in chatbot output")
-            
-            answer = chatbot_result.get("answer", "No answer returned")
-            sources = chatbot_result.get("sources", [])
-            
-            # Convert sources to document objects with page_content attribute
-            documents = []
-            for source in sources:
-                class Document:
-                    def __init__(self, content, metadata):
-                        self.page_content = content
-                        self.metadata = metadata
-                
-                doc = Document(
-                    content=source.get("content", ""),
-                    metadata={
-                        "title": source.get("title", "Unknown"),
-                        "module": source.get("module", "Unknown"),
-                        "doc_category": source.get("doc_category", "Unknown"),
-                        "doc_type": source.get("doc_type", "Unknown"),
-                        "url": source.get("url", "")
-                    }
-                )
-                documents.append(doc)
-            
-            return {
-                "answer": answer,
-                "documents": documents
-            }
-        except (json.JSONDecodeError, ValueError) as e:
-            # Fallback if JSON parsing fails
-            return {
-                "answer": f"Error parsing chatbot response: {str(e)}",
-                "documents": []
-            }
-    except subprocess.TimeoutExpired:
-        return {
-            "answer": "Chatbot request timed out",
-            "documents": []
-        }
-    except Exception as e:
-        return {
-            "answer": f"Error: {str(e)}",
-            "documents": []
-        }
-
-# Load the examples for the dataset from JSON file
-dataset_file = Path(__file__).resolve().parent / "dataset.json"
-
-def _load_examples():
-    with open(dataset_file, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-# Grade output schema
-class CorrectnessGrade(TypedDict):
-    # Note that the order in the fields are defined is the order in which the model will generate them.
-    # It is useful to put explanations before responses because it forces the model to think through
-    # its final response before generating it:
-    explanation: Annotated[str, ..., "Expliquez votre raisonnement pour la note"]
-    score: Annotated[float, ..., "Note entre 0 et 10"]
-    correct: Annotated[bool, ..., "True if the answer is correct, False otherwise."]
-
-# Grade prompt
-correctness_instructions = """Vous êtes un professeur qui note un quiz. Vous recevrez une QUESTION, la RÉPONSE DE RÉFÉRENCE et la RÉPONSE DE L'ÉTUDIANT. Utilisez une note entre 0 et 10 pour évaluer la précision factuelle de la réponse.
-
-Critères de correction :
-(1) Évaluez uniquement la précision factuelle par rapport à la réponse de référence.
-(2) Vérifiez que la réponse de l'étudiant ne contient pas de contradictions internes.
-(3) Il est acceptable que la réponse contienne plus d'informations que la réponse de référence, tant qu'elles sont factuellement exactes.
-
-Répondez en français uniquement. Donnez la note dans la clé `score` comme un nombre entre 0 et 10. Dans `explanation`, donnez uniquement votre commentaire de notation, sans répéter la question, la réponse de référence ou la réponse de l'étudiant."""
-
-# Grader LLM
-grader_llm = MistralLLM(api_url=LLM_API_URL, model=LLM_MODEL, api_key=LLM_API_KEY, temperature=0).with_structured_output(CorrectnessGrade, method="json_schema", strict=True)
-
-
-# Grade output schema
-class RelevanceGrade(TypedDict):
-    explanation: Annotated[str, ..., "Expliquez votre raisonnement pour la note"]
-    score: Annotated[float, ..., "Note entre 0 et 10"]
-    relevant: Annotated[
-        bool, ..., "Provide the score on whether the answer addresses the question"
-    ]
-
-# Grade prompt
-relevance_instructions = """Vous êtes un professeur qui note un quiz. Vous recevrez une QUESTION et une RÉPONSE DE L'ÉTUDIANT. Utilisez une note entre 0 et 10 pour évaluer la pertinence de la réponse.
-
-Critères de pertinence :
-(1) La réponse doit être concise et directement liée à la question.
-(2) La réponse doit aider à répondre à la question.
-
-Répondez en français uniquement. Donnez la note dans la clé `score` comme un nombre entre 0 et 10. Dans `explanation`, donnez uniquement votre commentaire de notation, sans répéter la question ou la réponse de l'étudiant."""
-
-# Grader LLM
-relevance_llm = MistralLLM(
-    api_url=LLM_API_URL,
-    model=LLM_MODEL,
-    api_key=LLM_API_KEY,
-    temperature=0
-).with_structured_output(
-    RelevanceGrade, method="json_schema", strict=True
-)
-
-# Evaluator
-def relevance(inputs: dict, outputs: dict) -> bool:
-    """A simple evaluator for RAG answer helpfulness."""
-    answer = f"QUESTION: {inputs['question']}\nSTUDENT ANSWER: {outputs['answer']}"
-    return _run_structured_eval(relevance_llm, relevance_instructions, answer, ["relevant", "relevance", "result"])
-
-# Grade output schema
-class GroundedGrade(TypedDict):
-    explanation: Annotated[str, ..., "Expliquez votre raisonnement pour la note"]
-    score: Annotated[float, ..., "Note entre 0 et 10"]
-    grounded: Annotated[
-        bool, ..., "Provide the score on if the answer hallucinates from the documents"
-    ]
-
-# Grade prompt
-grounded_instructions = """Vous êtes un professeur qui note un quiz. Vous recevrez des FAITS et une RÉPONSE DE L'ÉTUDIANT. Utilisez une note entre 0 et 10 pour évaluer si la réponse est fondée sur les faits.
-
-Critères de fondement :
-(1) La réponse doit être ancrée dans les FAITS fournis.
-(2) La réponse ne doit pas contenir d'informations « hallucinées » hors du champ des FAITS.
-
-Répondez en français uniquement. Donnez la note dans la clé `score` comme un nombre entre 0 et 10. Dans `explanation`, donnez uniquement votre commentaire de notation, sans répéter les faits ou la réponse de l'étudiant."""
-
-# Grader LLM
-grounded_llm = MistralLLM(
-    api_url=LLM_API_URL,
-    model=LLM_MODEL,
-    api_key=LLM_API_KEY,
-    temperature=0
-).with_structured_output(
-    GroundedGrade, method="json_schema", strict=True
-)
-
-# Evaluator
-def groundedness(inputs: dict, outputs: dict) -> bool:
-    """A simple evaluator for RAG answer groundedness."""
-    docs = outputs.get("documents") or []
-    doc_string = "\n\n".join(getattr(doc, "page_content", str(doc)) for doc in docs)
-    answer = f"FACTS: {doc_string}\nSTUDENT ANSWER: {outputs['answer']}"
-    return _run_structured_eval(grounded_llm, grounded_instructions, answer, ["grounded", "groundedness", "result"])
-
-# Grade output schema
-class RetrievalRelevanceGrade(TypedDict):
-    explanation: Annotated[str, ..., "Expliquez votre raisonnement pour la note"]
-    score: Annotated[float, ..., "Note entre 0 et 10"]
-    relevant: Annotated[
-        bool,
-        ...,
-        "True if the retrieved documents are relevant to the question, False otherwise",
-    ]
-
-# Grade prompt
-retrieval_relevance_instructions = """Vous êtes un professeur qui note un quiz. Vous recevrez une QUESTION et un ensemble de DOCUMENTS fournis par l'étudiant. Utilisez une note entre 0 et 10 pour évaluer la pertinence de ces documents.
-
-Critères de pertinence :
-(1) Identifiez les DOCUMENTS qui sont complètement sans rapport avec la QUESTION.
-(2) Si les documents contiennent des mots-clés ou un sens sémantique lié à la question, considérez-les comme pertinents.
-(3) Il est acceptable que les documents contiennent des informations partiellement sans rapport tant que le critère (2) est respecté.
-
-Répondez en français uniquement. Donnez la note dans la clé `score` comme un nombre entre 0 et 10. Dans `explanation`, donnez uniquement votre commentaire de notation, sans répéter la question ou les documents fournis."""
-
-# Grader LLM
-retrieval_relevance_llm = MistralLLM(
-    api_url=LLM_API_URL,
-    model=LLM_MODEL,
-    api_key=LLM_API_KEY,
-    temperature=0
-).with_structured_output(RetrievalRelevanceGrade, method="json_schema", strict=True)
-
-def retrieval_relevance(inputs: dict, outputs: dict) -> bool:
-    """An evaluator for document relevance using agentic mode sources"""
-    # Always use agentic mode sources for evaluation
-    try:
-        agentic_result = subprocess.run(
-            [sys.executable, "chatbot.py", "--mode", "agentic", "--question", inputs['question'], "--json-output"],
-            cwd=CHATBOT_DIR,
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-        if agentic_result.returncode == 0:
-            stdout = agentic_result.stdout.strip()
-            json_start = stdout.find('{')
-            if json_start >= 0:
-                json_str = stdout[json_start:]
-                json_end = json_str.rfind('}')
-                if json_end >= 0:
-                    json_str = json_str[:json_end + 1]
-                    chatbot_result = json.loads(json_str)
-                    sources = chatbot_result.get("sources", [])
-                else:
-                    sources = []
-            else:
-                sources = []
-        else:
-            sources = []
-    except:
-        sources = []
-    
-    # Convert sources to document objects
+def _build_documents(sources: list) -> list:
+    """Convert raw source dicts into document-like objects."""
     documents = []
     for source in sources:
         class Document:
             def __init__(self, content, metadata):
                 self.page_content = content
                 self.metadata = metadata
-        
+
         doc = Document(
             content=source.get("content", ""),
             metadata={
@@ -454,110 +147,294 @@ def retrieval_relevance(inputs: dict, outputs: dict) -> bool:
             }
         )
         documents.append(doc)
-    
-    docs = documents
-    doc_string = "\n\n".join(getattr(doc, "page_content", str(doc)) for doc in docs)
-    answer = f"DOCUMENTS: {doc_string}\nQUESTION: {inputs['question']}"
-    # Run evaluator
-    return _run_structured_eval(retrieval_relevance_llm, retrieval_relevance_instructions, answer, ["relevant", "relevance", "result"])
+    return documents
+
+def _call_chatbot(question: str, mode: str = None) -> dict:
+    """Call chatbot.py and return parsed answer/documents."""
+    start_time = time.perf_counter()
+    cmd = [sys.executable, "chatbot.py", "--question", question, "--json-output"]
+    if mode:
+        cmd.extend(["--mode", mode])
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=CHATBOT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        elapsed = time.perf_counter() - start_time
+        if result.returncode != 0:
+            return {
+                "answer": f"Error calling chatbot: {result.stderr}",
+                "documents": [],
+                "request_time": elapsed,
+            }
+
+        stdout = result.stdout.strip()
+        json_start = stdout.find('{')
+        if json_start < 0:
+            raise ValueError("No JSON found in chatbot output")
+
+        json_str = stdout[json_start:]
+        json_end = json_str.rfind('}')
+        if json_end < 0:
+            raise ValueError("Invalid JSON format")
+
+        chatbot_result = json.loads(json_str[:json_end + 1])
+        answer = chatbot_result.get("answer", "No answer returned")
+        sources = chatbot_result.get("sources", [])
+        return {
+            "answer": answer,
+            "documents": _build_documents(sources),
+            "request_time": elapsed,
+        }
+
+    except (json.JSONDecodeError, ValueError) as e:
+        elapsed = time.perf_counter() - start_time
+        return {
+            "answer": f"Error parsing chatbot response: {str(e)}",
+            "documents": [],
+            "request_time": elapsed,
+        }
+    except subprocess.TimeoutExpired:
+        elapsed = time.perf_counter() - start_time
+        return {
+            "answer": "Chatbot request timed out",
+            "documents": [],
+            "request_time": elapsed,
+        }
+    except Exception as e:
+        elapsed = time.perf_counter() - start_time
+        return {
+            "answer": f"Error: {str(e)}",
+            "documents": [],
+            "request_time": elapsed,
+        }
+
+def rag_bot(question: str) -> dict:
+    """Call the external chatbot to answer the question and retrieve documents."""
+    return _call_chatbot(question, "agentic" if AGENTIC_MODE else None)
 
 def target(inputs: dict) -> dict:
     return rag_bot(inputs["question"])
 
-# Test the RAG system with examples
-print("Testing RAG system...")
+############################################################################################
+####################################### Correctness ########################################
+############################################################################################
+
+# Grade output schema
+class CorrectnessGrade(TypedDict):
+    explanation: Annotated[str, ..., "A step-by-step explanation in French justifying the score based on the criteria"]
+    score: Annotated[float, ..., "A number between 0 and 10"]
+
+# Grade prompt
+correctness_instructions = """You are a teacher grading a quiz. You will be given a QUESTION, the GROUND TRUTH (correct) ANSWER, and the STUDENT ANSWER.
+
+Your task is to evaluate the student’s answer based on the following criteria:
+
+(1) Grade the student answer based ONLY on its factual accuracy relative to the ground truth answer.
+(2) Ensure that the student answer does not contain any internal contradictions.
+(3) It is acceptable for the student answer to include additional information, as long as it is factually accurate and consistent with the ground truth.
+
+You must assign a score between 0 and 10 reflecting the factual accuracy of the student’s answer.
+
+A score of 10 means the answer is completely factually correct.
+A score of 0 means the answer is entirely incorrect.
+
+Your output must be in JSON format with the following structure:
+
+- "score": a number between 0 and 10
+- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above. Avoid simply stating the correct answer at the outset."""
+
+# Grader LLM
+grader_llm = MistralLLM(
+    api_url=LLM_API_URL,
+    model=LLM_MODEL,
+    api_key=LLM_API_KEY,
+    temperature=0
+).with_structured_output(CorrectnessGrade, method="json_schema", strict=True)
+
+# Evaluator
+def correctness(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
+    """Score the answer against the reference output."""
+    answers = (
+        f"QUESTION: {inputs['question']}\n"
+        f"GROUND TRUTH ANSWER: {reference_outputs['answer']}\n"
+        f"STUDENT ANSWER: {outputs['answer']}"
+    )
+    return _run_structured_eval(grader_llm, correctness_instructions, answers)
+
+############################################################################################
+######################################## Relevance #########################################
+############################################################################################
+
+# Grade output schema
+class RelevanceGrade(TypedDict):
+    explanation: Annotated[str, ..., "A step-by-step explanation in French justifying the score based on the criteria"]
+    score: Annotated[float, ..., "A number between 0 and 10"]
+
+# Grade prompt
+relevance_instructions = """You are a teacher grading a quiz. You will be given a QUESTION and a STUDENT ANSWER.
+
+Your task is to evaluate the relevance of the student’s answer based on the following criteria:
+
+(1) Ensure the STUDENT ANSWER is concise and directly relevant to the QUESTION.
+(2) Ensure the STUDENT ANSWER helps to answer the QUESTION.
+
+You must assign a score between 0 and 10 reflecting the relevance of the student’s answer:
+
+A score of 10 means the answer is fully relevant, concise, and directly answers the question.
+A score of 0 means the answer is irrelevant, off-topic, or does not help answer the question.
+
+Your output must be in JSON format with the following structure:
+
+- "score": a number between 0 and 10
+- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above. Avoid simply stating the correct answer at the outset."""
+
+# Grader LLM
+relevance_llm = MistralLLM(
+    api_url=LLM_API_URL,
+    model=LLM_MODEL,
+    api_key=LLM_API_KEY,
+    temperature=0
+).with_structured_output(RelevanceGrade, method="json_schema", strict=True)
+
+# Evaluator
+def relevance(inputs: dict, outputs: dict) -> dict:
+    """Score whether the answer is relevant to the question."""
+    answers = (
+        f"QUESTION: {inputs['question']}\n"
+        f"STUDENT ANSWER: {outputs['answer']}"
+    )
+    return _run_structured_eval(relevance_llm, relevance_instructions, answers)
+
+############################################################################################
+######################################## Groundedness ######################################
+############################################################################################
+
+# Grade output schema
+class GroundedGrade(TypedDict):
+    explanation: Annotated[str, ..., "A step-by-step explanation in French justifying the score based on the criteria"]
+    score: Annotated[float, ..., "A number between 0 and 10"]
+
+# Grade prompt
+grounded_instructions = """You are a teacher grading a quiz. You will be given FACTS and a STUDENT ANSWER.
+
+Your task is to evaluate whether the student’s answer is grounded in the provided facts based on the following criteria:
+
+(1) Ensure the STUDENT ANSWER is fully grounded in the FACTS.
+(2) Ensure the STUDENT ANSWER does not contain any “hallucinated” information outside the scope of the FACTS.
+
+You must assign a score between 0 and 10 reflecting how well the student’s answer is grounded in the facts:
+
+A score of 10 means the answer is entirely based on the provided facts with no hallucinated information.
+A score of 0 means the answer is not grounded in the facts at all or contains significant hallucinated information.
+
+Your output must be in JSON format with the following structure:
+
+- "score": a number between 0 and 10
+- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above. Avoid simply stating the correct answer at the outset."""
+
+# Grader LLM
+grounded_llm = MistralLLM(
+    api_url=LLM_API_URL,
+    model=LLM_MODEL,
+    api_key=LLM_API_KEY,
+    temperature=0
+).with_structured_output(GroundedGrade, method="json_schema", strict=True)
+
+# Evaluator
+def groundedness(_inputs: dict, outputs: dict) -> dict:
+    """Score whether the answer is grounded in the provided documents."""
+    documents = outputs.get("documents") or []
+    if not documents:
+        return {"score": 0.0, "explanation": "No documents were provided by the student."}
+    
+    doc_string = "\n\n".join(getattr(doc, "page_content", str(doc)) for doc in documents)
+    answers = (
+        f"FACTS: {doc_string}\n"
+        f"STUDENT ANSWER: {outputs['answer']}"
+    )
+    return _run_structured_eval(grounded_llm, grounded_instructions, answers)
+
+############################################################################################
+#################################### Retrieval Relevance ###################################
+############################################################################################
+
+# Grade output schema
+class RetrievalRelevanceGrade(TypedDict):
+    explanation: Annotated[str, ..., "A step-by-step explanation in French justifying the score based on the criteria"]
+    score: Annotated[float, ..., "A number between 0 and 10"]
+
+# Grade prompt
+retrieval_relevance_instructions = """You are a teacher grading a quiz. You will be given a QUESTION and a set of FACTS (documents) provided by the student.
+
+Your task is to evaluate the relevance of these facts with respect to the question based on the following criteria:
+
+(1) Identify any FACTS that are completely unrelated to the QUESTION.
+(2) If the FACTS contain ANY keywords or semantic meaning related to the QUESTION, consider them relevant.
+(3) It is acceptable for the FACTS to include some unrelated information as long as criterion (2) is met.
+
+You must assign a score between 0 and 10 reflecting the overall relevance of the provided facts:
+
+A score of 10 means the facts clearly contain relevant keywords or semantic meaning related to the question.
+A score of 0 means the facts are completely unrelated to the question.
+
+Your output must be in JSON format with the following structure:
+
+- "score": a number between 0 and 10
+- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above. Avoid simply stating the correct answer at the outset."""
+
+# Grader LLM
+retrieval_relevance_llm = MistralLLM(
+    api_url=LLM_API_URL,
+    model=LLM_MODEL,
+    api_key=LLM_API_KEY,
+    temperature=0
+).with_structured_output(RetrievalRelevanceGrade, method="json_schema", strict=True)
+
+# Evaluator
+def retrieval_relevance(inputs: dict, outputs: dict) -> dict:
+    """Score whether provided documents are relevant to the question."""
+    documents = outputs.get("documents") or []
+    if not documents:
+        return {"score": 0.0, "explanation": "No documents were provided by the student."}
+
+    doc_string = "\n\n".join(getattr(doc, "page_content", str(doc)) for doc in documents)
+    answers = (
+        f"DOCUMENTS: {doc_string}\n"
+        f"QUESTION: {inputs['question']}"
+    )
+    return _run_structured_eval(retrieval_relevance_llm, retrieval_relevance_instructions, answers)
+
+############################################################################################
+###################################### Run on dataset ######################################
+############################################################################################
+
+# Load the examples for the dataset from JSON file
+dataset_file = Path(__file__).resolve().parent / "dataset.json"
+
+def _load_examples():
+    with open(dataset_file, "r", encoding="utf-8") as f:
+        return json.load(f)
+    
+# Test the Chatbot with dataset
+print("Testing Chatbot...")
 print("=" * 80)
-
-def _extract_explanation_from_raw(raw):
-    if raw is None:
-        return ""
-    if isinstance(raw, str):
-        return raw.strip()
-    if isinstance(raw, list):
-        parts = [_extract_explanation_from_raw(item) for item in raw]
-        return " \n".join(part for part in parts if part)
-    if isinstance(raw, dict):
-        for key in ("explanation", "reasoning", "REASONING", "reason", "message", "content", "text", "output"):
-            if key in raw and raw[key]:
-                return _extract_explanation_from_raw(raw[key])
-
-        if "error" in raw and raw["error"]:
-            error = raw["error"]
-            if isinstance(error, str):
-                return error.strip()
-            if isinstance(error, dict):
-                for key in ("message", "reason", "description", "details"):
-                    if key in error and error[key]:
-                        return _extract_explanation_from_raw(error[key])
-
-        if "evaluation" in raw and isinstance(raw["evaluation"], dict):
-            return _extract_explanation_from_raw(raw["evaluation"])
-
-        parts = []
-        for value in raw.values():
-            candidate = _extract_explanation_from_raw(value)
-            if candidate and candidate not in parts:
-                parts.append(candidate)
-        return " \n".join(parts)
-
-    return ""
-
-
-def _clean_explanation_text(text) -> str:
-    if not text:
-        return ""
-    
-    # Handle dict inputs by extracting string content
-    if isinstance(text, dict):
-        text = _extract_explanation_from_raw(text)
-    
-    # Ensure we have a string now
-    if not isinstance(text, str):
-        text = str(text)
-    
-    cleaned = text.replace("\r\n", "\n").strip()
-    patterns = [
-        r"(?ims)^question\s*:\s*.*?(?=\n(?:ground truth answer|student answer|facts|evaluation|$))",
-        r"(?ims)^ground truth answer\s*:\s*.*?(?=\n(?:question|student answer|facts|evaluation|$))",
-        r"(?ims)^student answer\s*:\s*.*?(?=\n(?:question|ground truth answer|facts|evaluation|$))",
-        r"(?ims)^facts\s*:\s*.*?(?=\n(?:question|ground truth answer|student answer|evaluation|$))",
-        r"(?ims)^question\s*[-]\s*.*?(?=\n(?:ground truth answer|student answer|facts|evaluation|$))",
-    ]
-    for pattern in patterns:
-        cleaned = re.sub(pattern, "", cleaned)
-
-    marker_patterns = [
-        r"(?i)la réponse de l['’]étudiant",
-        r"(?i)la réponse de l['’]étudiant·e",
-        r"(?i)l['’]étudiant",
-        r"(?i)l['’]étudiante",
-        r"(?i)le modèle",
-        r"(?i)la réponse est",
-        r"(?i)en accord avec la vérité terre?rain",
-    ]
-    for marker in marker_patterns:
-        m = re.search(marker, cleaned)
-        if m:
-            cleaned = cleaned[m.start():].strip()
-            break
-
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-    return cleaned
-
 
 def _sanitize_eval_result(ev):
     """Extract score and explanation from evaluation result, always preserving LLM explanations."""
     if not isinstance(ev, dict):
-        return {"score": bool(ev)}
+        return {"score": float(ev) if isinstance(ev, (int, float)) else 0.0}
     
-    out = {"score": _normalize_score_value(ev.get("score", False))}
-    expl = ev.get("explanation") or ""
-    if expl:
-        out["explanation"] = _clean_explanation_text(expl)
-        return out
-    
-    expl = _extract_explanation_from_raw(ev.get("explanation_raw"))
-    out["explanation"] = _clean_explanation_text(expl)
+    # Extract score (should already be 0-10 from Mistral)
+    score_val = ev.get("score", 0)
+    score = float(score_val) if isinstance(score_val, (int, float)) else 0.0
+    out = {"score": score}
+    out["explanation"] = ev.get("explanation") or ""
     return out
 
 def main():
@@ -611,11 +488,14 @@ def main():
             retrieval_rel = {"score": False, "explanation": str(e)}
             print(f"  Retrieval Relevance eval error: {e}")
 
+        request_time = output.get("request_time", 0.0) if isinstance(output, dict) else 0.0
+
         # Append structured result (sanitize to remove explanation_raw and empty explanations)
         results.append({
             "question": q,
             "expected_answer": expected,
             "rag_answer": rag_answer,
+            "request_time": request_time,
             "evaluations": {
                 "correctness": _sanitize_eval_result(correct),
                 "relevance": _sanitize_eval_result(relevant),
@@ -643,16 +523,17 @@ def main():
         avg_relevance = sum(r["evaluations"]["relevance"].get("score", 0.0) for r in results) / len(results)
         avg_groundedness = sum(r["evaluations"]["groundedness"].get("score", 0.0) for r in results) / len(results)
         avg_retrieval_relevance = sum(r["evaluations"]["retrieval_relevance"].get("score", 0.0) for r in results) / len(results)
-        
+        avg_request_time = sum(r.get("request_time", 0.0) for r in results) / len(results)
+
         print(f"Total examples evaluated: {len(results)}\n")
         print(f"Correctness:         {avg_correctness:.1f}/10")
         print(f"Relevance:           {avg_relevance:.1f}/10")
         print(f"Groundedness:        {avg_groundedness:.1f}/10")
         print(f"Retrieval Relevance: {avg_retrieval_relevance:.1f}/10")
-        
+        print(f"Average Chatbot Request Time: {avg_request_time:.3f} seconds")
+
         avg_overall = (avg_correctness + avg_relevance + avg_groundedness + avg_retrieval_relevance) / 4
         print(f"\nOverall Average:     {avg_overall:.1f}/10")
-
 
 if __name__ == "__main__":
     main()
