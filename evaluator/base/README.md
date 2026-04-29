@@ -14,7 +14,17 @@ Copy `config.example.json` to create your configuration.
 ## Usage
 
 ```bash
+# Full test
 python evaluator.py
+
+# Quick test (2 questions)
+python evaluator.py --limit 2
+
+# Parallel mode (5 workers)
+python evaluator.py --workers 5
+
+# Limit chatbot timeout (default no timeout)
+python evaluator.py --timeout 60
 ```
 
 ## Metrics

@@ -17,6 +17,9 @@ python benchmark.py --help
 # Quick test (2 questions)
 python benchmark.py --limit 2
 
+# Limit chatbot timeout (default no timeout)
+python benchmark.py --timeout 60
+
 # Compare existing benchmarks
 python benchmark.py --compare
 

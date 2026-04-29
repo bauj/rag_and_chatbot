@@ -69,6 +69,7 @@ def run_benchmark(
     limit_questions: int = None,
     verbose: bool = False,
     max_workers: int = 1,
+    timeout_seconds: int = None,
 ):
     """Run full benchmark with all configurations"""
 
@@ -88,6 +89,7 @@ def run_benchmark(
             "benchmark_config": config_data,
             "total_questions": len(dataset) if limit_questions is None else min(limit_questions, len(dataset)),
             "workers": max_workers,
+            "timeout_seconds": timeout_seconds,
         },
         "results": []
     }
@@ -134,12 +136,13 @@ def run_benchmark(
         question_id: int,
         example: Dict[str, Any],
         mode: str,
-        executor: Optional[ThreadPoolExecutor] = None
+        executor: Optional[ThreadPoolExecutor] = None,
+        timeout_seconds: int = None,
     ) -> Dict[str, Any]:
         question = example["inputs"]["question"]
         reference_answer = example["outputs"]["answer"]
 
-        answer_dict = _call_chatbot(question, mode)
+        answer_dict = _call_chatbot(question, mode, timeout_seconds)
         evaluations = run_evaluation(question, answer_dict, reference_answer, executor=executor)
         request_time = answer_dict.get("request_time", 0.0)
 
@@ -176,50 +179,18 @@ def run_benchmark(
             if max_workers > 1:
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = {
-                        executor.submit(_call_chatbot, example["inputs"]["question"], mode): (q_idx, example)
+                        executor.submit(_run_question, q_idx, example, mode, executor, timeout_seconds): q_idx
                         for q_idx, example in enumerate(dataset, 1)
                     }
 
                     questions = []
                     for future in as_completed(futures):
-                        q_idx, example = futures[future]
-                        answer_dict = future.result()
-                        question = example["inputs"]["question"]
-                        reference_answer = example["outputs"]["answer"]
-
-                        evaluations = run_evaluation(
-                            question,
-                            answer_dict,
-                            reference_answer,
-                            executor=executor
-                        )
-                        request_time = answer_dict.get("request_time", 0.0)
-
-                        with progress_lock:
-                            progress_state["count"] += 1
-                            run_number = progress_state["count"]
-
-                        if verbose:
-                            scores_str = " | ".join([
-                                f"{k}: {v.get('score', 0):.1f}"
-                                for k, v in evaluations.items()
-                            ])
-                            print(f"  [{run_number}/{total_runs}] Q{q_idx}: {question[:60]}... [{scores_str}]")
-
-                        questions.append({
-                            "question_id": q_idx,
-                            "question": question,
-                            "tags": example.get("tags", []),
-                            "reference_answer": reference_answer,
-                            "generated_answer": answer_dict.get("answer", ""),
-                            "evaluations": evaluations,
-                            "request_time": request_time,
-                        })
+                        questions.append(future.result())
 
                     questions.sort(key=lambda x: x["question_id"])
             else:
                 questions = [
-                    _run_question(q_idx, example, mode)
+                    _run_question(q_idx, example, mode, None, timeout_seconds)
                     for q_idx, example in enumerate(dataset, 1)
                 ]
 
@@ -331,6 +302,8 @@ if __name__ == "__main__":
                         help="Verbose output")
     parser.add_argument("--workers", type=int, default=1,
                         help="Number of worker threads for parallel execution (chatbot + evaluation share the same pool; use -1 for all CPUs)")
+    parser.add_argument("--timeout", type=int, default=None,
+                        help="Timeout in seconds for each chatbot request (default: no timeout)")
 
     args = parser.parse_args()
     workers = args.workers
@@ -348,4 +321,5 @@ if __name__ == "__main__":
             limit_questions=args.limit,
             verbose=args.verbose,
             max_workers=workers,
+            timeout_seconds=args.timeout,
         )
