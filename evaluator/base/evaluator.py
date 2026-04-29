@@ -241,13 +241,16 @@ def run_evaluation(question: str, answer_dict: Dict, reference_answer: str, exec
     if executor is not None:
         futures = {
             executor.submit(_eval_metric, metric): metric
-            for metric in ["correctness", "relevance", "groundedness", "retrieval_relevance"]
+            for metric in EVAL_METRICS
         }
+        raw_results = {}
         for future in as_completed(futures):
             metric_name = futures[future]
-            evaluations[metric_name] = future.result()
+            raw_results[metric_name] = future.result()
+        for metric in EVAL_METRICS:
+            evaluations[metric] = raw_results.get(metric, {"score": 0.0, "explanation": "No result returned."})
     else:
-        for metric in ["correctness", "relevance", "groundedness", "retrieval_relevance"]:
+        for metric in EVAL_METRICS:
             evaluations[metric] = _eval_metric(metric)
 
     return evaluations
@@ -488,7 +491,7 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
         examples = examples[:limit_questions]
     results = []
 
-    def process_example(i: int, example: dict) -> dict:
+    def process_example(_: int, example: dict) -> dict:
         q = example['inputs']['question']
         expected = example['outputs']['answer']
 
