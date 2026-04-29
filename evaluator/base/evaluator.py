@@ -3,11 +3,13 @@ import sys
 import json
 import os
 import time
+import argparse
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from typing_extensions import Annotated, TypedDict
 import requests
-from typing import Any
+from typing import Any, Optional, Dict
 
 ############################################################################################
 ### Load configuration from evaluator/config.json with fallback on environment variables ###
@@ -149,7 +151,7 @@ def _build_documents(sources: list) -> list:
         documents.append(doc)
     return documents
 
-def _call_chatbot(question: str, mode: str = None) -> dict:
+def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None) -> dict:
     """Call chatbot.py and return parsed answer/documents."""
     start_time = time.perf_counter()
     cmd = [sys.executable, "chatbot.py", "--question", question, "--json-output"]
@@ -162,7 +164,7 @@ def _call_chatbot(question: str, mode: str = None) -> dict:
             cwd=CHATBOT_DIR,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=timeout_seconds,
             check=False,
         )
         elapsed = time.perf_counter() - start_time
@@ -214,12 +216,48 @@ def _call_chatbot(question: str, mode: str = None) -> dict:
             "request_time": elapsed,
         }
 
-def rag_bot(question: str) -> dict:
-    """Call the external chatbot to answer the question and retrieve documents."""
-    return _call_chatbot(question, "agentic" if AGENTIC_MODE else None)
+def run_evaluation(question: str, answer_dict: Dict, reference_answer: str, executor: Optional[ThreadPoolExecutor] = None) -> Dict[str, Dict]:
+    """Run all evaluators on a single answer."""
+    evaluations = {}
+    inputs = {"question": question}
 
-def target(inputs: dict) -> dict:
-    return rag_bot(inputs["question"])
+    def _eval_metric(metric_name: str) -> Dict[str, Any]:
+        try:
+            if metric_name == "correctness":
+                result = correctness(inputs, answer_dict, {"answer": reference_answer})
+            elif metric_name == "relevance":
+                result = relevance(inputs, answer_dict)
+            elif metric_name == "groundedness":
+                result = groundedness(inputs, answer_dict)
+            elif metric_name == "retrieval_relevance":
+                result = retrieval_relevance(inputs, answer_dict)
+            else:
+                return {"score": 0.0, "explanation": f"Unknown metric: {metric_name}"}
+
+            return _sanitize_eval_result(result)
+        except Exception as e:
+            return {"score": 0.0, "explanation": f"Error: {str(e)}"}
+
+    if executor is not None:
+        futures = {
+            executor.submit(_eval_metric, metric): metric
+            for metric in ["correctness", "relevance", "groundedness", "retrieval_relevance"]
+        }
+        for future in as_completed(futures):
+            metric_name = futures[future]
+            evaluations[metric_name] = future.result()
+    else:
+        for metric in ["correctness", "relevance", "groundedness", "retrieval_relevance"]:
+            evaluations[metric] = _eval_metric(metric)
+
+    return evaluations
+
+def rag_bot(question: str, timeout_seconds: int = None) -> dict:
+    """Call the external chatbot to answer the question and retrieve documents."""
+    return _call_chatbot(question, "agentic" if AGENTIC_MODE else None, timeout_seconds)
+
+def target(inputs: dict, timeout_seconds: int = None) -> dict:
+    return rag_bot(inputs["question"], timeout_seconds)
 
 ############################################################################################
 ####################################### Correctness ########################################
@@ -437,79 +475,82 @@ def _sanitize_eval_result(ev):
     out["explanation"] = ev.get("explanation") or ""
     return out
 
-def main():
+EVAL_METRICS = [
+    "correctness",
+    "relevance",
+    "groundedness",
+    "retrieval_relevance",
+]
+
+def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int = None):
     examples = _load_examples()
+    if limit_questions:
+        examples = examples[:limit_questions]
     results = []
-    for i, example in enumerate(examples, 1):
-        print(f"\n{'=' * 80}")
-        print(f"Example {i}:")
-        print(f"{'=' * 80}")
+
+    def process_example(i: int, example: dict) -> dict:
         q = example['inputs']['question']
         expected = example['outputs']['answer']
-        print(f"\nQuestion: {q}\n")
-        print(f"Expected Answer: {expected}\n")
 
         # Get RAG response
-        output = target(example["inputs"])
+        output = target(example["inputs"], timeout_seconds)
         rag_answer = output.get('answer') if isinstance(output, dict) else str(output)
-        # Display only the first 100 characters of RAG answer to keep terminal readable
-        rag_answer_preview = rag_answer[:100] + "..." if len(rag_answer) > 100 else rag_answer
-        print(f"RAG Answer (preview): {rag_answer_preview}\n")
-        print("-" * 80)
 
-        # Run evaluators and collect structured results
-        print("EVALUATION SCORES:")
-        print("-" * 80)
-        try:
-            correct = correctness(example["inputs"], output, example["outputs"])
-            print(f"  Correctness:         {correct['score']}")
-        except Exception as e:
-            correct = {"score": False, "explanation": str(e)}
-            print(f"  Correctness eval error: {e}")
-
-        try:
-            relevant = relevance(example["inputs"], output)
-            print(f"  Relevance:           {relevant['score']}")
-        except Exception as e:
-            relevant = {"score": False, "explanation": str(e)}
-            print(f"  Relevance eval error: {e}")
-
-        try:
-            grounded = groundedness(example["inputs"], output)
-            print(f"  Groundedness:        {grounded['score']}")
-        except Exception as e:
-            grounded = {"score": False, "explanation": str(e)}
-            print(f"  Groundedness eval error: {e}")
-
-        try:
-            retrieval_rel = retrieval_relevance(example["inputs"], output)
-            print(f"  Retrieval Relevance: {retrieval_rel['score']}")
-        except Exception as e:
-            retrieval_rel = {"score": False, "explanation": str(e)}
-            print(f"  Retrieval Relevance eval error: {e}")
+        # Run evaluators
+        evaluations = run_evaluation(q, output, expected)
 
         request_time = output.get("request_time", 0.0) if isinstance(output, dict) else 0.0
 
-        # Append structured result (sanitize to remove explanation_raw and empty explanations)
-        results.append({
+        return {
             "question": q,
             "expected_answer": expected,
             "rag_answer": rag_answer,
             "request_time": request_time,
-            "evaluations": {
-                "correctness": _sanitize_eval_result(correct),
-                "relevance": _sanitize_eval_result(relevant),
-                "groundedness": _sanitize_eval_result(grounded),
-                "retrieval_relevance": _sanitize_eval_result(retrieval_rel),
-            }
-        })
+            "evaluations": evaluations
+        }
 
-        # Save results incrementally after each question
-        results_file = "evaluation_results.json"
-        with open(results_file, "w", encoding="utf-8") as rf:
-            json.dump(results, rf, ensure_ascii=False, indent=2)
+    if num_workers > 1:
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [executor.submit(process_example, i, example) for i, example in enumerate(examples, 1)]
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+                i = len(results)
+                print(f"\n{'=' * 80}")
+                print(f"Example {i}:")
+                print(f"{'=' * 80}")
+                print(f"\nQuestion: {result['question']}\n")
+                print(f"Expected Answer: {result['expected_answer']}\n")
+                rag_answer_preview = result['rag_answer'][:100] + "..." if len(result['rag_answer']) > 100 else result['rag_answer']
+                print(f"RAG Answer (preview): {rag_answer_preview}\n")
+                print("-" * 80)
+                print("EVALUATION SCORES:")
+                print("-" * 80)
+                for metric, eval_result in result['evaluations'].items():
+                    print(f"  {metric.replace('_', ' ').title()}: {eval_result.get('score', 0):.1f}")
+                print("-" * 80)
+    else:
+        for i, example in enumerate(examples, 1):
+            result = process_example(i, example)
+            results.append(result)
+            print(f"\n{'=' * 80}")
+            print(f"Example {i}:")
+            print(f"{'=' * 80}")
+            print(f"\nQuestion: {result['question']}\n")
+            print(f"Expected Answer: {result['expected_answer']}\n")
+            rag_answer_preview = result['rag_answer'][:100] + "..." if len(result['rag_answer']) > 100 else result['rag_answer']
+            print(f"RAG Answer (preview): {rag_answer_preview}\n")
+            print("-" * 80)
+            print("EVALUATION SCORES:")
+            print("-" * 80)
+            for metric, eval_result in result['evaluations'].items():
+                print(f"  {metric.replace('_', ' ').title()}: {eval_result.get('score', 0):.1f}")
+            print("-" * 80)
 
-        print("-" * 80)
+    # Save results
+    results_file = "evaluation_results.json"
+    with open(results_file, "w", encoding="utf-8") as rf:
+        json.dump(results, rf, ensure_ascii=False, indent=2)
 
     print(f"\nEvaluation complete. Results saved to {results_file}")
 
@@ -536,5 +577,18 @@ def main():
         print(f"\nOverall Average:     {avg_overall:.1f}/10")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Evaluate chatbot responses")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Limit number of questions to test")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Number of worker threads for parallel evaluation (use -1 for all CPUs)")
+    parser.add_argument("--timeout", type=int, default=None,
+                        help="Timeout in seconds for chatbot requests (default: no timeout)")
+    args = parser.parse_args()
+    workers = args.workers
+    if workers == -1:
+        workers = os.cpu_count() or 1
+    elif workers < -1:
+        parser.error("--workers must be -1 or a positive integer")
+    main(workers, args.limit, args.timeout)
     print("=" * 80)

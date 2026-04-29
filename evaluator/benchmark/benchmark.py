@@ -10,7 +10,7 @@ import os
 import argparse
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from itertools import product
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -39,49 +39,10 @@ def load_benchmark_config() -> Dict[str, Any]:
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from evaluator.base.evaluator import (
     _call_chatbot,
-    correctness,
-    relevance,
-    groundedness,
-    retrieval_relevance,
-    _sanitize_eval_result,
-    _load_examples
+    run_evaluation,
+    _load_examples,
+    EVAL_METRICS,
 )
-
-def run_evaluation(question: str, answer_dict: Dict, reference_answer: str) -> Dict[str, Dict]:
-    """Run all evaluators on a single answer"""
-    evaluations = {}
-    
-    inputs = {"question": question}
-    
-    # Correctness
-    try:
-        correct = correctness(inputs, answer_dict, {"answer": reference_answer})
-        evaluations["correctness"] = _sanitize_eval_result(correct)
-    except Exception as e:
-        evaluations["correctness"] = {"score": 0.0, "explanation": f"Error: {str(e)}"}
-    
-    # Relevance
-    try:
-        relevant = relevance(inputs, answer_dict)
-        evaluations["relevance"] = _sanitize_eval_result(relevant)
-    except Exception as e:
-        evaluations["relevance"] = {"score": 0.0, "explanation": f"Error: {str(e)}"}
-    
-    # Groundedness
-    try:
-        grounded = groundedness(inputs, answer_dict)
-        evaluations["groundedness"] = _sanitize_eval_result(grounded)
-    except Exception as e:
-        evaluations["groundedness"] = {"score": 0.0, "explanation": f"Error: {str(e)}"}
-    
-    # Retrieval Relevance
-    try:
-        retrieval_rel = retrieval_relevance(inputs, answer_dict)
-        evaluations["retrieval_relevance"] = _sanitize_eval_result(retrieval_rel)
-    except Exception as e:
-        evaluations["retrieval_relevance"] = {"score": 0.0, "explanation": f"Error: {str(e)}"}
-    
-    return evaluations
 
 def generate_rag_configs(hyperparams: Dict) -> List[Dict]:
     """Generate all RAG hyperparameter combinations"""
@@ -95,13 +56,6 @@ def generate_rag_configs(hyperparams: Dict) -> List[Dict]:
     
     return configs
 
-EVAL_METRICS = [
-    "correctness",
-    "relevance",
-    "groundedness",
-    "retrieval_relevance",
-]
-
 def calculate_average_scores(questions: List[Dict[str, Any]]) -> Dict[str, float]:
     """Return average score for each evaluation metric."""
     averages = {}
@@ -114,7 +68,7 @@ def run_benchmark(
     dataset: List[Dict],
     limit_questions: int = None,
     verbose: bool = False,
-    max_workers: int = 1
+    max_workers: int = 1,
 ):
     """Run full benchmark with all configurations"""
 
@@ -133,7 +87,7 @@ def run_benchmark(
             "timestamp": timestamp,
             "benchmark_config": config_data,
             "total_questions": len(dataset) if limit_questions is None else min(limit_questions, len(dataset)),
-            "workers": max_workers
+            "workers": max_workers,
         },
         "results": []
     }
@@ -179,13 +133,14 @@ def run_benchmark(
     def _run_question(
         question_id: int,
         example: Dict[str, Any],
-        mode: str
+        mode: str,
+        executor: Optional[ThreadPoolExecutor] = None
     ) -> Dict[str, Any]:
         question = example["inputs"]["question"]
         reference_answer = example["outputs"]["answer"]
 
         answer_dict = _call_chatbot(question, mode)
-        evaluations = run_evaluation(question, answer_dict, reference_answer)
+        evaluations = run_evaluation(question, answer_dict, reference_answer, executor=executor)
         request_time = answer_dict.get("request_time", 0.0)
 
         with progress_lock:
@@ -220,11 +175,47 @@ def run_benchmark(
 
             if max_workers > 1:
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [
-                        executor.submit(_run_question, q_idx, example, mode)
+                    futures = {
+                        executor.submit(_call_chatbot, example["inputs"]["question"], mode): (q_idx, example)
                         for q_idx, example in enumerate(dataset, 1)
-                    ]
-                    questions = [future.result() for future in as_completed(futures)]
+                    }
+
+                    questions = []
+                    for future in as_completed(futures):
+                        q_idx, example = futures[future]
+                        answer_dict = future.result()
+                        question = example["inputs"]["question"]
+                        reference_answer = example["outputs"]["answer"]
+
+                        evaluations = run_evaluation(
+                            question,
+                            answer_dict,
+                            reference_answer,
+                            executor=executor
+                        )
+                        request_time = answer_dict.get("request_time", 0.0)
+
+                        with progress_lock:
+                            progress_state["count"] += 1
+                            run_number = progress_state["count"]
+
+                        if verbose:
+                            scores_str = " | ".join([
+                                f"{k}: {v.get('score', 0):.1f}"
+                                for k, v in evaluations.items()
+                            ])
+                            print(f"  [{run_number}/{total_runs}] Q{q_idx}: {question[:60]}... [{scores_str}]")
+
+                        questions.append({
+                            "question_id": q_idx,
+                            "question": question,
+                            "tags": example.get("tags", []),
+                            "reference_answer": reference_answer,
+                            "generated_answer": answer_dict.get("answer", ""),
+                            "evaluations": evaluations,
+                            "request_time": request_time,
+                        })
+
                     questions.sort(key=lambda x: x["question_id"])
             else:
                 questions = [
@@ -339,20 +330,22 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", action="store_true",
                         help="Verbose output")
     parser.add_argument("--workers", type=int, default=1,
-                        help="Number of worker threads for parallel benchmark execution (use -1 for all CPUs)")
-    
+                        help="Number of worker threads for parallel execution (chatbot + evaluation share the same pool; use -1 for all CPUs)")
+
     args = parser.parse_args()
     workers = args.workers
     if workers == -1:
         workers = os.cpu_count() or 1
     elif workers < -1:
         parser.error("--workers must be -1 or a positive integer")
-    
+
+    if args.compare:
+        compare_results()
     else:
         examples = _load_examples()
         run_benchmark(
             examples,
             limit_questions=args.limit,
             verbose=args.verbose,
-            max_workers=workers
+            max_workers=workers,
         )
