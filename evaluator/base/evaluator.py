@@ -255,13 +255,6 @@ def run_evaluation(question: str, answer_dict: Dict, reference_answer: str, exec
 
     return evaluations
 
-def rag_bot(question: str, timeout_seconds: int = None) -> dict:
-    """Call the external chatbot to answer the question and retrieve documents."""
-    return _call_chatbot(question, "agentic" if AGENTIC_MODE else None, timeout_seconds)
-
-def target(inputs: dict, timeout_seconds: int = None) -> dict:
-    return rag_bot(inputs["question"], timeout_seconds)
-
 ############################################################################################
 ####################################### Correctness ########################################
 ############################################################################################
@@ -491,31 +484,41 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
         examples = examples[:limit_questions]
     results = []
 
-    def process_example(_: int, example: dict) -> dict:
+    def fetch_chatbot(example_index: int, example: dict) -> tuple[int, dict, dict]:
+        q = example['inputs']['question']
+        output = _call_chatbot(q, "agentic" if AGENTIC_MODE else None, timeout_seconds)
+        return example_index, example, output
+
+    def evaluate_example(example_index: int, example: dict, output: dict) -> dict:
         q = example['inputs']['question']
         expected = example['outputs']['answer']
-
-        # Get RAG response
-        output = target(example["inputs"], timeout_seconds)
-        rag_answer = output.get('answer') if isinstance(output, dict) else str(output)
-
-        # Run evaluators
         evaluations = run_evaluation(q, output, expected)
-
         request_time = output.get("request_time", 0.0) if isinstance(output, dict) else 0.0
-
+        rag_answer = output.get('answer') if isinstance(output, dict) else str(output)
         return {
             "question": q,
             "expected_answer": expected,
             "rag_answer": rag_answer,
             "request_time": request_time,
-            "evaluations": evaluations
+            "evaluations": evaluations,
+            "index": example_index,
         }
 
     if num_workers > 1:
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            futures = [executor.submit(process_example, i, example) for i, example in enumerate(examples, 1)]
-            for future in as_completed(futures):
+            chatbot_futures = {
+                executor.submit(fetch_chatbot, i, example): (i, example)
+                for i, example in enumerate(examples, 1)
+            }
+            eval_futures = {}
+
+            for future in as_completed(chatbot_futures):
+                _, _, output = future.result()
+                idx, example = chatbot_futures[future]
+                eval_future = executor.submit(evaluate_example, idx, example, output)
+                eval_futures[eval_future] = idx
+
+            for future in as_completed(eval_futures):
                 result = future.result()
                 results.append(result)
                 i = len(results)
@@ -533,11 +536,12 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
                     print(f"  {metric.replace('_', ' ').title()}: {eval_result.get('score', 0):.1f}")
                 print("-" * 80)
     else:
-        for i, example in enumerate(examples, 1):
-            result = process_example(i, example)
+        chatbot_results = [fetch_chatbot(i, example) for i, example in enumerate(examples, 1)]
+        for idx, example, output in chatbot_results:
+            result = evaluate_example(idx, example, output)
             results.append(result)
             print(f"\n{'=' * 80}")
-            print(f"Example {i}:")
+            print(f"Example {idx}:")
             print(f"{'=' * 80}")
             print(f"\nQuestion: {result['question']}\n")
             print(f"Expected Answer: {result['expected_answer']}\n")
