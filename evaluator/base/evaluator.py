@@ -278,10 +278,10 @@ You must assign a score between 0 and 10 reflecting the factual accuracy of the 
 A score of 10 means the answer is completely factually correct.
 A score of 0 means the answer is entirely incorrect.
 
-Your output must be in JSON format with the following structure:
+Your output MUST be in JSON format with only two keys:
 
 - "score": a number between 0 and 10
-- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above. Avoid simply stating the correct answer at the outset."""
+- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above."""
 
 # Grader LLM
 grader_llm = MistralLLM(
@@ -323,10 +323,10 @@ You must assign a score between 0 and 10 reflecting the relevance of the student
 A score of 10 means the answer is fully relevant, concise, and directly answers the question.
 A score of 0 means the answer is irrelevant, off-topic, or does not help answer the question.
 
-Your output must be in JSON format with the following structure:
+Your output MUST be in JSON format with only two keys:
 
 - "score": a number between 0 and 10
-- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above. Avoid simply stating the correct answer at the outset."""
+- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above."""
 
 # Grader LLM
 relevance_llm = MistralLLM(
@@ -367,10 +367,10 @@ You must assign a score between 0 and 10 reflecting how well the student’s ans
 A score of 10 means the answer is entirely based on the provided facts with no hallucinated information.
 A score of 0 means the answer is not grounded in the facts at all or contains significant hallucinated information.
 
-Your output must be in JSON format with the following structure:
+Your output MUST be in JSON format with only two keys:
 
 - "score": a number between 0 and 10
-- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above. Avoid simply stating the correct answer at the outset."""
+- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above."""
 
 # Grader LLM
 grounded_llm = MistralLLM(
@@ -417,10 +417,10 @@ You must assign a score between 0 and 10 reflecting the overall relevance of the
 A score of 10 means the facts clearly contain relevant keywords or semantic meaning related to the question.
 A score of 0 means the facts are completely unrelated to the question.
 
-Your output must be in JSON format with the following structure:
+Your output MUST be in JSON format with only two keys:
 
 - "score": a number between 0 and 10
-- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above. Avoid simply stating the correct answer at the outset."""
+- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above."""
 
 # Grader LLM
 retrieval_relevance_llm = MistralLLM(
@@ -495,12 +495,19 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
         evaluations = run_evaluation(q, output, expected)
         request_time = output.get("request_time", 0.0) if isinstance(output, dict) else 0.0
         rag_answer = output.get('answer') if isinstance(output, dict) else str(output)
+        documents = output.get("documents", [])
+        # Serialize documents for JSON
+        serialized_documents = [
+            {"content": doc.page_content, "metadata": doc.metadata}
+            for doc in documents
+        ]
         return {
             "question": q,
             "expected_answer": expected,
             "rag_answer": rag_answer,
             "request_time": request_time,
             "evaluations": evaluations,
+            "documents": serialized_documents,
             "index": example_index,
         }
 
