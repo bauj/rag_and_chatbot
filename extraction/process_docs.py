@@ -16,6 +16,9 @@ from html_parser import (
     _split_into_sections as _html_split_into_sections,
     extract_sections_with_soup as _html_extract_sections_with_soup,
     get_page_title,
+    has_memitems,
+    extract_memitems_with_soup,
+    html_to_markdown,
 )
 
 # For token-aware chunking
@@ -258,7 +261,7 @@ class DocumentationProcessor:
         if contents:
             for tag in contents.find_all(['script', 'style', 'noscript']):
                 tag.decompose()
-            content_dict['content'] = contents.get_text(separator='\n', strip=True)
+            content_dict['content'] = html_to_markdown(contents)
         else:
             body = soup.find('body')
             if body:
@@ -293,7 +296,7 @@ class DocumentationProcessor:
                     for elem in area.find_all(class_=cls):
                         elem.decompose()
 
-                content_dict['content'] = area.get_text(separator='\n', strip=True)
+                content_dict['content'] = html_to_markdown(area)
                 break
 
         # Fallback
@@ -522,8 +525,12 @@ class DocumentationProcessor:
         # Extract code blocks
         code_blocks = self.extract_code_blocks(soup)
 
-        # Extract sections BEFORE freeing BeautifulSoup memory
-        sections = self.extract_sections_with_soup(soup, doc_category)
+        # Extract sections/memitems BEFORE freeing BeautifulSoup memory
+        use_memitems = doc_category == 'dev' and has_memitems(soup)
+        if use_memitems:
+            memitems = extract_memitems_with_soup(soup)
+        else:
+            sections = self.extract_sections_with_soup(soup, doc_category)
 
         # Free BeautifulSoup memory immediately
         soup.decompose()
@@ -533,63 +540,110 @@ class DocumentationProcessor:
         skipped_chunks = 0
         doc_chunk_counter = 0
 
-        for section_heading, section_text in sections:
-            if not section_text.strip():
-                continue
-
-            # Prepend doc title when the section has no heading of its own
-            if section_heading is None:
-                text_to_chunk = f"{content_dict['title']}\n\n{section_text}"
-            else:
-                text_to_chunk = section_text
-
-            # Stable section identifier: (parent_doc_id or filename stem) + normalised heading.
-            # parent_doc_id is the module's base_url which may be '' when no url is configured
-            # in MODULE_INFO. Fall back to filepath.stem so that two different files with an
-            # identically-named section (e.g. "Overview") never share the same section_id.
-            prefix = parent_doc_id if parent_doc_id else filepath.stem
-            raw_id = section_heading if section_heading else 'root'
-            normalized = re.sub(r'[^\w]', '_', raw_id.lower())[:50]
-            section_id = f"{prefix}#{normalized}"
-
-            # Cap section_text stored in metadata to avoid bloating ChromaDB
-            stored_section_text = section_text[:5000]
-
-            text_chunks = self.chunk_text(text_to_chunk)
-
-            for i, chunk_text_content in enumerate(text_chunks):
-                if not self.validate_chunk_token_length(chunk_text_content):
-                    skipped_chunks += 1
+        if use_memitems:
+            for item in memitems:
+                text_to_chunk = f"{item['signature']}\n\n{item['description']}"
+                if not text_to_chunk.strip():
                     continue
 
-                chunk = DocumentChunk(
-                    title=content_dict['title'],
-                    content=chunk_text_content,
-                    url=url,
-                    doc_type=doc_type,
-                    hierarchy=section_heading or content_dict['title'],
-                    chunk_id=doc_chunk_counter,
-                    module=module_name,
-                    doc_category=doc_category,
-                    metadata={
-                        # NOTE: total_chunks and chunk_position are now section-scoped,
-                        # not document-scoped. They reflect position within this section,
-                        # not the full HTML file. This is a semantic change from the old code.
-                        'total_chunks': len(text_chunks),
-                        'chunk_position': f"{i+1}/{len(text_chunks)}",
-                        'parent_doc_id': parent_doc_id,
-                        'section_id': section_id,
-                        'section_text': stored_section_text,
-                        'source': f'{self.project_name} {module_name} {doc_category.title()} Documentation',
-                        'file': str(filepath.name),
-                        'module_description': self.MODULE_INFO.get(module_name, {}).get('description', ''),
-                        'quality_score': round(quality_score, 2),
-                        'has_code': len(code_blocks) > 0,
-                        'code_blocks': code_blocks if code_blocks else [],
-                    }
+                prefix = parent_doc_id if parent_doc_id else filepath.stem
+                section_id = f"{prefix}#{item['anchor_id']}" if item['anchor_id'] else (
+                    f"{prefix}#{re.sub(r'[^\\w]', '_', item['symbol_name'].lower())[:50]}"
                 )
-                doc_chunks.append(chunk)
-                doc_chunk_counter += 1
+                chunk_url = f"{url}#{item['anchor_id']}" if item['anchor_id'] else url
+
+                text_chunks = self.chunk_text(text_to_chunk)
+
+                for i, chunk_text_content in enumerate(text_chunks):
+                    if not self.validate_chunk_token_length(chunk_text_content):
+                        skipped_chunks += 1
+                        continue
+
+                    chunk = DocumentChunk(
+                        title=content_dict['title'],
+                        content=chunk_text_content,
+                        url=chunk_url,
+                        doc_type=doc_type,
+                        hierarchy=item['symbol_name'],
+                        chunk_id=doc_chunk_counter,
+                        module=module_name,
+                        doc_category=doc_category,
+                        metadata={
+                            'total_chunks': len(text_chunks),
+                            'chunk_position': f"{i+1}/{len(text_chunks)}",
+                            'parent_doc_id': parent_doc_id,
+                            'section_id': section_id,
+                            'section_text': text_to_chunk[:5000],
+                            'source': f'{self.project_name} {module_name} {doc_category.title()} Documentation',
+                            'file': str(filepath.name),
+                            'module_description': self.MODULE_INFO.get(module_name, {}).get('description', ''),
+                            'quality_score': round(quality_score, 2),
+                            'has_code': len(code_blocks) > 0,
+                            'code_blocks': code_blocks if code_blocks else [],
+                            'symbol_name': item['symbol_name'],
+                            'anchor_id': item['anchor_id'],
+                        }
+                    )
+                    doc_chunks.append(chunk)
+                    doc_chunk_counter += 1
+        else:
+            for section_heading, section_text in sections:
+                if not section_text.strip():
+                    continue
+
+                # Prepend doc title when the section has no heading of its own
+                if section_heading is None:
+                    text_to_chunk = f"{content_dict['title']}\n\n{section_text}"
+                else:
+                    text_to_chunk = section_text
+
+                # Stable section identifier: (parent_doc_id or filename stem) + normalised heading.
+                # parent_doc_id is the module's base_url which may be '' when no url is configured
+                # in MODULE_INFO. Fall back to filepath.stem so that two different files with an
+                # identically-named section (e.g. "Overview") never share the same section_id.
+                prefix = parent_doc_id if parent_doc_id else filepath.stem
+                raw_id = section_heading if section_heading else 'root'
+                normalized = re.sub(r'[^\w]', '_', raw_id.lower())[:50]
+                section_id = f"{prefix}#{normalized}"
+
+                # Cap section_text stored in metadata to avoid bloating ChromaDB
+                stored_section_text = section_text[:5000]
+
+                text_chunks = self.chunk_text(text_to_chunk)
+
+                for i, chunk_text_content in enumerate(text_chunks):
+                    if not self.validate_chunk_token_length(chunk_text_content):
+                        skipped_chunks += 1
+                        continue
+
+                    chunk = DocumentChunk(
+                        title=content_dict['title'],
+                        content=chunk_text_content,
+                        url=url,
+                        doc_type=doc_type,
+                        hierarchy=section_heading or content_dict['title'],
+                        chunk_id=doc_chunk_counter,
+                        module=module_name,
+                        doc_category=doc_category,
+                        metadata={
+                            # NOTE: total_chunks and chunk_position are now section-scoped,
+                            # not document-scoped. They reflect position within this section,
+                            # not the full HTML file. This is a semantic change from the old code.
+                            'total_chunks': len(text_chunks),
+                            'chunk_position': f"{i+1}/{len(text_chunks)}",
+                            'parent_doc_id': parent_doc_id,
+                            'section_id': section_id,
+                            'section_text': stored_section_text,
+                            'source': f'{self.project_name} {module_name} {doc_category.title()} Documentation',
+                            'file': str(filepath.name),
+                            'module_description': self.MODULE_INFO.get(module_name, {}).get('description', ''),
+                            'quality_score': round(quality_score, 2),
+                            'has_code': len(code_blocks) > 0,
+                            'code_blocks': code_blocks if code_blocks else [],
+                        }
+                    )
+                    doc_chunks.append(chunk)
+                    doc_chunk_counter += 1
 
         if skipped_chunks > 0:
             print(f"    Warning: Skipped {skipped_chunks} chunks (>512 tokens) in {filepath.name}")

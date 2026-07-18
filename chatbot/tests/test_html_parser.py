@@ -11,6 +11,8 @@ if str(EXTRACTION_DIR) not in sys.path:
 
 from html_parser import get_page_title, parse_page, save_page_index, search_pages
 from html_parser import _split_into_sections, extract_sections_with_soup
+from html_parser import html_to_markdown
+from html_parser import has_memitems, extract_memitems_with_soup
 
 
 # ---------------------------------------------------------------------------
@@ -189,12 +191,60 @@ def test_split_into_sections_no_headings_returns_single_entry():
     assert "plain text" in text
 
 
+def test_split_into_sections_no_headings_preserves_code_block():
+    html = "<body><p>Intro.</p><pre>int z = 3;</pre></body>"
+    tag = _make_tag(html)
+    result = _split_into_sections(tag)
+    assert len(result) == 1
+    _, text = result[0]
+    assert "```" in text
+    assert "int z = 3;" in text
+
+
 def test_split_into_sections_h3_creates_boundary():
     html = "<body><h3>Sub-section</h3><p>Sub content.</p></body>"
     tag = _make_tag(html)
     result = _split_into_sections(tag)
     headings = [heading for heading, _ in result]
     assert "Sub-section" in headings
+
+
+def test_split_into_sections_fences_pre_code_blocks():
+    html = (
+        "<body><h2>Example</h2><p>Usage:</p>"
+        "<pre>int x = 1;\nint y = 2;</pre></body>"
+    )
+    tag = _make_tag(html)
+    result = _split_into_sections(tag)
+    text = dict(result)["Example"]
+    assert "```" in text
+    assert "int x = 1;" in text
+    assert "int y = 2;" in text
+
+
+def test_split_into_sections_fences_doxygen_fragment_blocks():
+    html = (
+        "<body><h2>Example</h2><p>Usage:</p>"
+        "<div class=\"fragment\">"
+        "<div class=\"line\">int x = 1;</div>"
+        "<div class=\"line\">int y = 2;</div>"
+        "</div></body>"
+    )
+    tag = _make_tag(html)
+    result = _split_into_sections(tag)
+    text = dict(result)["Example"]
+    assert "```" in text
+    assert "int x = 1;" in text
+    assert "int y = 2;" in text
+
+
+def test_split_into_sections_skips_empty_code_blocks():
+    html = "<body><h2>Example</h2><pre>   </pre><p>Real content.</p></body>"
+    tag = _make_tag(html)
+    result = _split_into_sections(tag)
+    text = dict(result)["Example"]
+    assert "```" not in text
+    assert "Real content." in text
 
 
 # ---------------------------------------------------------------------------
@@ -241,3 +291,104 @@ def test_extract_sections_with_soup_strips_script_tags():
     result = extract_sections_with_soup(soup, "user")
     all_text = " ".join(text for _, text in result)
     assert "alert" not in all_text
+
+
+# ---------------------------------------------------------------------------
+# html_to_markdown
+# ---------------------------------------------------------------------------
+
+def test_html_to_markdown_preserves_pre_as_fenced_code():
+    from bs4 import BeautifulSoup
+    html = "<div><p>Intro text.</p><pre>int x = 1;\nint y = 2;</pre></div>"
+    soup = BeautifulSoup(html, "html.parser")
+    result = html_to_markdown(soup.find("div"))
+    assert "```" in result
+    assert "int x = 1;" in result
+
+
+def test_html_to_markdown_collapses_excess_blank_lines():
+    from bs4 import BeautifulSoup
+    html = "<div><p>A</p><p></p><p></p><p></p><p>B</p></div>"
+    soup = BeautifulSoup(html, "html.parser")
+    result = html_to_markdown(soup.find("div"))
+    assert "\n\n\n" not in result
+
+
+# ---------------------------------------------------------------------------
+# extract_memitems_with_soup / has_memitems
+# ---------------------------------------------------------------------------
+
+def _make_memitem_page():
+    from bs4 import BeautifulSoup
+    html = """
+    <html><body><div class="contents">
+    <a id="a1a2b3c4d5" name="a1a2b3c4d5"></a>
+    <h2 class="memtitle">execute()</h2>
+    <div class="memitem">
+    <div class="memproto">
+    <table class="memname">
+    <tr>
+    <td class="memname">bool ModelAPI_Feature::execute </td>
+    <td>(</td>
+    <td class="paramtype">const std::string&amp;&#160;</td>
+    <td class="paramname"><em>name</em></td>
+    <td>)</td>
+    </tr>
+    </table>
+    </div>
+    <div class="memdoc">
+    <p>Executes the feature and returns success status.</p>
+    </div>
+    </div>
+    </div></body></html>
+    """
+    return BeautifulSoup(html, "html.parser")
+
+
+def test_has_memitems_true_when_present():
+    soup = _make_memitem_page()
+    assert has_memitems(soup) is True
+
+
+def test_has_memitems_false_when_absent():
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup("<html><body><p>plain page</p></body></html>", "html.parser")
+    assert has_memitems(soup) is False
+
+
+def test_extract_memitems_returns_one_entry():
+    soup = _make_memitem_page()
+    items = extract_memitems_with_soup(soup)
+    assert len(items) == 1
+
+
+def test_extract_memitems_symbol_name():
+    soup = _make_memitem_page()
+    items = extract_memitems_with_soup(soup)
+    assert items[0]["symbol_name"] == "bool ModelAPI_Feature::execute"
+
+
+def test_extract_memitems_signature_kept_verbatim():
+    soup = _make_memitem_page()
+    items = extract_memitems_with_soup(soup)
+    signature = items[0]["signature"]
+    assert "ModelAPI_Feature::execute" in signature
+    assert "const std::string" in signature
+
+
+def test_extract_memitems_description():
+    soup = _make_memitem_page()
+    items = extract_memitems_with_soup(soup)
+    assert "Executes the feature" in items[0]["description"]
+
+
+def test_extract_memitems_anchor_id():
+    soup = _make_memitem_page()
+    items = extract_memitems_with_soup(soup)
+    assert items[0]["anchor_id"] == "a1a2b3c4d5"
+
+
+def test_extract_memitems_empty_list_when_no_memitems():
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup("<html><body><p>plain page</p></body></html>", "html.parser")
+    assert extract_memitems_with_soup(soup) == []

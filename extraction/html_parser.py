@@ -10,6 +10,37 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from bs4 import BeautifulSoup, NavigableString, Tag
+from markdownify import markdownify as _markdownify
+
+
+def html_to_markdown(tag: Tag) -> str:
+    """
+    Convert an HTML subtree to Markdown, preserving <pre>/<code> blocks as
+    fenced code instead of flattening them to prose (unlike tag.get_text()).
+    """
+    md = _markdownify(str(tag), heading_style='ATX', bullets='-')
+    md = re.sub(r'\n{3,}', '\n\n', md).strip()
+    return md
+
+
+def _code_block_to_markdown(tag: Tag) -> str:
+    """
+    Render a code block as a fenced Markdown block.
+
+    Handles both plain <pre> (Sphinx/generic HTML) and Doxygen's
+    <div class="fragment"><div class="line">...</div>...</div> structure,
+    where each source line is its own child div.
+    """
+    classes = tag.get('class') or []
+    if tag.name == 'div' and 'fragment' in classes:
+        lines = [line.get_text() for line in tag.find_all('div', class_='line')]
+        code = '\n'.join(lines)
+    else:
+        code = tag.get_text()
+    code = code.strip('\n')
+    if not code.strip():
+        return ''
+    return f"```\n{code}\n```"
 
 
 def _split_into_sections(element: Tag) -> List[tuple]:
@@ -33,6 +64,10 @@ def _split_into_sections(element: Tag) -> List[tuple]:
                     sections.append((current_heading, text))
                 current_heading = node.get_text(strip=True)
                 current_parts.clear()
+            elif node.name == 'pre' or (node.name == 'div' and 'fragment' in (node.get('class') or [])):
+                code_md = _code_block_to_markdown(node)
+                if code_md:
+                    current_parts.append(code_md)
             else:
                 for child in node.children:
                     process_node(child)
@@ -50,7 +85,7 @@ def _split_into_sections(element: Tag) -> List[tuple]:
         sections.append((current_heading, text))
 
     if not sections:
-        fallback = element.get_text(separator='\n', strip=True)
+        fallback = html_to_markdown(element)
         return [(None, fallback)]
 
     return sections
@@ -80,6 +115,57 @@ def extract_sections_with_soup(soup: BeautifulSoup, doc_category: str) -> List[t
     for tag in element.find_all(['script', 'style', 'noscript']):
         tag.decompose()
     return _split_into_sections(element)
+
+
+def has_memitems(soup: BeautifulSoup) -> bool:
+    """True if the page contains Doxygen div.memitem blocks (per-symbol docs)."""
+    return soup.find('div', class_='memitem') is not None
+
+
+def extract_memitems_with_soup(soup: BeautifulSoup) -> List[Dict[str, str]]:
+    """
+    Extract Doxygen memitem blocks: one entry per documented symbol.
+
+    Doxygen renders each documented member as:
+        <a id="a1b2c3" name="a1b2c3"></a>
+        <div class="memitem">
+          <div class="memproto"> ... signature ... </div>
+          <div class="memdoc"> ... description ... </div>
+        </div>
+
+    Returns a list of dicts with keys: symbol_name, signature, description,
+    anchor_id. anchor_id is '' when no preceding <a id="..."> is found.
+    """
+    items: List[Dict[str, str]] = []
+    for memitem in soup.find_all('div', class_='memitem'):
+        memproto = memitem.find('div', class_='memproto')
+        if memproto is None:
+            continue
+        memdoc = memitem.find('div', class_='memdoc')
+
+        signature = memproto.get_text(separator=' ', strip=True)
+        signature = re.sub(r'\s+', ' ', signature).strip()
+
+        description = memdoc.get_text(separator='\n', strip=True) if memdoc else ''
+
+        memname_cell = memproto.find('td', class_='memname')
+        if memname_cell is not None:
+            symbol_name = re.sub(r'\s+', ' ', memname_cell.get_text(strip=True)).strip()
+        else:
+            symbol_name = signature[:80]
+
+        anchor_id = ''
+        anchor = memitem.find_previous_sibling('a', id=True)
+        if anchor is not None:
+            anchor_id = anchor.get('id', '')
+
+        items.append({
+            'symbol_name': symbol_name,
+            'signature': signature,
+            'description': description,
+            'anchor_id': anchor_id,
+        })
+    return items
 
 
 def get_page_title(filepath: str) -> str:

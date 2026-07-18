@@ -10,6 +10,7 @@ torch==2.11.0+cpu                    # CPU-only version (much smaller than CUDA)
 # EXTRACTION (process_multi_module_salome_docs.py)
 # ============================================
 beautifulsoup4==4.14.3          # HTML parsing
+markdownify==1.2.3              # HTML -> Markdown (preserves code blocks as fenced text)
 chromadb==1.5.5                 # Vector database
 transformers==5.3.0            # Token-aware chunking (optional but recommended)
 
