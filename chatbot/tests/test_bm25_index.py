@@ -1,0 +1,153 @@
+import json
+import sys
+from pathlib import Path
+
+CHATBOT_DIR = Path(__file__).parent.parent
+if str(CHATBOT_DIR) not in sys.path:
+    sys.path.insert(0, str(CHATBOT_DIR))
+
+from langchain_core.documents import Document
+
+from core.bm25_index import _tokenize, _flatten_metadata, BM25Index, reciprocal_rank_fusion
+
+
+def test_tokenize_lowercases_and_splits_on_non_word_chars():
+    assert _tokenize("ModelAPI_Feature::execute") == ["modelapi_feature", "execute"]
+
+
+def test_tokenize_empty_string_returns_empty_list():
+    assert _tokenize("") == []
+
+
+def test_flatten_metadata_maps_expected_keys():
+    row = {
+        "title": "ModelAPI_Feature Class Reference",
+        "content": "bool ModelAPI_Feature::execute(...)",
+        "url": "https://docs.example.org/classModelAPI__Feature.html",
+        "doc_type": "class",
+        "hierarchy": "bool ModelAPI_Feature::execute",
+        "chunk_id": 0,
+        "module": "SHAPER",
+        "doc_category": "dev",
+        "metadata": {
+            "parent_doc_id": "https://docs.example.org",
+            "chunk_position": "1/1",
+            "quality_score": 0.9,
+            "has_code": False,
+            "section_id": "https://docs.example.org#a1a2b3",
+            "section_text": "bool ModelAPI_Feature::execute(...)",
+        },
+    }
+    flat = _flatten_metadata(row)
+    assert flat["url"] == row["url"]
+    assert flat["section_id"] == "https://docs.example.org#a1a2b3"
+    assert flat["chunk_position"] == "1/1"
+    assert flat["module"] == "SHAPER"
+    assert flat["doc_category"] == "dev"
+
+
+def _write_jsonl(tmp_path, rows):
+    path = tmp_path / "test_docs.jsonl"
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+    return path
+
+
+def _row(content, module="SHAPER", doc_category="dev", url="u1", section_id="s1", chunk_position="1/1"):
+    return {
+        "title": "T", "content": content, "url": url, "doc_type": "class",
+        "hierarchy": "h", "chunk_id": 0, "module": module, "doc_category": doc_category,
+        "metadata": {
+            "parent_doc_id": "", "chunk_position": chunk_position, "quality_score": 0.5,
+            "has_code": False, "section_id": section_id, "section_text": content,
+        },
+    }
+
+
+def test_bm25_search_returns_documents_ranked_by_relevance(tmp_path):
+    rows = [
+        _row("The ModelAPI_Feature execute method runs the feature.", url="u1", section_id="s1"),
+        _row("Unrelated content about tutorials and installation.", url="u2", section_id="s2"),
+    ]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    results = index.search("ModelAPI_Feature execute", k=2)
+    assert len(results) >= 1
+    assert results[0].metadata["url"] == "u1"
+
+
+def test_bm25_search_applies_module_filter(tmp_path):
+    rows = [
+        _row("execute feature", module="SHAPER", url="u1", section_id="s1"),
+        _row("execute feature", module="GEOM", url="u2", section_id="s2"),
+    ]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    results = index.search("execute feature", k=5, module_filter="GEOM")
+    urls = [r.metadata["url"] for r in results]
+    assert urls == ["u2"]
+
+
+def test_bm25_search_applies_doc_category_filter(tmp_path):
+    rows = [
+        _row("execute feature", doc_category="dev", url="u1", section_id="s1"),
+        _row("execute feature", doc_category="user", url="u2", section_id="s2"),
+    ]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    results = index.search("execute feature", k=5, doc_category_filter="user")
+    urls = [r.metadata["url"] for r in results]
+    assert urls == ["u2"]
+
+
+def test_bm25_search_respects_k_limit(tmp_path):
+    rows = [_row(f"execute feature number {i}", url=f"u{i}", section_id=f"s{i}") for i in range(5)]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    results = index.search("execute feature", k=2)
+    assert len(results) == 2
+
+
+def test_bm25_search_empty_corpus_returns_empty_list(tmp_path):
+    path = _write_jsonl(tmp_path, [])
+    index = BM25Index(str(path))
+    assert index.search("anything", k=5) == []
+
+
+def _doc(content, url, section_id, chunk_position="1/1"):
+    return Document(page_content=content, metadata={
+        "url": url, "section_id": section_id, "chunk_position": chunk_position,
+    })
+
+
+def test_rrf_ranks_doc_appearing_in_both_lists_highest():
+    # "shared" is ranked #1 in list A and #2 in list B — should out-rank a doc
+    # that only appears once, even at rank #1 of its own list.
+    shared = _doc("shared content", url="u1", section_id="s1")
+    only_a = _doc("only in a", url="u2", section_id="s2")
+    only_b = _doc("only in b", url="u3", section_id="s3")
+
+    list_a = [shared, only_a]
+    list_b = [only_b, shared]
+
+    result = reciprocal_rank_fusion([list_a, list_b], k=3)
+    result_keys = [(d.metadata["url"]) for d in result]
+    assert result_keys[0] == "u1"
+
+
+def test_rrf_deduplicates_by_url_section_chunk_position():
+    doc_a = _doc("version from list a", url="u1", section_id="s1")
+    doc_b = _doc("version from list b", url="u1", section_id="s1")
+    result = reciprocal_rank_fusion([[doc_a], [doc_b]], k=5)
+    assert len(result) == 1
+
+
+def test_rrf_truncates_to_k():
+    docs = [_doc(f"content {i}", url=f"u{i}", section_id=f"s{i}") for i in range(5)]
+    result = reciprocal_rank_fusion([docs], k=2)
+    assert len(result) == 2
+
+
+def test_rrf_empty_lists_returns_empty():
+    assert reciprocal_rank_fusion([[], []], k=5) == []

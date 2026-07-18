@@ -56,6 +56,7 @@ class ChatbotConfig:
     k_deep_dive: int = 60
     deep_dive_batch_size: int = 10
     top_n_after_rerank: int = 15    # docs to keep after cross-encoder reranking
+    bm25_enabled: bool = False      # opt-in BM25 hybrid retrieval (fused with vector search via RRF)
 
     # LLM generation parameters
     temperature: float = 0.0
@@ -80,6 +81,10 @@ class ChatbotConfig:
     @property
     def collection_name(self) -> str:
         return f"{self.project_name}_documentation"
+
+    @property
+    def bm25_jsonl_path(self) -> str:
+        return str(Path(self.chromadb_path).parent / f"{self.project_name}_docs.jsonl")
 
     @classmethod
     def load(cls, config_file: Optional[str] = None) -> "ChatbotConfig":
@@ -107,7 +112,8 @@ class ChatbotConfig:
 
         # Known top-level keys (scalars + nested blocks)
         scalar_keys = {"project_name", "chromadb_path", "k_standard", "k_deep_dive",
-                       "deep_dive_batch_size", "top_n_after_rerank", "temperature", "max_tokens"}
+                       "deep_dive_batch_size", "top_n_after_rerank", "temperature", "max_tokens",
+                       "bm25_enabled"}
         nested_keys = {"llm", "embedding", "reranker", "agentic"}
         valid_keys = scalar_keys | nested_keys
         invalid = set(data.keys()) - valid_keys

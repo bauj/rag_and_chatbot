@@ -25,6 +25,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 
 from .config import ChatbotConfig
+from .bm25_index import BM25Index, reciprocal_rank_fusion
 
 
 class DocumentationChatbot:
@@ -46,6 +47,7 @@ class DocumentationChatbot:
         print("DEBUG : create prompt ...")
         self.base_prompt = self._create_prompt()
         self.reranker = self._load_reranker()
+        self.bm25_index = self._load_bm25_index()
 
     def _load_vectorstore(self) -> Chroma:
         """Load ChromaDB vector store"""
@@ -149,6 +151,37 @@ class DocumentationChatbot:
         model = self.config.reranker.model
         print(f"DEBUG : load reranker ({model}) ...")
         return CrossEncoder(model)
+
+    def _load_bm25_index(self) -> Optional[BM25Index]:
+        """Load the BM25 keyword index if bm25_enabled and its JSONL corpus exists."""
+        if not self.config.bm25_enabled:
+            return None
+
+        jsonl_path = Path(self.config.bm25_jsonl_path)
+        if not jsonl_path.is_absolute():
+            jsonl_path = Path(__file__).parent.parent / jsonl_path
+        jsonl_path = jsonl_path.resolve()
+
+        if not jsonl_path.exists():
+            print(f"Warning: bm25_enabled is True but {jsonl_path} was not found — hybrid retrieval disabled")
+            return None
+
+        print(f"DEBUG : load BM25 index ({jsonl_path}) ...")
+        return BM25Index(str(jsonl_path))
+
+    def _hybrid_retrieve(self, query: str, vector_docs: List, k: int,
+                         module_filter: Optional[str], doc_category_filter: Optional[str]) -> List:
+        """
+        Fuse BM25 keyword search results with the vector retriever's results via RRF.
+        Returns vector_docs unchanged when BM25 is disabled.
+        """
+        if self.bm25_index is None:
+            return vector_docs
+
+        bm25_docs = self.bm25_index.search(
+            query, k=k, module_filter=module_filter, doc_category_filter=doc_category_filter,
+        )
+        return reciprocal_rank_fusion([vector_docs, bm25_docs], k=k)
 
     def _rerank_and_expand(self, query: str, docs: List,
                            reranker_enabled: bool = True,
@@ -327,6 +360,11 @@ Answer (based strictly on the documentation above):"""
             # them for source attribution without a second retrieval + reranking pass.
             def retrieve_and_format(question: str) -> str:
                 raw_docs = retriever.invoke(question)
+                raw_docs = self._hybrid_retrieve(
+                    question, raw_docs, k=k,
+                    module_filter=module_filter if module_filter and module_filter != "All" else None,
+                    doc_category_filter=doc_type_filter.lower() if doc_type_filter and doc_type_filter != "All" else None,
+                )
                 reranked = self._rerank_and_expand(
                     question, raw_docs,
                     reranker_enabled=reranker_enabled,

@@ -52,3 +52,24 @@ def test_chatbot_config_agentic_null_from_json(tmp_path):
     }))
     cfg = ChatbotConfig.load(str(config_json))
     assert cfg.agentic is None
+
+
+def test_bm25_enabled_defaults_false():
+    cfg = ChatbotConfig(project_name="test", chromadb_path="/tmp/db/chromadb")
+    assert cfg.bm25_enabled is False
+
+
+def test_bm25_enabled_from_json(tmp_path):
+    config_json = tmp_path / "config.json"
+    config_json.write_text(json.dumps({
+        "project_name": "test",
+        "chromadb_path": "/tmp/db/chromadb",
+        "bm25_enabled": True,
+    }))
+    cfg = ChatbotConfig.load(str(config_json))
+    assert cfg.bm25_enabled is True
+
+
+def test_bm25_jsonl_path_derived_from_chromadb_path():
+    cfg = ChatbotConfig(project_name="test", chromadb_path="/tmp/test_docs_extracted/chromadb")
+    assert cfg.bm25_jsonl_path == "/tmp/test_docs_extracted/test_docs.jsonl"

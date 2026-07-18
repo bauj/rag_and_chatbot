@@ -5,6 +5,57 @@ from unittest.mock import MagicMock
 if "gradio" not in sys.modules:
     sys.modules["gradio"] = MagicMock()
 
+from pathlib import Path
+CHATBOT_DIR = Path(__file__).parent.parent
+if str(CHATBOT_DIR) not in sys.path:
+    sys.path.insert(0, str(CHATBOT_DIR))
+
+from langchain_core.documents import Document
+
+
+def _bare_chatbot(bm25_index=None):
+    """
+    Build a DocumentationChatbot instance without running __init__ (which
+    loads a real ChromaDB + LLM). Only sets the attributes _hybrid_retrieve needs.
+    """
+    from core.rag_chatbot import DocumentationChatbot
+    bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    bot.bm25_index = bm25_index
+    return bot
+
+
+def test_hybrid_retrieve_returns_vector_docs_when_bm25_disabled():
+    bot = _bare_chatbot(bm25_index=None)
+    vector_docs = [Document(page_content="a", metadata={"url": "u1", "section_id": "s1", "chunk_position": "1/1"})]
+    result = bot._hybrid_retrieve("query", vector_docs, k=5, module_filter=None, doc_category_filter=None)
+    assert result == vector_docs
+
+
+def test_hybrid_retrieve_fuses_bm25_and_vector_results():
+    bm25_doc = Document(page_content="bm25 hit", metadata={"url": "u2", "section_id": "s2", "chunk_position": "1/1"})
+    fake_bm25 = MagicMock()
+    fake_bm25.search.return_value = [bm25_doc]
+
+    bot = _bare_chatbot(bm25_index=fake_bm25)
+    vector_docs = [Document(page_content="vector hit", metadata={"url": "u1", "section_id": "s1", "chunk_position": "1/1"})]
+
+    result = bot._hybrid_retrieve("query", vector_docs, k=5, module_filter="SHAPER", doc_category_filter="dev")
+
+    fake_bm25.search.assert_called_once_with("query", k=5, module_filter="SHAPER", doc_category_filter="dev")
+    result_urls = {d.metadata["url"] for d in result}
+    assert result_urls == {"u1", "u2"}
+
+
+def test_hybrid_retrieve_noop_preserves_vector_doc_order():
+    """With BM25 disabled, _hybrid_retrieve must not reorder or drop vector docs."""
+    bot = _bare_chatbot(bm25_index=None)
+    vector_docs = [
+        Document(page_content=f"doc {i}", metadata={"url": f"u{i}", "section_id": f"s{i}", "chunk_position": "1/1"})
+        for i in range(5)
+    ]
+    result = bot._hybrid_retrieve("q", vector_docs, k=40, module_filter=None, doc_category_filter=None)
+    assert result == vector_docs
+
 
 def test_webui_accepts_agentic_chatbot():
     """WebUI stores agentic_chatbot when provided."""
