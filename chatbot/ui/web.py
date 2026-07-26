@@ -17,16 +17,18 @@ except ImportError:
 class WebUI:
     """Gradio web interface for documentation chatbot"""
 
-    def __init__(self, chatbot: DocumentationChatbot, agentic_chatbot=None):
+    def __init__(self, chatbot: DocumentationChatbot, agentic_chatbot=None, agentic_smol_chatbot=None):
         """
         Initialize web UI
 
         Args:
             chatbot: DocumentationChatbot instance
             agentic_chatbot: Optional AgenticChatbot instance
+            agentic_smol_chatbot: Optional AgenticSmolChatbot instance
         """
         self.chatbot = chatbot
         self.agentic_chatbot = agentic_chatbot
+        self.agentic_smol_chatbot = agentic_smol_chatbot
 
     def _format_answer_markdown(self, result: dict) -> str:
         """
@@ -101,6 +103,13 @@ class WebUI:
             except Exception as e:
                 return f"**Error:** {str(e)}"
 
+        if mode == "Agentic (smolagents)" and self.agentic_smol_chatbot is not None:
+            try:
+                result = self.agentic_smol_chatbot.ask(message, max_tokens=answer_length)
+                return self._format_answer_markdown(result)
+            except Exception as e:
+                return f"**Error:** {str(e)}"
+
         try:
             module = module_filter if module_filter != "All" else None
             doc_type = doc_type_filter if doc_type_filter != "All" else None
@@ -146,9 +155,12 @@ class WebUI:
 
         # Build interface
         has_agentic = self.agentic_chatbot is not None
+        has_agentic_smol = self.agentic_smol_chatbot is not None
         has_reranker = self.chatbot.reranker is not None
         has_hyde = self.chatbot.hyde_llm is not None
-        agentic_cfg = self.agentic_chatbot._agentic_cfg if has_agentic else None
+        agentic_cfg = self.agentic_chatbot._agentic_cfg if has_agentic else (
+            self.agentic_smol_chatbot._agentic_cfg if has_agentic_smol else None
+        )
 
         with gr.Blocks(title=f"{project} Documentation Chatbot") as demo:
             with gr.Row():
@@ -160,13 +172,19 @@ class WebUI:
             with gr.Row():
                 with gr.Column(scale=1, min_width=240):
 
-                    # ── Mode toggle (only shown when agentic is available) ──────────
+                    # ── Mode toggle (only shown when at least one agentic mode is available) ──
+                    mode_choices = ["RAG"]
+                    if has_agentic:
+                        mode_choices.append("Agentic")
+                    if has_agentic_smol:
+                        mode_choices.append("Agentic (smolagents)")
                     mode_radio = gr.Radio(
-                        choices=["RAG", "Agentic"],
+                        choices=mode_choices,
                         value="RAG",
                         label="Mode",
-                        info="RAG: vector retrieval · Agentic: reads HTML pages directly",
-                        visible=has_agentic,
+                        info="RAG: vector retrieval · Agentic: reads HTML pages directly · "
+                             "Agentic (smolagents): multi-hop page browsing, experimental",
+                        visible=has_agentic or has_agentic_smol,
                     )
 
                     # ── RAG params ────────────────────────────────────────────────
@@ -286,6 +304,31 @@ class WebUI:
                             info="Additional pages read if NEED_MORE_INFO is triggered.",
                         )
 
+                    # ── Agentic-smol params ───────────────────────────────────────
+                    with gr.Column(visible=False) as agentic_smol_col:
+                        gr.Markdown("### Page index")
+                        gr.Textbox(
+                            value=agentic_cfg.page_index_path if agentic_cfg else "",
+                            label="page_index.json",
+                            interactive=False,
+                            info="Configured in config.json → agentic.page_index_path",
+                        )
+
+                        gr.Markdown("---")
+                        gr.Markdown("### Agentic-smol")
+                        gr.Markdown(
+                            "Experimental: a smolagents CodeAgent decides for itself how many "
+                            "search/read cycles to run (up to the configured step budget), instead "
+                            "of a fixed 1-2 round script. Not yet measured against classic Agentic "
+                            "mode — treat answers as unverified."
+                        )
+                        gr.Textbox(
+                            value=str(agentic_cfg.max_steps) if agentic_cfg else "",
+                            label="Max steps",
+                            interactive=False,
+                            info="Configured in config.json → agentic.max_steps (not runtime-tunable yet).",
+                        )
+
                     # ── Shared ────────────────────────────────────────────────────
                     gr.Markdown("---")
                     answer_length = gr.Slider(
@@ -321,15 +364,18 @@ class WebUI:
                     )
 
             # ── Event handlers ────────────────────────────────────────────────────
-            if has_agentic:
+            if has_agentic or has_agentic_smol:
                 def _on_mode_change(mode):
-                    is_rag = mode == "RAG"
-                    return gr.update(visible=is_rag), gr.update(visible=not is_rag)
+                    return (
+                        gr.update(visible=mode == "RAG"),
+                        gr.update(visible=mode == "Agentic"),
+                        gr.update(visible=mode == "Agentic (smolagents)"),
+                    )
 
                 mode_radio.change(
                     fn=_on_mode_change,
                     inputs=[mode_radio],
-                    outputs=[rag_col, agentic_col],
+                    outputs=[rag_col, agentic_col, agentic_smol_col],
                 )
 
             if has_reranker:

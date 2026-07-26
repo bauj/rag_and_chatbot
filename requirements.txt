@@ -27,6 +27,9 @@ langchain-huggingface==1.2.1    # HuggingFace embeddings (replaces langchain-com
 sentence-transformers==5.3.0    # Embedding models (all-MiniLM-L6-v2)
 rank_bm25==0.2.2                # BM25 sparse retrieval (hybrid search)
 
+# Agentic-smol mode (optional — only needed if smol_enabled: true in config.json)
+smolagents==1.26.0               # CodeAgent multi-hop browsing (chatbot/core/agentic_smol_chatbot.py)
+
 # ============================================
 # WEB UI (ui/web.py) - OPTIONAL
 # ============================================

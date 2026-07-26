@@ -75,9 +75,10 @@ Examples:
 
     parser.add_argument(
         '--mode',
-        choices=['rag', 'agentic'],
+        choices=['rag', 'agentic', 'agentic-smol'],
         default='rag',
-        help='Chatbot mode: rag (default) or agentic (reads HTML pages directly)'
+        help='Chatbot mode: rag (default), agentic (reads HTML pages directly), '
+             'or agentic-smol (smolagents CodeAgent, real multi-hop browsing)'
     )
 
     # Web options
@@ -136,37 +137,60 @@ Examples:
 
     # Initialize agentic chatbot if requested
     agentic_chatbot = None
-    if args.mode == 'agentic' or config.agentic is not None:
+    if args.mode in ('agentic', 'agentic-smol') or config.agentic is not None:
         if config.agentic is None:
-            print("\nError: --mode agentic requires an 'agentic' block in config.json")
+            print(f"\nError: --mode {args.mode} requires an 'agentic' block in config.json")
             sys.exit(1)
-        # Warn about ignored flags in agentic mode
-        if args.mode == 'agentic':
+        # Warn about ignored flags in agentic modes
+        if args.mode in ('agentic', 'agentic-smol'):
             if args.module or args.doc_type:
-                print("Warning: --module and --type are not supported in agentic mode and will be ignored.",
+                print(f"Warning: --module and --type are not supported in {args.mode} mode and will be ignored.",
                       file=sys.stderr)
             if args.deep_dive:
-                print("Warning: --deep-dive is not supported in agentic mode and will be ignored.",
+                print(f"Warning: --deep-dive is not supported in {args.mode} mode and will be ignored.",
                       file=sys.stderr)
         from core import AgenticChatbot
         print("Loading agentic chatbot (page index)...")
         agentic_chatbot = AgenticChatbot(config)
         print("Agentic chatbot ready.")
 
+    # Initialize smolagents agentic chatbot if enabled (opt-in, requires config.agentic too)
+    agentic_smol_chatbot = None
+    if config.agentic is not None and config.smol_enabled:
+        try:
+            from core import AgenticSmolChatbot
+            print("Loading agentic-smol chatbot (smolagents)...")
+            agentic_smol_chatbot = AgenticSmolChatbot(config)
+            print("Agentic-smol chatbot ready.")
+        except ImportError as e:
+            if args.mode == 'agentic-smol':
+                print(f"\nError: --mode agentic-smol requires the smolagents package. {e}")
+                sys.exit(1)
+            print(f"Warning: agentic-smol mode unavailable ({e}). Continuing without it.", file=sys.stderr)
+    elif args.mode == 'agentic-smol':
+        if config.agentic is None:
+            print("\nError: --mode agentic-smol requires an 'agentic' block in config.json")
+        else:
+            print("\nError: --mode agentic-smol requires smol_enabled: true in config.json")
+        sys.exit(1)
+
     # Route to appropriate interface
     if args.web:
         from ui import WebUI
         # Web interface
-        web_ui = WebUI(chatbot, agentic_chatbot=agentic_chatbot)
+        web_ui = WebUI(chatbot, agentic_chatbot=agentic_chatbot, agentic_smol_chatbot=agentic_smol_chatbot)
         web_ui.launch(share=args.share, port=args.port)
     else:
         from ui import TerminalUI
         # Terminal interface
-        terminal_ui = TerminalUI(chatbot, agentic_chatbot=agentic_chatbot)
+        terminal_ui = TerminalUI(chatbot, agentic_chatbot=agentic_chatbot, agentic_smol_chatbot=agentic_smol_chatbot)
 
         if args.question:
             if args.mode == 'agentic':
                 result = agentic_chatbot.ask(args.question)
+                print(result['answer'] or result['error'])
+            elif args.mode == 'agentic-smol':
+                result = agentic_smol_chatbot.ask(args.question)
                 print(result['answer'] or result['error'])
             else:
                 # Single question mode
