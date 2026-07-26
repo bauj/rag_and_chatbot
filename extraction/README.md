@@ -132,9 +132,13 @@ HTML files (Doxygen + Sphinx)
         ↓
 Content extraction (format-specific parsers, navigation removed)
         ↓
-Section splitting (h2/h3 boundaries → section_id + section_text stored in metadata)
+Dev-category pages with Doxygen memitems → one chunk per documented symbol
+(class/method/function), see "Per-symbol Doxygen chunking" below.
+All other pages → section splitting (h2/h3 boundaries → section_id +
+section_text stored in metadata)
         ↓
-Code block extraction (<pre>/<code> tags → stored in metadata)
+Code blocks (<pre>, Doxygen div.fragment) → converted to fenced Markdown via
+markdownify, preserved inline in chunk text (not just stripped/stored separately)
         ↓
 Quality scoring (filter score < min_score)
         ↓
@@ -145,6 +149,32 @@ Metadata enrichment (module, doc_category, parent_doc_id, section_id, position, 
 ChromaDB storage (cosine similarity, persistent)   ← RAG mode
 page_index.json (flat page catalogue)              ← Agentic mode
 ```
+
+### Per-symbol Doxygen chunking
+
+For `doc_category: "dev"` pages that contain Doxygen `div.memitem` blocks (class
+reference pages — one block per documented method/function), extraction
+produces **one chunk per documented symbol** instead of one chunk per h2/h3
+section. Each symbol's signature, description, and anchor are parsed directly
+from the HTML (`has_memitems`/`extract_memitems_with_soup` in
+`html_parser.py`). This gives retrieval much finer granularity on API
+reference pages — a query about one specific method no longer has to compete
+with every other method on the same class page inside a single large chunk.
+
+Each such chunk's `hierarchy` is the symbol name (e.g. `createFeature`), its
+`url` gets the symbol's in-page anchor appended (`...html#a1b2c3`), and its
+metadata includes `symbol_name` and `anchor_id`. Pages without memitems (user
+docs, pages without a Doxygen class-reference structure) fall back to the
+original per-section chunking unchanged.
+
+### Code block preservation
+
+Code blocks (`<pre>`/`<code>` tags, and Doxygen's `div.fragment`/`div.line`
+constructs) are converted to fenced Markdown (` ``` `) via `markdownify`
+rather than being flattened to plain text or stripped. This happens in the
+actual per-section chunking path (`_split_into_sections` in
+`html_parser.py`), not just as a whole-page fallback, so code examples inside
+regular sections are preserved too, not only on memitem pages.
 
 ## Chunk Metadata
 
@@ -163,6 +193,8 @@ Each chunk stored in ChromaDB includes:
 | `quality_score` | Content quality (0–1) | `0.85` |
 | `has_code` | Contains code blocks | `true` |
 | `source` | Human-readable source | `"my_project MODULE_A Dev Documentation"` |
+| `symbol_name` | Documented symbol name (memitem chunks only) | `"createFeature"` |
+| `anchor_id` | In-page anchor for the symbol (memitem chunks only) | `"a1b2c3d4"` |
 
 ## Troubleshooting
 

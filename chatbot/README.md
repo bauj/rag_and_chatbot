@@ -1,18 +1,21 @@
 # Documentation Chatbot
 
-Chatbot with two retrieval modes and clean separation between business logic and UI.
+Chatbot with three retrieval modes and clean separation between business logic and UI.
 
-- **RAG mode** — queries a ChromaDB vector database, with optional cross-encoder reranking
-- **Agentic mode** — searches a page index, asks the LLM to select pages, reads HTML files directly; no vector retrieval at query time
+- **RAG mode** — queries a ChromaDB vector database, with optional cross-encoder reranking, optional BM25 keyword hybrid retrieval, and optional HyDE
+- **Agentic mode** — searches a page index, asks the LLM to select pages, reads HTML files directly, fixed 1-2 round script; no vector retrieval at query time
+- **Agentic-smol mode** (opt-in, experimental) — same page index as Agentic mode, but driven by a smolagents `CodeAgent` that decides for itself how many search/read cycles to run instead of a fixed round count
 
 ## Architecture
 
 ```
 chatbot/
 ├── core/
-│   ├── config.py               # ChatbotConfig, LLMConfig, EmbeddingConfig, RerankerConfig, AgenticConfig
-│   ├── rag_chatbot.py          # DocumentationChatbot — RAG mode
-│   └── agentic_chatbot.py      # AgenticChatbot — agentic mode
+│   ├── config.py                    # ChatbotConfig, LLMConfig, EmbeddingConfig, RerankerConfig, AgenticConfig
+│   ├── rag_chatbot.py               # DocumentationChatbot — RAG mode (+ BM25 hybrid, HyDE)
+│   ├── bm25_index.py                # BM25Index + reciprocal_rank_fusion
+│   ├── agentic_chatbot.py           # AgenticChatbot — agentic mode (fixed 1-2 round script)
+│   └── agentic_smol_chatbot.py      # AgenticSmolChatbot — agentic-smol mode (smolagents CodeAgent)
 ├── ui/
 │   ├── terminal.py             # Interactive terminal interface
 │   └── web.py                  # Gradio web interface
@@ -44,6 +47,9 @@ cp config.example.json config.json
 | `top_n_after_rerank` | `15` | Docs kept after cross-encoder reranking |
 | `temperature` | `0.0` | LLM temperature |
 | `max_tokens` | `2000` | Max tokens per response |
+| `bm25_enabled` | `false` | Opt-in BM25 keyword search fused with vector search via Reciprocal Rank Fusion (RAG standard mode only). Requires `{project_name}_docs.jsonl` next to `chromadb_path`. |
+| `hyde_enabled` | `false` | Opt-in HyDE — an LLM writes a hypothetical passage per question, embedded instead of the raw question for vector search. BM25/reranking still use the real question. One extra LLM call per question. |
+| `smol_enabled` | `false` | Opt-in Agentic-smol mode. Requires `agentic` block to also be set (same page index). Requires the `smolagents` package. |
 
 Config is loaded in this priority order: CLI arguments > `config.json` > defaults.
 
@@ -56,7 +62,8 @@ Config is loaded in this priority order: CLI arguments > `config.json` > default
   "page_index_path": "../extraction/my_project_docs_extracted/page_index.json",
   "max_chars_per_page": 8000,
   "max_pages_per_round": 3,
-  "max_pages_round2": 2
+  "max_pages_round2": 2,
+  "max_steps": 6
 }
 ```
 
@@ -64,10 +71,11 @@ Config is loaded in this priority order: CLI arguments > `config.json` > default
 |---|---|---|
 | `page_index_path` | required | Path to `page_index.json` (relative to `chatbot/` or absolute) |
 | `max_chars_per_page` | `8000` | Max characters read per HTML page |
-| `max_pages_per_round` | `3` | Pages selected and read in Round 1 |
-| `max_pages_round2` | `2` | Additional pages read in Round 2 (if NEED_MORE_INFO triggered) |
+| `max_pages_per_round` | `3` | Pages selected and read in Round 1 (classic Agentic mode) |
+| `max_pages_round2` | `2` | Additional pages read in Round 2 (classic Agentic mode, if NEED_MORE_INFO triggered) |
+| `max_steps` | `6` | CodeAgent step budget (Agentic-smol mode only, requires `smol_enabled: true`) |
 
-`page_index.json` is generated automatically when running `extraction/process_docs.py`.
+`page_index.json` is generated automatically when running `extraction/process_docs.py`. This same block is shared by both classic Agentic and Agentic-smol modes — `max_chars_per_page` in particular is reused as-is by both, even though Agentic-smol's step loop resends read pages on every iteration, so its effective context cost grows faster with this value than classic Agentic mode's single read-and-answer shape. Consider a lower value if running Agentic-smol.
 
 ## Usage
 
@@ -79,6 +87,9 @@ python chatbot.py
 
 # Agentic mode
 python chatbot.py --mode agentic
+
+# Agentic-smol mode (requires config.agentic AND smol_enabled: true)
+python chatbot.py --mode agentic-smol
 
 # Single question
 python chatbot.py --question "How do I create a mesh?"
@@ -92,19 +103,25 @@ python chatbot.py --question "Explain the full workflow" --deep-dive
 
 Commands in interactive mode:
 ```
-mode:rag          - Switch to RAG mode (vector retrieval)
-mode:agentic      - Switch to Agentic mode (reads HTML pages directly)
-module:MODULE_A   - Filter by module (RAG only)
-type:dev          - Filter developer docs only (RAG only)
-type:user         - Filter user docs only (RAG only)
-deep              - Toggle Deep Dive mode (RAG only)
-reranker          - Toggle cross-encoder reranker on/off (RAG only)
-clear             - Clear all filters
-stats             - Show database statistics (RAG only)
-exit              - Exit
+mode:rag           - Switch to RAG mode (vector retrieval)
+mode:agentic       - Switch to Agentic mode (reads HTML pages directly)
+mode:agentic-smol  - Switch to Agentic-smol mode (smolagents, multi-hop browsing)
+module:MODULE_A    - Filter by module (RAG only)
+type:dev           - Filter developer docs only (RAG only)
+type:user          - Filter user docs only (RAG only)
+deep               - Toggle Deep Dive mode (RAG only)
+reranker           - Toggle cross-encoder reranker on/off (RAG only)
+topn:<n>           - Set top-N docs kept after rerank (RAG only)
+hyde               - Toggle HyDE on/off (RAG only)
+agentic:chars:<n>  - Set max chars read per page (classic Agentic only)
+agentic:pages1:<n> - Set pages read in round 1 (classic Agentic only)
+agentic:pages2:<n> - Set pages read in round 2 (classic Agentic only)
+clear              - Clear all filters
+stats              - Show database statistics (RAG only)
+exit               - Exit
 ```
 
-`mode:agentic` is only available when `config.agentic` is set. `reranker` is only shown when a reranker model is configured.
+`mode:agentic` is only available when `config.agentic` is set. `mode:agentic-smol` additionally requires `smol_enabled: true`. `reranker`/`topn:<n>` are only shown when a reranker model is configured. `hyde` is only shown when `hyde_enabled: true`. `agentic:*` commands apply to classic Agentic mode only — they're ignored (with a warning) while in Agentic-smol mode.
 
 ### Web Interface
 
@@ -119,7 +136,7 @@ python chatbot.py --web --port 8080
 python chatbot.py --web --share
 ```
 
-The web UI includes a **Mode** toggle (RAG / Agentic). Agentic mode is only available if `config.agentic` is set.
+The web UI includes a **Mode** toggle (RAG / Agentic / Agentic (smolagents)). Agentic mode is only available if `config.agentic` is set; Agentic (smolagents) additionally requires `smol_enabled: true`.
 
 ### CLI Overrides
 
@@ -136,7 +153,7 @@ python chatbot.py --config /path/to/my_config.json
 Run from inside the `chatbot/` directory:
 
 ```python
-from core import ChatbotConfig, DocumentationChatbot, AgenticChatbot
+from core import ChatbotConfig, DocumentationChatbot, AgenticChatbot, AgenticSmolChatbot
 
 config = ChatbotConfig.load("config.json")
 
@@ -162,6 +179,7 @@ result = chatbot.ask(
     max_tokens=3000,
     reranker_enabled=True,  # disable at runtime to skip reranking
     top_n=10,               # override config.top_n_after_rerank
+    hyde_enabled=True,      # override config.hyde_enabled (requires hyde_enabled: true at startup)
 )
 
 stats = chatbot.get_stats()
@@ -180,9 +198,19 @@ print(result["answer"])
 print(result["filters"]["rounds_used"])  # 1 or 2
 for source in result["sources"]:
     print(f"  - {source['title']} ({source['module']}/{source['doc_category']})")
+
+# --- Agentic-smol mode (requires config.agentic AND config.smol_enabled to be set) ---
+agentic_smol = AgenticSmolChatbot(config)
+
+result = agentic_smol.ask("How do I create a mesh?", max_steps=8)  # override config.agentic.max_steps
+print(result["answer"])
+print(result["filters"]["steps_used"])
+print(result["filters"]["grounded"])  # False if the agent answered without reading any page
+for source in result["sources"]:
+    print(f"  - {source['title']} ({source['module']}/{source['doc_category']})")
 ```
 
-Both `.ask()` methods return the same dict shape: `{answer, sources, filters, error}`.
+All three `.ask()` methods return the same dict shape: `{answer, sources, filters, error}`.
 
 ## Response Styles (Web UI)
 
