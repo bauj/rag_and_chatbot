@@ -40,6 +40,11 @@ class TerminalUI:
         print("  deep              - Toggle Deep Dive mode (RAG only)")
         if has_reranker:
             print("  reranker          - Toggle cross-encoder reranker on/off (RAG only)")
+            print("  topn:<n>          - Set top-N docs kept after rerank (RAG only)")
+        if has_agentic:
+            print("  agentic:chars:<n>  - Set max chars read per page (Agentic only)")
+            print("  agentic:pages1:<n> - Set pages read in round 1 (Agentic only)")
+            print("  agentic:pages2:<n> - Set pages read in round 2 (Agentic only)")
         print("  clear             - Clear all filters")
         print("  stats             - Show statistics (RAG only)")
         print("  exit/quit         - Exit\n")
@@ -127,6 +132,10 @@ class TerminalUI:
         current_type = None
         deep_dive_mode = False
         reranker_enabled = self.chatbot.reranker is not None
+        top_n_override = None
+        agentic_chars_override = None
+        agentic_pages1_override = None
+        agentic_pages2_override = None
 
         while True:
             try:
@@ -143,6 +152,8 @@ class TerminalUI:
                         prompt_parts.append("[DEEP DIVE]")
                     if not reranker_enabled:
                         prompt_parts.append("[no reranker]")
+                    elif top_n_override is not None and top_n_override != self.chatbot.config.top_n_after_rerank:
+                        prompt_parts.append(f"[top_n={top_n_override}]")
                     if not current_module and not current_type and not deep_dive_mode:
                         prompt_parts.append("[all]")
 
@@ -184,6 +195,42 @@ class TerminalUI:
                         print(f"OK: Reranker {status}\n")
                     continue
 
+                # Handle top_n override (RAG only)
+                if user_input.lower().startswith('topn:'):
+                    if self.chatbot.reranker is None:
+                        print("Warning: No reranker model is configured\n")
+                    else:
+                        raw = user_input.split(':', 1)[1].strip()
+                        if raw.isdigit() and int(raw) > 0:
+                            top_n_override = int(raw)
+                            print(f"OK: top_n set to {top_n_override}\n")
+                        else:
+                            print("Warning: top_n must be a positive integer\n")
+                    continue
+
+                # Handle agentic param overrides (Agentic only)
+                if user_input.lower().startswith('agentic:'):
+                    if self.agentic_chatbot is None:
+                        print("Warning: Agentic mode is not configured (add 'agentic' block to config.json)\n")
+                        continue
+                    parts = user_input.split(':')
+                    if len(parts) == 3 and parts[1].lower() in ('chars', 'pages1', 'pages2'):
+                        param, raw = parts[1].lower(), parts[2].strip()
+                        if raw.isdigit() and int(raw) > 0:
+                            value = int(raw)
+                            if param == 'chars':
+                                agentic_chars_override = value
+                            elif param == 'pages1':
+                                agentic_pages1_override = value
+                            else:
+                                agentic_pages2_override = value
+                            print(f"OK: agentic:{param} set to {value}\n")
+                        else:
+                            print(f"Warning: agentic:{param} must be a positive integer\n")
+                    else:
+                        print("Warning: Unknown agentic setting (use: agentic:chars:<n>, agentic:pages1:<n>, agentic:pages2:<n>)\n")
+                    continue
+
                 # RAG-only commands
                 if current_mode == "rag":
                     # Handle stats
@@ -203,6 +250,7 @@ class TerminalUI:
                         current_module = None
                         current_type = None
                         deep_dive_mode = False
+                        top_n_override = None
                         print("OK: Cleared all filters\n")
                         continue
 
@@ -229,7 +277,12 @@ class TerminalUI:
 
                 # Ask question
                 if current_mode == "agentic" and self.agentic_chatbot is not None:
-                    result = self.agentic_chatbot.ask(user_input)
+                    result = self.agentic_chatbot.ask(
+                        user_input,
+                        max_chars_per_page=agentic_chars_override,
+                        max_pages_per_round=agentic_pages1_override,
+                        max_pages_round2=agentic_pages2_override,
+                    )
                 else:
                     result = self.chatbot.ask(
                         user_input,
@@ -237,6 +290,7 @@ class TerminalUI:
                         doc_type=current_type,
                         deep_dive=deep_dive_mode,
                         reranker_enabled=reranker_enabled,
+                        top_n=top_n_override,
                     )
                 self._print_answer(result)
 
