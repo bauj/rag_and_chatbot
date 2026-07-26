@@ -34,5 +34,11 @@
   "_comment_top_n": "Docs kept after cross-encoder reranking. Only used when reranker is enabled.",
 
   "temperature": 0.0,
-  "max_tokens": 2000
+  "max_tokens": 2000,
+
+  "bm25_enabled": false,
+  "_comment_bm25_enabled": "Opt-in BM25 keyword search fused with vector search via Reciprocal Rank Fusion. Requires <project_name>_docs.jsonl next to chromadb_path (produced by extraction).",
+
+  "hyde_enabled": false,
+  "_comment_hyde_enabled": "Opt-in HyDE: before vector search, an LLM writes a short hypothetical documentation passage and that passage (not your literal question) is embedded and searched. Helps when questions are phrased very differently from the docs. BM25 and reranking still use the real question. Costs one extra LLM call per question."
 }

@@ -91,7 +91,7 @@ def test_handle_message_routes_to_agentic(tmp_path):
         mode="Agentic",
         module_filter="All", doc_type_filter="All",
         response_style="Precise (Recommended)", deep_dive=False,
-        search_depth=40, reranker_enabled=True, top_n=15, answer_length=2000,
+        search_depth=40, reranker_enabled=True, top_n=15, hyde_enabled=False, answer_length=2000,
         max_chars_per_page=8000, max_pages_per_round=3, max_pages_round2=2,
     )
     agentic.ask.assert_called_once_with(

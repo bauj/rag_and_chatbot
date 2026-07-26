@@ -25,6 +25,7 @@ class TerminalUI:
         project = self.chatbot.config.project_name
         has_agentic = self.agentic_chatbot is not None
         has_reranker = self.chatbot.reranker is not None
+        has_hyde = self.chatbot.hyde_llm is not None
         print("=" * 70)
         print(f"{project} Documentation Chatbot")
         print("=" * 70)
@@ -41,6 +42,8 @@ class TerminalUI:
         if has_reranker:
             print("  reranker          - Toggle cross-encoder reranker on/off (RAG only)")
             print("  topn:<n>          - Set top-N docs kept after rerank (RAG only)")
+        if has_hyde:
+            print("  hyde              - Toggle HyDE on/off (RAG only)")
         if has_agentic:
             print("  agentic:chars:<n>  - Set max chars read per page (Agentic only)")
             print("  agentic:pages1:<n> - Set pages read in round 1 (Agentic only)")
@@ -132,6 +135,7 @@ class TerminalUI:
         current_type = None
         deep_dive_mode = False
         reranker_enabled = self.chatbot.reranker is not None
+        hyde_enabled = self.chatbot.hyde_llm is not None
         top_n_override = None
         agentic_chars_override = None
         agentic_pages1_override = None
@@ -154,6 +158,8 @@ class TerminalUI:
                         prompt_parts.append("[no reranker]")
                     elif top_n_override is not None and top_n_override != self.chatbot.config.top_n_after_rerank:
                         prompt_parts.append(f"[top_n={top_n_override}]")
+                    if hyde_enabled:
+                        prompt_parts.append("[hyde]")
                     if not current_module and not current_type and not deep_dive_mode:
                         prompt_parts.append("[all]")
 
@@ -193,6 +199,16 @@ class TerminalUI:
                         reranker_enabled = not reranker_enabled
                         status = "enabled" if reranker_enabled else "disabled"
                         print(f"OK: Reranker {status}\n")
+                    continue
+
+                # Handle HyDE toggle (RAG only)
+                if user_input.lower() == 'hyde':
+                    if self.chatbot.hyde_llm is None:
+                        print("Warning: HyDE is not configured (set hyde_enabled: true in config.json)\n")
+                    else:
+                        hyde_enabled = not hyde_enabled
+                        status = "enabled" if hyde_enabled else "disabled"
+                        print(f"OK: HyDE {status}\n")
                     continue
 
                 # Handle top_n override (RAG only)
@@ -291,6 +307,7 @@ class TerminalUI:
                         deep_dive=deep_dive_mode,
                         reranker_enabled=reranker_enabled,
                         top_n=top_n_override,
+                        hyde_enabled=hyde_enabled,
                     )
                 self._print_answer(result)
 

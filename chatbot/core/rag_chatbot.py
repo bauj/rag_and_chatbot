@@ -48,6 +48,7 @@ class DocumentationChatbot:
         self.base_prompt = self._create_prompt()
         self.reranker = self._load_reranker()
         self.bm25_index = self._load_bm25_index()
+        self.hyde_llm = self._initialize_llm(temperature=0.0) if config.hyde_enabled else None
 
     def _load_vectorstore(self) -> Chroma:
         """Load ChromaDB vector store"""
@@ -169,6 +170,28 @@ class DocumentationChatbot:
         print(f"DEBUG : load BM25 index ({jsonl_path}) ...")
         return BM25Index(str(jsonl_path))
 
+    def _generate_hyde_passage(self, question: str) -> str:
+        """
+        Generate a hypothetical documentation passage answering `question` (HyDE).
+
+        Used only to steer the dense vector search — BM25 and reranking still
+        score against the real question. Falls back to the raw question on any
+        LLM failure so retrieval degrades to plain vector search instead of erroring.
+        """
+        prompt = PromptTemplate.from_template(
+            """Write a short hypothetical passage (2-4 sentences) from {project_name}'s technical documentation that would answer the following question. Write it as if it were real documentation, not an explanation.
+
+Question: {question}
+
+Passage:"""
+        )
+        try:
+            chain = prompt | self.hyde_llm | StrOutputParser()
+            return chain.invoke({"project_name": self.config.project_name, "question": question})
+        except Exception as e:
+            print(f"Warning: HyDE passage generation failed ({e}) — falling back to raw question")
+            return question
+
     def _hybrid_retrieve(self, query: str, vector_docs: List, k: int,
                          module_filter: Optional[str], doc_category_filter: Optional[str]) -> List:
         """
@@ -270,7 +293,8 @@ Answer (based strictly on the documentation above):"""
                      temperature: Optional[float] = None,
                      max_tokens: Optional[int] = None,
                      reranker_enabled: bool = True,
-                     top_n: Optional[int] = None):
+                     top_n: Optional[int] = None,
+                     hyde_enabled: Optional[bool] = None):
         """
         Create RAG chain with optional filtering
 
@@ -292,6 +316,9 @@ Answer (based strictly on the documentation above):"""
 
         if deep_dive and self.reranker is not None:
             print("Note: deep_dive=True — reranking is skipped in deep dive mode.")
+
+        effective_hyde = hyde_enabled if hyde_enabled is not None else (self.hyde_llm is not None)
+        effective_hyde = effective_hyde and self.hyde_llm is not None
 
         # Create LLM with runtime overrides
         llm = self._initialize_llm(temperature=temperature, max_tokens=max_tokens)
@@ -359,7 +386,8 @@ Answer (based strictly on the documentation above):"""
             # Results are cached on self._last_reranked_docs so ask() can reuse
             # them for source attribution without a second retrieval + reranking pass.
             def retrieve_and_format(question: str) -> str:
-                raw_docs = retriever.invoke(question)
+                vector_query = self._generate_hyde_passage(question) if effective_hyde else question
+                raw_docs = retriever.invoke(vector_query)
                 raw_docs = self._hybrid_retrieve(
                     question, raw_docs, k=k,
                     module_filter=module_filter if module_filter and module_filter != "All" else None,
@@ -394,7 +422,8 @@ Answer (based strictly on the documentation above):"""
             temperature: Optional[float] = None,
             max_tokens: Optional[int] = None,
             reranker_enabled: bool = True,
-            top_n: Optional[int] = None) -> Dict[str, Any]:
+            top_n: Optional[int] = None,
+            hyde_enabled: Optional[bool] = None) -> Dict[str, Any]:
         """
         Ask a question and get an answer with sources
 
@@ -446,6 +475,7 @@ Answer (based strictly on the documentation above):"""
                 module, doc_type, deep_dive,
                 k=k, temperature=temperature, max_tokens=max_tokens,
                 reranker_enabled=reranker_enabled, top_n=top_n,
+                hyde_enabled=hyde_enabled,
             )
             answer = chain.invoke(question)
             # Reuse docs already retrieved+reranked inside the standard chain.

@@ -80,6 +80,7 @@ class WebUI:
         search_depth: int,
         reranker_enabled: bool,
         top_n: int,
+        hyde_enabled: bool,
         answer_length: int,
         # Agentic params
         max_chars_per_page: int,
@@ -118,6 +119,7 @@ class WebUI:
                 max_tokens=answer_length,
                 reranker_enabled=reranker_enabled,
                 top_n=top_n,
+                hyde_enabled=hyde_enabled,
             )
 
             return self._format_answer_markdown(result)
@@ -145,6 +147,7 @@ class WebUI:
         # Build interface
         has_agentic = self.agentic_chatbot is not None
         has_reranker = self.chatbot.reranker is not None
+        has_hyde = self.chatbot.hyde_llm is not None
         agentic_cfg = self.agentic_chatbot._agentic_cfg if has_agentic else None
 
         with gr.Blocks(title=f"{project} Documentation Chatbot") as demo:
@@ -210,6 +213,27 @@ class WebUI:
                                 label="Top-N after rerank",
                                 info="Docs kept after cross-encoder reranking.",
                             )
+
+                        gr.Markdown("---")
+                        gr.Markdown("### HyDE")
+                        hyde_enabled = gr.Checkbox(
+                            label="Enable HyDE",
+                            value=has_hyde,
+                            interactive=has_hyde,
+                            info=(
+                                "Hypothetical Document Embeddings: before searching, an LLM writes a short "
+                                "fake documentation passage answering your question, and that passage — not "
+                                "your literal question — is embedded and used for the vector search. This "
+                                "helps when your question is phrased very differently from how the docs word "
+                                "things (paraphrase gap), since the fake passage is written in \"documentation "
+                                "voice\" and embeds closer to real doc chunks. It costs one extra LLM call per "
+                                "question and can hurt exact symbol/keyword lookups (BM25 and reranking still "
+                                "use your real question, so those aren't affected). Requires hyde_enabled: true "
+                                "in config.json."
+                                if has_hyde else
+                                "Requires hyde_enabled: true in config.json (not configured for this project)."
+                            ),
+                        )
 
                         gr.Markdown("---")
                         gr.Markdown("### Response")
@@ -284,6 +308,7 @@ class WebUI:
                             search_depth,
                             reranker_enabled,
                             top_n,
+                            hyde_enabled,
                             answer_length,
                             max_chars_per_page,
                             max_pages_per_round,
