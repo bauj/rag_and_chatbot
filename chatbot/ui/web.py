@@ -3,6 +3,7 @@ Web interface for Documentation Chatbot using Gradio
 Handles web UI, formatting, and Gradio-specific logic
 """
 
+from pathlib import Path
 from typing import List
 import gradio as gr
 
@@ -47,6 +48,16 @@ class WebUI:
         sources = result.get("sources", [])
         filters = result.get("filters", {})
 
+        # Surface a groundedness warning before anything else — agentic-smol reports
+        # grounded=False when the agent answered without ever reading a page, i.e.
+        # straight from the model's parametric knowledge rather than the docs.
+        if filters.get("grounded") is False:
+            answer = (
+                "> **Warning:** this answer was produced without reading any documentation "
+                "page, so it may come from the model's own knowledge rather than the docs.\n\n"
+                + answer
+            )
+
         # Add sources section
         if sources:
             answer += "\n\n---\n**Sources:**\n"
@@ -63,9 +74,29 @@ class WebUI:
             if len(modules_used) > 1:
                 answer += f"\n*Uses {len(modules_used)} modules: {', '.join(sorted(modules_used))}*"
 
-            # Add deep dive notice if enabled
-            if filters.get("deep_dive"):
-                answer += "\n\n*Note: This answer was generated using Deep Dive mode for comprehensive analysis.*"
+        # Retrieval / agent pipeline summary — makes it visible which stages actually ran
+        # rather than which checkboxes happened to be ticked.
+        notes = []
+        if filters.get("deep_dive"):
+            notes.append("Deep Dive mode (batch summarization then synthesis)")
+            bypassed = filters.get("bypassed_by_deep_dive")
+            if bypassed:
+                pretty = {"reranker": "reranking", "hyde": "HyDE", "bm25": "BM25 hybrid retrieval"}
+                names = ", ".join(pretty.get(b, b) for b in bypassed)
+                notes.append(f"**{names} skipped** — Deep Dive uses its own retrieval path")
+        else:
+            stages = [name for key, name in
+                      (("bm25", "BM25 hybrid"), ("hyde", "HyDE"), ("reranker", "reranker"))
+                      if filters.get(key)]
+            if stages:
+                notes.append("Retrieval: " + " + ".join(stages))
+        if filters.get("rounds_used") is not None:
+            notes.append(f"Agentic rounds used: {filters['rounds_used']}")
+        if filters.get("steps_used") is not None:
+            notes.append(f"Agent steps used: {filters['steps_used']}")
+
+        if notes:
+            answer += "\n\n" + "\n".join(f"*{n}*" for n in notes)
 
         return answer
 
@@ -83,6 +114,7 @@ class WebUI:
         reranker_enabled: bool,
         top_n: int,
         hyde_enabled: bool,
+        bm25_enabled: bool,
         answer_length: int,
         # Agentic params
         max_chars_per_page: int,
@@ -114,7 +146,8 @@ class WebUI:
             module = module_filter if module_filter != "All" else None
             doc_type = doc_type_filter if doc_type_filter != "All" else None
 
-            # Temperature comes from the style preset; k and deep_dive from explicit controls
+            # Temperature comes from the style preset; k and deep_dive from explicit controls.
+            # The "Config default" style passes None so config.temperature applies.
             style_config = ChatbotConfig.RESPONSE_STYLES.get(response_style, {})
             temperature = style_config.get("temperature")
 
@@ -129,6 +162,7 @@ class WebUI:
                 reranker_enabled=reranker_enabled,
                 top_n=top_n,
                 hyde_enabled=hyde_enabled,
+                bm25_enabled=bm25_enabled,
             )
 
             return self._format_answer_markdown(result)
@@ -150,14 +184,16 @@ class WebUI:
         # [question, module, doc_type, response_style, search_depth, answer_length]
         examples = []
 
-        project = self.chatbot.config.project_name
-        k_default = self.chatbot.config.k_standard
+        cfg = self.chatbot.config
+        project = cfg.project_name
+        k_default = cfg.k_standard
 
         # Build interface
         has_agentic = self.agentic_chatbot is not None
         has_agentic_smol = self.agentic_smol_chatbot is not None
         has_reranker = self.chatbot.reranker is not None
         has_hyde = self.chatbot.hyde_llm is not None
+        has_bm25 = self.chatbot.bm25_index is not None
         agentic_cfg = self.agentic_chatbot._agentic_cfg if has_agentic else (
             self.agentic_smol_chatbot._agentic_cfg if has_agentic_smol else None
         )
@@ -207,38 +243,69 @@ class WebUI:
                         gr.Markdown("### Retrieval")
                         search_depth = gr.Slider(
                             minimum=10,
-                            maximum=80,
+                            maximum=max(80, cfg.k_standard, cfg.k_deep_dive),
                             value=k_default,
                             step=5,
                             label="Search depth (chunks)",
-                            info="How many documentation chunks to retrieve before ranking. More = broader context, slower.",
+                            info=f"How many documentation chunks to retrieve before ranking. More = broader "
+                                 f"context, slower. Defaults to k_standard ({cfg.k_standard}); switches to "
+                                 f"k_deep_dive ({cfg.k_deep_dive}) when Deep Dive is enabled.",
                         )
 
-                        gr.Markdown("---")
-                        gr.Markdown("### Reranker")
-                        reranker_enabled = gr.Checkbox(
-                            label="Enable reranker",
-                            value=has_reranker,
-                            interactive=has_reranker,
-                            info="Cross-encoder reranking. Requires the reranker model to be configured." if not has_reranker else "Cross-encoder reranking (BAAI/bge-reranker-v2-m3).",
+                        deep_dive_notice = gr.Markdown(
+                            "**Deep Dive is on** — it runs its own retrieve-and-summarize pipeline, so the "
+                            "reranker, HyDE and BM25 options below do not apply and are hidden.",
+                            visible=False,
                         )
-                        with gr.Column(visible=has_reranker) as top_n_col:
-                            top_n = gr.Slider(
-                                minimum=1,
-                                maximum=40,
-                                value=self.chatbot.config.top_n_after_rerank,
-                                step=1,
-                                label="Top-N after rerank",
-                                info="Docs kept after cross-encoder reranking.",
+
+                        # Grouped so Deep Dive can hide the whole lot at once — these stages
+                        # are genuinely bypassed by the deep-dive chain.
+                        with gr.Column(visible=True) as pipeline_col:
+                            gr.Markdown("---")
+                            gr.Markdown("### Hybrid search")
+                            bm25_enabled = gr.Checkbox(
+                                label="Enable BM25 hybrid retrieval",
+                                value=has_bm25,
+                                interactive=has_bm25,
+                                info=(
+                                    "Fuses a BM25 keyword search over the same corpus with the dense vector "
+                                    "search using Reciprocal Rank Fusion. BM25 matches exact tokens, so it "
+                                    "rescues precise symbol names (addFeature vs addNode) that embeddings "
+                                    "blur together; the vector side still handles paraphrase. Costs no extra "
+                                    "LLM call. Requires bm25_enabled: true in config.json and the extraction "
+                                    "JSONL next to chromadb_path."
+                                    if has_bm25 else
+                                    "Requires bm25_enabled: true in config.json and "
+                                    f"{Path(cfg.bm25_jsonl_path).name} next to chromadb_path "
+                                    "(not available for this project)."
+                                ),
                             )
 
-                        gr.Markdown("---")
-                        gr.Markdown("### HyDE")
-                        hyde_enabled = gr.Checkbox(
-                            label="Enable HyDE",
-                            value=has_hyde,
-                            interactive=has_hyde,
-                            info=(
+                            gr.Markdown("---")
+                            gr.Markdown("### Reranker")
+                            reranker_enabled = gr.Checkbox(
+                                label="Enable reranker",
+                                value=has_reranker,
+                                interactive=has_reranker,
+                                info="Cross-encoder reranking. Requires the reranker model to be configured." if not has_reranker else "Cross-encoder reranking (BAAI/bge-reranker-v2-m3).",
+                            )
+                            with gr.Column(visible=has_reranker) as top_n_col:
+                                top_n = gr.Slider(
+                                    minimum=1,
+                                    maximum=max(40, cfg.top_n_after_rerank),
+                                    value=cfg.top_n_after_rerank,
+                                    step=1,
+                                    label="Top-N after rerank",
+                                    info="Docs kept after cross-encoder reranking.",
+                                )
+
+                            gr.Markdown("---")
+                            gr.Markdown("### HyDE")
+                            hyde_enabled = gr.Checkbox(
+                                label="Enable HyDE",
+                                value=has_hyde,
+                                interactive=has_hyde,
+                                info=(
                                 "Hypothetical Document Embeddings: before searching, an LLM writes a short "
                                 "fake documentation passage answering your question, and that passage — not "
                                 "your literal question — is embedded and used for the vector search. This "
@@ -248,23 +315,30 @@ class WebUI:
                                 "question and can hurt exact symbol/keyword lookups (BM25 and reranking still "
                                 "use your real question, so those aren't affected). Requires hyde_enabled: true "
                                 "in config.json."
-                                if has_hyde else
-                                "Requires hyde_enabled: true in config.json (not configured for this project)."
-                            ),
-                        )
+                                    if has_hyde else
+                                    "Requires hyde_enabled: true in config.json (not configured for this project)."
+                                ),
+                            )
 
                         gr.Markdown("---")
                         gr.Markdown("### Response")
+                        style_choices = list(ChatbotConfig.RESPONSE_STYLES) + [ChatbotConfig.CONFIG_DEFAULT_STYLE]
+                        style_info = " · ".join(
+                            f"{name.split(' (')[0]}: temp={preset['temperature']}"
+                            for name, preset in ChatbotConfig.RESPONSE_STYLES.items()
+                        )
                         response_style = gr.Dropdown(
-                            choices=["Precise (Recommended)", "Balanced", "Comprehensive"],
+                            choices=style_choices,
                             value="Precise (Recommended)",
                             label="Style",
-                            info="Precise: temp=0.0 · Balanced: temp=0.2 · Comprehensive: temp=0.1",
+                            info=f"{style_info} · {ChatbotConfig.CONFIG_DEFAULT_STYLE}: "
+                                 f"temp={cfg.temperature} (from config.json)",
                         )
                         deep_dive = gr.Checkbox(
                             label="Deep Dive mode",
                             value=False,
-                            info="Multi-step analysis: summaries per batch then a final synthesis. Slower but more thorough.",
+                            info="Multi-step analysis: summaries per batch then a final synthesis. Slower but "
+                                 "more thorough. Uses its own retrieval path — reranker, HyDE and BM25 do not apply.",
                         )
 
                     # ── Agentic params ────────────────────────────────────────────
@@ -333,10 +407,11 @@ class WebUI:
                     gr.Markdown("---")
                     answer_length = gr.Slider(
                         minimum=500,
-                        maximum=4000,
-                        value=2000,
+                        maximum=max(4000, cfg.max_tokens),
+                        value=cfg.max_tokens,
                         step=500,
                         label="Max answer length (tokens)",
+                        info=f"Defaults to max_tokens ({cfg.max_tokens}) from config.json.",
                     )
 
                 with gr.Column(scale=3):
@@ -352,6 +427,7 @@ class WebUI:
                             reranker_enabled,
                             top_n,
                             hyde_enabled,
+                            bm25_enabled,
                             answer_length,
                             max_chars_per_page,
                             max_pages_per_round,
@@ -384,6 +460,22 @@ class WebUI:
                     inputs=[reranker_enabled],
                     outputs=[top_n_col],
                 )
+
+            # Deep Dive bypasses the rerank/HyDE/BM25 pipeline entirely, so hide those
+            # controls rather than leaving them ticked and inert. Search depth also
+            # follows k_deep_dive/k_standard, which is otherwise unreachable from the web UI.
+            def _on_deep_dive_change(enabled):
+                return (
+                    gr.update(visible=not enabled),
+                    gr.update(visible=enabled),
+                    gr.update(value=cfg.k_deep_dive if enabled else cfg.k_standard),
+                )
+
+            deep_dive.change(
+                fn=_on_deep_dive_change,
+                inputs=[deep_dive],
+                outputs=[pipeline_col, deep_dive_notice, search_depth],
+            )
 
             js_toggle_light_dark = """
                 () => {

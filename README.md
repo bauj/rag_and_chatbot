@@ -228,6 +228,10 @@ python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type 
 
 **HyDE retrieval:** set `hyde_enabled: true` to have an LLM write a short hypothetical documentation passage per question and embed *that* (instead of the raw question) for the vector search — helps when questions are phrased very differently from how the docs word things. Costs one extra LLM call per question; BM25 and reranking still use the real question. Opt-in, off by default.
 
+**Runtime toggles:** BM25, HyDE and the reranker each have a web-UI checkbox and a terminal command (`bm25`, `hyde`, `reranker`). All three are gated the same way — the config flag must be `true` at startup for the feature to load, and the toggle can then only turn it **off**. Every answer reports which stages actually ran.
+
+**Deep Dive caveat:** Deep Dive mode runs its own retrieve-and-summarize pipeline that **bypasses BM25, HyDE and reranking entirely.** The web UI hides those controls while Deep Dive is on and the terminal warns when you enable it, so the bypass is never silent.
+
 ## Features
 
 ### Extraction Pipeline

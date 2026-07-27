@@ -42,11 +42,11 @@ cp config.example.json config.json
 | `embedding.type` | `"local"` | `"local"` or `"api"` |
 | `reranker` | `null` | Set to `null` to disable. Enable with `{"model": "BAAI/bge-reranker-v2-m3", "type": "local"}` |
 | `agentic` | `null` | Set to `null` to disable. Enable with `{"page_index_path": "...", ...}` (see below) |
-| `k_standard` | `40` | Chunks retrieved in standard mode (RAG) |
-| `k_deep_dive` | `60` | Chunks retrieved in deep dive mode (RAG) |
-| `top_n_after_rerank` | `15` | Docs kept after cross-encoder reranking |
-| `temperature` | `0.0` | LLM temperature |
-| `max_tokens` | `2000` | Max tokens per response |
+| `k_standard` | `40` | Chunks retrieved in standard mode (RAG). Web UI search-depth slider defaults to this. |
+| `k_deep_dive` | `60` | Chunks retrieved in deep dive mode (RAG). Web UI search-depth slider switches to this when Deep Dive is enabled. |
+| `top_n_after_rerank` | `15` | Docs kept after cross-encoder reranking. Web UI top-N slider defaults to this. |
+| `temperature` | `0.0` | LLM temperature. Used directly in the terminal; in the web UI, select the "Config default" response style to apply it (the other styles override it). |
+| `max_tokens` | `2000` | Max tokens per response. Web UI answer-length slider defaults to this. |
 | `bm25_enabled` | `false` | Opt-in BM25 keyword search fused with vector search via Reciprocal Rank Fusion (RAG standard mode only). Requires `{project_name}_docs.jsonl` next to `chromadb_path`. |
 | `hyde_enabled` | `false` | Opt-in HyDE — an LLM writes a hypothetical passage per question, embedded instead of the raw question for vector search. BM25/reranking still use the real question. One extra LLM call per question. |
 | `smol_enabled` | `false` | Opt-in Agentic-smol mode. Requires `agentic` block to also be set (same page index). Requires the `smolagents` package. |
@@ -113,6 +113,7 @@ deep               - Toggle Deep Dive mode (RAG only)
 reranker           - Toggle cross-encoder reranker on/off (RAG only)
 topn:<n>           - Set top-N docs kept after rerank (RAG only)
 hyde               - Toggle HyDE on/off (RAG only)
+bm25               - Toggle BM25 hybrid retrieval on/off (RAG only)
 agentic:chars:<n>  - Set max chars read per page (classic Agentic only)
 agentic:pages1:<n> - Set pages read in round 1 (classic Agentic only)
 agentic:pages2:<n> - Set pages read in round 2 (classic Agentic only)
@@ -121,7 +122,9 @@ stats              - Show database statistics (RAG only)
 exit               - Exit
 ```
 
-`mode:agentic` is only available when `config.agentic` is set. `mode:agentic-smol` additionally requires `smol_enabled: true`. `reranker`/`topn:<n>` are only shown when a reranker model is configured. `hyde` is only shown when `hyde_enabled: true`. `agentic:*` commands apply to classic Agentic mode only — they're ignored (with a warning) while in Agentic-smol mode.
+`mode:agentic` is only available when `config.agentic` is set. `mode:agentic-smol` additionally requires `smol_enabled: true`. `reranker`/`topn:<n>` are only shown when a reranker model is configured. `hyde` is only shown when `hyde_enabled: true`, and `bm25` only when `bm25_enabled: true` **and** the extraction JSONL was found. `agentic:*` commands apply to classic Agentic mode only — they're ignored (with a warning) while in Agentic-smol mode.
+
+The header prints a `Retrieval:` line showing which stages are actually loaded, and the prompt carries `[bm25]` / `[hyde]` / `[no reranker]` tags for live state. Each answer is preceded by the stages that actually ran — so a stage being toggled on but bypassed (see Deep Dive below) is visible rather than silent.
 
 ### Web Interface
 
@@ -137,6 +140,10 @@ python chatbot.py --web --share
 ```
 
 The web UI includes a **Mode** toggle (RAG / Agentic / Agentic (smolagents)). Agentic mode is only available if `config.agentic` is set; Agentic (smolagents) additionally requires `smol_enabled: true`.
+
+In RAG mode the sidebar exposes BM25 hybrid retrieval, the reranker (plus top-N), and HyDE as checkboxes. Each is gated the same way: the config flag must be `true` at startup for the feature to load at all — the checkbox can only turn a loaded feature **off**, never conjure one that wasn't configured. Slider defaults (search depth, top-N, max answer length) are read from `config.json`, not hardcoded.
+
+Enabling **Deep Dive** hides the BM25/reranker/HyDE block and shows a notice, because the deep-dive chain runs its own retrieve-and-summarize path that bypasses all three. Search depth also switches between `k_standard` and `k_deep_dive` automatically.
 
 ### CLI Overrides
 
@@ -180,7 +187,12 @@ result = chatbot.ask(
     reranker_enabled=True,  # disable at runtime to skip reranking
     top_n=10,               # override config.top_n_after_rerank
     hyde_enabled=True,      # override config.hyde_enabled (requires hyde_enabled: true at startup)
+    bm25_enabled=True,      # override config.bm25_enabled (requires bm25_enabled: true at startup)
 )
+
+# result["filters"] reports which retrieval stages actually ran:
+#   {"mode": "rag", "reranker": True, "hyde": False, "bm25": True, ...}
+# In deep dive all three are False and "bypassed_by_deep_dive" lists what was skipped.
 
 stats = chatbot.get_stats()
 print(f"Modules: {stats['available_modules']}")
@@ -214,13 +226,18 @@ All three `.ask()` methods return the same dict shape: `{answer, sources, filter
 
 ## Response Styles (Web UI)
 
-| Style | Temperature | Chunks | Deep Dive |
-|---|---|---|---|
-| Precise (default) | 0.0 | 40 | No |
-| Balanced | 0.2 | 50 | No |
-| Comprehensive | 0.1 | 60 | Yes |
+The style dropdown sets **temperature only**. Search depth and Deep Dive have their own explicit controls and are not touched by the style.
 
-**Deep Dive Mode:** retrieves 60 chunks, splits them into batches of 10, generates one summary per batch, then synthesizes a final answer. Use for complex multi-part questions.
+| Style | Temperature |
+|---|---|
+| Precise (default) | 0.0 |
+| Balanced | 0.2 |
+| Comprehensive | 0.1 |
+| Config default | whatever `temperature` is in `config.json` |
+
+**Deep Dive Mode:** retrieves `k_deep_dive` chunks, splits them into batches of `deep_dive_batch_size`, generates one summary per batch, then synthesizes a final answer. Use for complex multi-part questions.
+
+Deep Dive uses a separate retrieval path, so **BM25 hybrid retrieval, HyDE and cross-encoder reranking do not run in Deep Dive mode.** The web UI hides those controls while it is on; the terminal warns when you enable it, and both report the bypass on each answer.
 
 ## Troubleshooting
 

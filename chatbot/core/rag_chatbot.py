@@ -193,12 +193,14 @@ Passage:"""
             return question
 
     def _hybrid_retrieve(self, query: str, vector_docs: List, k: int,
-                         module_filter: Optional[str], doc_category_filter: Optional[str]) -> List:
+                         module_filter: Optional[str], doc_category_filter: Optional[str],
+                         bm25_enabled: bool = True) -> List:
         """
         Fuse BM25 keyword search results with the vector retriever's results via RRF.
-        Returns vector_docs unchanged when BM25 is disabled.
+        Returns vector_docs unchanged when no BM25 index is loaded or when
+        bm25_enabled is False (runtime toggle from the UI).
         """
-        if self.bm25_index is None:
+        if self.bm25_index is None or not bm25_enabled:
             return vector_docs
 
         bm25_docs = self.bm25_index.search(
@@ -294,7 +296,8 @@ Answer (based strictly on the documentation above):"""
                      max_tokens: Optional[int] = None,
                      reranker_enabled: bool = True,
                      top_n: Optional[int] = None,
-                     hyde_enabled: Optional[bool] = None):
+                     hyde_enabled: Optional[bool] = None,
+                     bm25_enabled: Optional[bool] = None):
         """
         Create RAG chain with optional filtering
 
@@ -305,20 +308,39 @@ Answer (based strictly on the documentation above):"""
             k: Override number of chunks to retrieve (optional)
             temperature: Override LLM temperature (optional)
             max_tokens: Override LLM max_tokens (optional)
+            reranker_enabled: Runtime toggle for cross-encoder reranking
+            top_n: Override docs kept after reranking
+            hyde_enabled: Runtime toggle for HyDE (None = whatever was configured)
+            bm25_enabled: Runtime toggle for BM25 hybrid retrieval (None = whatever was configured)
 
         Returns:
-            Tuple of (chain, retriever)
+            Tuple of (chain, retriever, source_docs_holder). source_docs_holder is a
+            per-call list that the standard chain fills with the docs actually sent
+            to the LLM; it stays empty for the deep-dive chain.
         """
         # Set k based on priority: runtime override > deep_dive mode > config default
         if k is None:
             k = self.config.k_deep_dive if deep_dive else self.config.k_standard
         search_kwargs = {"k": k}
 
-        if deep_dive and self.reranker is not None:
-            print("Note: deep_dive=True — reranking is skipped in deep dive mode.")
-
         effective_hyde = hyde_enabled if hyde_enabled is not None else (self.hyde_llm is not None)
         effective_hyde = effective_hyde and self.hyde_llm is not None
+
+        effective_bm25 = bm25_enabled if bm25_enabled is not None else (self.bm25_index is not None)
+        effective_bm25 = effective_bm25 and self.bm25_index is not None
+
+        if deep_dive:
+            # Deep dive uses its own retrieve-and-summarize path, so the whole
+            # rerank/HyDE/BM25 pipeline is bypassed. Say so instead of failing silently.
+            skipped = []
+            if self.reranker is not None and reranker_enabled:
+                skipped.append("reranking")
+            if effective_hyde:
+                skipped.append("HyDE")
+            if effective_bm25:
+                skipped.append("BM25 hybrid retrieval")
+            if skipped:
+                print(f"Note: deep_dive=True — {', '.join(skipped)} skipped in deep dive mode.")
 
         # Create LLM with runtime overrides
         llm = self._initialize_llm(temperature=temperature, max_tokens=max_tokens)
@@ -337,6 +359,9 @@ Answer (based strictly on the documentation above):"""
 
         # Create retriever
         retriever = self.vectorstore.as_retriever(search_kwargs=search_kwargs)
+
+        # Per-call holder for the docs the standard chain actually sends to the LLM.
+        source_docs_holder: List = []
 
         if deep_dive:
             # Deep dive: retrieve more docs and summarize in batches
@@ -383,8 +408,10 @@ Answer (based strictly on the documentation above):"""
             )
         else:
             # Standard chain — retrieve, rerank, format.
-            # Results are cached on self._last_reranked_docs so ask() can reuse
-            # them for source attribution without a second retrieval + reranking pass.
+            # Results are stashed in source_docs_holder (a per-call closure list, NOT
+            # instance state) so ask() can reuse them for source attribution without a
+            # second retrieval + reranking pass. Per-call keeps concurrent requests —
+            # e.g. two Gradio users at once — from overwriting each other's sources.
             def retrieve_and_format(question: str) -> str:
                 vector_query = self._generate_hyde_passage(question) if effective_hyde else question
                 raw_docs = retriever.invoke(vector_query)
@@ -392,13 +419,14 @@ Answer (based strictly on the documentation above):"""
                     question, raw_docs, k=k,
                     module_filter=module_filter if module_filter and module_filter != "All" else None,
                     doc_category_filter=doc_type_filter.lower() if doc_type_filter and doc_type_filter != "All" else None,
+                    bm25_enabled=effective_bm25,
                 )
                 reranked = self._rerank_and_expand(
                     question, raw_docs,
                     reranker_enabled=reranker_enabled,
                     top_n=top_n,
                 )
-                self._last_reranked_docs = reranked  # cache for source attribution
+                source_docs_holder[:] = reranked  # per-call cache for source attribution
                 return "\n\n".join(doc.page_content for doc in reranked)
 
             chain = (
@@ -411,7 +439,7 @@ Answer (based strictly on the documentation above):"""
                 | StrOutputParser()
             )
 
-        return chain, retriever
+        return chain, retriever, source_docs_holder
 
     def ask(self,
             question: str,
@@ -423,7 +451,8 @@ Answer (based strictly on the documentation above):"""
             max_tokens: Optional[int] = None,
             reranker_enabled: bool = True,
             top_n: Optional[int] = None,
-            hyde_enabled: Optional[bool] = None) -> Dict[str, Any]:
+            hyde_enabled: Optional[bool] = None,
+            bm25_enabled: Optional[bool] = None) -> Dict[str, Any]:
         """
         Ask a question and get an answer with sources
 
@@ -435,6 +464,10 @@ Answer (based strictly on the documentation above):"""
             k: Override number of chunks to retrieve (higher priority than config/deep_dive)
             temperature: Override LLM temperature (higher priority than config)
             max_tokens: Override LLM max_tokens (higher priority than config)
+            reranker_enabled: Runtime toggle for cross-encoder reranking
+            top_n: Override docs kept after reranking
+            hyde_enabled: Runtime toggle for HyDE (None = whatever was configured)
+            bm25_enabled: Runtime toggle for BM25 hybrid retrieval (None = whatever was configured)
 
         Returns:
             Dict with:
@@ -461,7 +494,7 @@ Answer (based strictly on the documentation above):"""
             }
 
         # Track applied filters
-        filters = {}
+        filters = {'mode': 'rag'}
         if module:
             filters['module'] = module
         if doc_type:
@@ -469,20 +502,35 @@ Answer (based strictly on the documentation above):"""
         if deep_dive:
             filters['deep_dive'] = True
 
+        # Report which retrieval stages actually ran, so the UIs can stop
+        # advertising toggles that deep dive silently bypasses.
+        want_rerank = reranker_enabled and self.reranker is not None
+        want_hyde = (hyde_enabled if hyde_enabled is not None else True) and self.hyde_llm is not None
+        want_bm25 = (bm25_enabled if bm25_enabled is not None else True) and self.bm25_index is not None
+        filters['reranker'] = want_rerank and not deep_dive
+        filters['hyde'] = want_hyde and not deep_dive
+        filters['bm25'] = want_bm25 and not deep_dive
+        if deep_dive and (want_rerank or want_hyde or want_bm25):
+            filters['bypassed_by_deep_dive'] = [
+                name for name, wanted in
+                (('reranker', want_rerank), ('hyde', want_hyde), ('bm25', want_bm25))
+                if wanted
+            ]
+
         try:
             # Create chain and get answer (pass runtime overrides)
-            chain, retriever = self._create_chain(
+            chain, retriever, source_docs_holder = self._create_chain(
                 module, doc_type, deep_dive,
                 k=k, temperature=temperature, max_tokens=max_tokens,
                 reranker_enabled=reranker_enabled, top_n=top_n,
-                hyde_enabled=hyde_enabled,
+                hyde_enabled=hyde_enabled, bm25_enabled=bm25_enabled,
             )
             answer = chain.invoke(question)
             # Reuse docs already retrieved+reranked inside the standard chain.
-            # Deep-dive chains don't populate the cache, so fall back to a
+            # Deep-dive chains leave the holder empty, so fall back to a
             # separate retrieval call for that path.
-            if not deep_dive and hasattr(self, '_last_reranked_docs'):
-                source_docs = self._last_reranked_docs
+            if source_docs_holder:
+                source_docs = list(source_docs_holder)
             else:
                 raw_source_docs = retriever.invoke(question)
                 source_docs = self._rerank_and_expand(

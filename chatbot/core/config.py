@@ -65,12 +65,16 @@ class ChatbotConfig:
     temperature: float = 0.0
     max_tokens: int = 2000
 
-    # Response style presets (used by web UI); ClassVar excludes this from dataclass instance fields
+    # Response style presets (used by web UI); ClassVar excludes this from dataclass instance fields.
+    # Temperature only — search depth and deep dive have their own explicit controls, and
+    # the presets used to declare 'k'/'deep_dive' values the UI never read.
     RESPONSE_STYLES: ClassVar[dict] = {
-        "Precise (Recommended)": {"temperature": 0.0, "k": 40, "deep_dive": False},
-        "Balanced":              {"temperature": 0.2, "k": 50, "deep_dive": False},
-        "Comprehensive":         {"temperature": 0.1, "k": 60, "deep_dive": True},
+        "Precise (Recommended)": {"temperature": 0.0},
+        "Balanced":              {"temperature": 0.2},
+        "Comprehensive":         {"temperature": 0.1},
     }
+    # Sentinel style meaning "don't override — use config.temperature".
+    CONFIG_DEFAULT_STYLE: ClassVar[str] = "Config default"
 
     def __post_init__(self):
         if " " in self.project_name:

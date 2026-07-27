@@ -25,7 +25,10 @@
   "_comment_reranker": "Set to null to disable. Enable with: {\"model\": \"BAAI/bge-reranker-v2-m3\", \"type\": \"local\"}. Requires sentence-transformers.",
 
   "agentic": null,
-  "_comment_agentic": "Set to null to disable. Enable with: {\"page_index_path\": \"../extraction/my_project_docs_extracted/page_index.json\", \"max_chars_per_page\": 8000, \"max_pages_per_round\": 3, \"max_pages_round2\": 2}. Requires re-running extraction to generate page_index.json.",
+  "_comment_agentic": "Set to null to disable. Enable with: {\"page_index_path\": \"../extraction/my_project_docs_extracted/page_index.json\", \"max_chars_per_page\": 8000, \"max_pages_per_round\": 3, \"max_pages_round2\": 2, \"max_steps\": 6}. Requires re-running extraction to generate page_index.json. max_steps is the CodeAgent step budget, used by Agentic-smol mode only.",
+
+  "smol_enabled": false,
+  "_comment_smol_enabled": "Opt-in Agentic-smol mode: a smolagents CodeAgent decides for itself how many search/read cycles to run (bounded by agentic.max_steps), instead of the classic fixed 1-2 round script. Requires the 'agentic' block above to also be set, plus the smolagents package. Experimental — not yet measured against classic Agentic mode.",
 
   "k_standard": 40,
   "k_deep_dive": 60,

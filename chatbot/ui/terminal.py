@@ -28,10 +28,19 @@ class TerminalUI:
         has_agentic_smol = self.agentic_smol_chatbot is not None
         has_reranker = self.chatbot.reranker is not None
         has_hyde = self.chatbot.hyde_llm is not None
+        has_bm25 = self.chatbot.bm25_index is not None
         print("=" * 70)
         print(f"{project} Documentation Chatbot")
         print("=" * 70)
         print(f"Modules: {', '.join(self.chatbot.available_modules)}")
+
+        # Show which retrieval stages are actually loaded — otherwise BM25/HyDE being
+        # off (or silently unavailable) is invisible until you read the config.
+        stages = []
+        stages.append(f"BM25 hybrid: {'on' if has_bm25 else 'off'}")
+        stages.append(f"HyDE: {'on' if has_hyde else 'off'}")
+        stages.append(f"reranker: {'on' if has_reranker else 'off'}")
+        print(f"Retrieval:  {' · '.join(stages)}")
         print("\nCommands:")
         if has_agentic:
             print("  mode:rag          - Switch to RAG mode (vector retrieval)")
@@ -48,6 +57,8 @@ class TerminalUI:
             print("  topn:<n>          - Set top-N docs kept after rerank (RAG only)")
         if has_hyde:
             print("  hyde              - Toggle HyDE on/off (RAG only)")
+        if has_bm25:
+            print("  bm25              - Toggle BM25 hybrid retrieval on/off (RAG only)")
         if has_agentic:
             print("  agentic:chars:<n>  - Set max chars read per page (classic Agentic only)")
             print("  agentic:pages1:<n> - Set pages read in round 1 (classic Agentic only)")
@@ -82,6 +93,28 @@ class TerminalUI:
                 filter_strs.append("DEEP DIVE")
             if filter_strs:
                 print(f"Filters: {', '.join(filter_strs)}")
+
+            # Report which retrieval stages actually ran, not which ones are toggled on.
+            bypassed = filters.get('bypassed_by_deep_dive')
+            if bypassed:
+                print(f"Note: {', '.join(bypassed)} skipped — Deep Dive uses its own retrieval path")
+            else:
+                stages = [name for key, name in
+                          (('bm25', 'BM25 hybrid'), ('hyde', 'HyDE'), ('reranker', 'reranker'))
+                          if filters.get(key)]
+                if stages:
+                    print(f"Retrieval: {' + '.join(stages)}")
+
+            if filters.get('rounds_used') is not None:
+                print(f"Agentic rounds used: {filters['rounds_used']}")
+            if filters.get('steps_used') is not None:
+                print(f"Agent steps used: {filters['steps_used']}")
+
+        # agentic-smol reports grounded=False when it answered without reading any page,
+        # i.e. from the model's own knowledge rather than the documentation.
+        if filters.get('grounded') is False:
+            print("\n⚠️  Warning: answer produced without reading any documentation page — "
+                  "it may come from the model's own knowledge rather than the docs.")
 
         # Print answer
         print(f"\nAnswer:\n{answer}\n")
@@ -140,6 +173,7 @@ class TerminalUI:
         deep_dive_mode = False
         reranker_enabled = self.chatbot.reranker is not None
         hyde_enabled = self.chatbot.hyde_llm is not None
+        bm25_enabled = self.chatbot.bm25_index is not None
         top_n_override = None
         agentic_chars_override = None
         agentic_pages1_override = None
@@ -166,6 +200,8 @@ class TerminalUI:
                         prompt_parts.append(f"[top_n={top_n_override}]")
                     if hyde_enabled:
                         prompt_parts.append("[hyde]")
+                    if bm25_enabled:
+                        prompt_parts.append("[bm25]")
                     if not current_module and not current_type and not deep_dive_mode:
                         prompt_parts.append("[all]")
 
@@ -223,6 +259,17 @@ class TerminalUI:
                         print(f"OK: HyDE {status}\n")
                     continue
 
+                # Handle BM25 toggle (RAG only)
+                if user_input.lower() == 'bm25':
+                    if self.chatbot.bm25_index is None:
+                        print("Warning: BM25 is not available (needs bm25_enabled: true in config.json "
+                              "and the extraction JSONL next to chromadb_path)\n")
+                    else:
+                        bm25_enabled = not bm25_enabled
+                        status = "enabled" if bm25_enabled else "disabled"
+                        print(f"OK: BM25 hybrid retrieval {status}\n")
+                    continue
+
                 # Handle top_n override (RAG only)
                 if user_input.lower().startswith('topn:'):
                     if self.chatbot.reranker is None:
@@ -273,7 +320,18 @@ class TerminalUI:
                     if user_input.lower() == 'deep':
                         deep_dive_mode = not deep_dive_mode
                         status = "enabled" if deep_dive_mode else "disabled"
-                        print(f"OK: Deep Dive mode {status}\n")
+                        print(f"OK: Deep Dive mode {status}")
+                        if deep_dive_mode:
+                            # Deep dive runs its own retrieve-and-summarize path — say which
+                            # currently-active stages it will bypass instead of silently dropping them.
+                            skipped = [name for active, name in
+                                       ((bm25_enabled, "BM25 hybrid retrieval"),
+                                        (hyde_enabled, "HyDE"),
+                                        (reranker_enabled, "reranking"))
+                                       if active]
+                            if skipped:
+                                print(f"Note: {', '.join(skipped)} will be skipped while Deep Dive is on")
+                        print()
                         continue
 
                     # Handle clear
@@ -325,6 +383,7 @@ class TerminalUI:
                         reranker_enabled=reranker_enabled,
                         top_n=top_n_override,
                         hyde_enabled=hyde_enabled,
+                        bm25_enabled=bm25_enabled,
                     )
                 self._print_answer(result)
 
