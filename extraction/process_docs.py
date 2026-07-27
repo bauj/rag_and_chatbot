@@ -547,9 +547,11 @@ class DocumentationProcessor:
                     continue
 
                 prefix = parent_doc_id if parent_doc_id else filepath.stem
-                section_id = f"{prefix}#{item['anchor_id']}" if item['anchor_id'] else (
-                    f"{prefix}#{re.sub(r'[^\\w]', '_', item['symbol_name'].lower())[:50]}"
-                )
+                if item['anchor_id']:
+                    section_id = f"{prefix}#{item['anchor_id']}"
+                else:
+                    symbol = re.sub(r'[^\w]', '_', item['symbol_name'].lower())[:50]
+                    section_id = f"{prefix}#{symbol}"
                 chunk_url = f"{url}#{item['anchor_id']}" if item['anchor_id'] else url
 
                 text_chunks = self.chunk_text(text_to_chunk)
