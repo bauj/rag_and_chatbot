@@ -18,6 +18,7 @@ from html_parser import (
     get_page_title,
     has_memitems,
     extract_memitems_with_soup,
+    extract_class_summary,
     html_to_markdown,
 )
 
@@ -479,6 +480,41 @@ class DocumentationProcessor:
         except Exception:
             return True  # If encoding fails, assume it's OK
 
+    @staticmethod
+    def _citation_base_url(module_info: Dict, doc_category: str) -> str:
+        """
+        Citation base URL for a module, optionally per doc category.
+
+        `url_for_sources_citation` may be a plain string, used for the whole module,
+        or a mapping keyed by doc category. Projects commonly publish the two doc sets
+        under different paths — SALOME serves dev docs under /tui/ and user docs under
+        /gui/ — and a single URL cited every user page into the dev-doc space.
+
+        A mapping missing the requested category falls back to the other one rather
+        than emitting a bare relative URL.
+        """
+        configured = module_info.get('url_for_sources_citation', '')
+        if isinstance(configured, dict):
+            if configured.get(doc_category):
+                return configured[doc_category]
+            return next((v for v in configured.values() if v), '')
+        return configured
+
+    def _relative_doc_path(self, filepath: Path, module_name: str, doc_category: str) -> str:
+        """
+        Page identity within its module: the path relative to the module's doc root.
+
+        Falls back to the bare filename when the module has no registered root or the
+        file sits outside it — the case for ad-hoc calls and tests.
+        """
+        root = self.modules.get(module_name, {}).get(doc_category)
+        if root:
+            try:
+                return filepath.relative_to(root).as_posix()
+            except ValueError:
+                pass
+        return filepath.name
+
     def process_file(self, filepath, module_name: str, doc_category: str) -> List[DocumentChunk]:
         """Process a single HTML file"""
         filepath = Path(filepath)  # Accept both str and Path
@@ -498,9 +534,28 @@ class DocumentationProcessor:
 
         # Generate URL and parent doc ID
         module_info = self.MODULE_INFO.get(module_name, {})
-        base_url = module_info.get('url_for_sources_citation', '')
-        url = base_url.rstrip('/') + f"/{filepath.name}" if base_url else filepath.name
+        base_url = self._citation_base_url(module_info, doc_category)
+
+        # Path relative to the module's doc root, NOT the bare filename: the user docs
+        # nest pages under a plugin directory and reuse names across them, so 31 files
+        # shared 11 filenames (SketchPlugin/pointFeature.html vs
+        # ConstructionPlugin/pointFeature.html). A bare name collapsed those onto one
+        # URL — wrong citations — and onto one section_id prefix, which made dedup
+        # discard good chunks, exactly the #88 failure in miniature.
+        rel_path = self._relative_doc_path(filepath, module_name, doc_category)
+        url = base_url.rstrip('/') + f"/{rel_path}" if base_url else rel_path
         parent_doc_id = base_url
+
+        # Prefix for section_id, and it must identify the PAGE, not the module.
+        # parent_doc_id is the module's base_url, which is identical for every file
+        # in the module, so using it made chunks on unrelated pages collide whenever
+        # they shared an anchor name — in the SHAPER test corpus '#root' alone covered
+        # 1288 pages.
+        # _rerank_and_expand() dedupes by section_id, so those collisions silently
+        # discarded good chunks and starved the result set below top_n_after_rerank.
+        # `url` already ends in the filename (falling back to it when no base_url is
+        # configured), which makes it unique per page.
+        section_prefix = url
 
         full_text = f"{content_dict['title']}\n\n{content_dict['content']}"
 
@@ -527,9 +582,20 @@ class DocumentationProcessor:
 
         # Extract sections/memitems BEFORE freeing BeautifulSoup memory
         use_memitems = doc_category == 'dev' and has_memitems(soup)
+        class_summary = ''
         if use_memitems:
             memitems = extract_memitems_with_soup(soup)
-        else:
+            # Page-level view of the class API. The per-symbol chunks below cannot
+            # answer "what are the public methods of X" — no single one lists them.
+            class_summary = extract_class_summary(
+                soup, {i['anchor_id'] for i in memitems if i['anchor_id']}
+            )
+            # A page whose every memitem is inherited extracts to nothing, since
+            # extract_memitems_with_soup skips inherited copies. Fall back to section
+            # chunking so the page keeps its class description instead of vanishing.
+            if not memitems:
+                use_memitems = False
+        if not use_memitems:
             sections = self.extract_sections_with_soup(soup, doc_category)
 
         # Free BeautifulSoup memory immediately
@@ -541,12 +607,51 @@ class DocumentationProcessor:
         doc_chunk_counter = 0
 
         if use_memitems:
+            if class_summary:
+                # Doxygen's member table omits the class prefix on every row, so the
+                # summary text never names the class it describes. Without this header
+                # on EACH chunk, neither BM25 nor the embedder can match a question
+                # like "methods of ModelAPI_Feature" to it — the token is simply absent.
+                summary_header = content_dict['title']
+                summary_chunks = self.chunk_text(class_summary)
+                for i, chunk_text_content in enumerate(summary_chunks):
+                    chunk_text_content = f"{summary_header}\n\n{chunk_text_content}"
+                    if not self.validate_chunk_token_length(chunk_text_content):
+                        skipped_chunks += 1
+                        continue
+                    doc_chunks.append(DocumentChunk(
+                        title=content_dict['title'],
+                        content=chunk_text_content,
+                        url=url,
+                        doc_type=doc_type,
+                        hierarchy=content_dict['title'],
+                        chunk_id=doc_chunk_counter,
+                        module=module_name,
+                        doc_category=doc_category,
+                        metadata={
+                            'total_chunks': len(summary_chunks),
+                            'chunk_position': f"{i+1}/{len(summary_chunks)}",
+                            'parent_doc_id': parent_doc_id,
+                            'section_id': f"{section_prefix}#__summary",
+                            'section_text': f"{summary_header}\n\n{class_summary}"[:5000],
+                            'source': f'{self.project_name} {module_name} {doc_category.title()} Documentation',
+                            'file': rel_path,
+                            'module_description': self.MODULE_INFO.get(module_name, {}).get('description', ''),
+                            'quality_score': round(quality_score, 2),
+                            'has_code': len(code_blocks) > 0,
+                            'code_blocks': code_blocks if code_blocks else [],
+                            'symbol_name': '',
+                            'anchor_id': '',
+                        }
+                    ))
+                    doc_chunk_counter += 1
+
             for item in memitems:
                 text_to_chunk = f"{item['signature']}\n\n{item['description']}"
                 if not text_to_chunk.strip():
                     continue
 
-                prefix = parent_doc_id if parent_doc_id else filepath.stem
+                prefix = section_prefix
                 if item['anchor_id']:
                     section_id = f"{prefix}#{item['anchor_id']}"
                 else:
@@ -577,7 +682,7 @@ class DocumentationProcessor:
                             'section_id': section_id,
                             'section_text': text_to_chunk[:5000],
                             'source': f'{self.project_name} {module_name} {doc_category.title()} Documentation',
-                            'file': str(filepath.name),
+                            'file': rel_path,
                             'module_description': self.MODULE_INFO.get(module_name, {}).get('description', ''),
                             'quality_score': round(quality_score, 2),
                             'has_code': len(code_blocks) > 0,
@@ -599,11 +704,10 @@ class DocumentationProcessor:
                 else:
                     text_to_chunk = section_text
 
-                # Stable section identifier: (parent_doc_id or filename stem) + normalised heading.
-                # parent_doc_id is the module's base_url which may be '' when no url is configured
-                # in MODULE_INFO. Fall back to filepath.stem so that two different files with an
-                # identically-named section (e.g. "Overview") never share the same section_id.
-                prefix = parent_doc_id if parent_doc_id else filepath.stem
+                # Stable section identifier: page URL + normalised heading, so that two
+                # different files with an identically-named section (e.g. "Overview")
+                # never share a section_id. See section_prefix above.
+                prefix = section_prefix
                 raw_id = section_heading if section_heading else 'root'
                 normalized = re.sub(r'[^\w]', '_', raw_id.lower())[:50]
                 section_id = f"{prefix}#{normalized}"
@@ -637,7 +741,7 @@ class DocumentationProcessor:
                             'section_id': section_id,
                             'section_text': stored_section_text,
                             'source': f'{self.project_name} {module_name} {doc_category.title()} Documentation',
-                            'file': str(filepath.name),
+                            'file': rel_path,
                             'module_description': self.MODULE_INFO.get(module_name, {}).get('description', ''),
                             'quality_score': round(quality_score, 2),
                             'has_code': len(code_blocks) > 0,

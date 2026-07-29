@@ -133,6 +133,18 @@ def extract_memitems_with_soup(soup: BeautifulSoup) -> List[Dict[str, str]]:
           <div class="memdoc"> ... description ... </div>
         </div>
 
+    Members inherited from a base class are skipped. When a project builds its docs
+    with Doxygen's INLINE_INHERITED_MEMB, each inherited member's documentation is
+    copied verbatim onto every subclass page — in the SHAPER docs used as the test
+    corpus that accounted for 57% of all chunks, one method reaching 181 copies. The
+    declaring class's own page always carries the same documentation, so nothing is
+    lost by skipping the copies. Doxygen marks them:
+
+        <span class="mlabel inherited">inherited</span>
+
+    Match that class rather than the rendered text: "inherited" also appears in
+    ordinary prose descriptions.
+
     Returns a list of dicts with keys: symbol_name, signature, description,
     anchor_id. anchor_id is '' when no preceding <a id="..."> is found.
     """
@@ -140,6 +152,8 @@ def extract_memitems_with_soup(soup: BeautifulSoup) -> List[Dict[str, str]]:
     for memitem in soup.find_all('div', class_='memitem'):
         memproto = memitem.find('div', class_='memproto')
         if memproto is None:
+            continue
+        if memproto.find('span', class_='inherited') is not None:
             continue
         memdoc = memitem.find('div', class_='memdoc')
 
@@ -166,6 +180,73 @@ def extract_memitems_with_soup(soup: BeautifulSoup) -> List[Dict[str, str]]:
             'anchor_id': anchor_id,
         })
     return items
+
+
+def extract_class_summary(soup: BeautifulSoup, declared_anchors: Set[str]) -> str:
+    """
+    Build a page-level summary of a Doxygen class: description + member listing.
+
+    Doxygen renders each class's API as one or more `table.memberdecls`, grouped by
+    a heading ("Public Member Functions", "Static Public Member Functions", ...),
+    with two rows per symbol:
+
+        <tr class="memitem:a1b2c3"> ... signature ... </tr>
+        <tr class="memdesc:a1b2c3"> ... brief description ... </tr>
+
+    This is the only page-level view of a class's API. Without it the corpus holds
+    a class as unrelated per-symbol chunks, and aggregate questions ("what are the
+    public methods of X") have nothing to match.
+
+    INLINE_INHERITED_MEMB merges inherited members into these tables with NO marker
+    on the row, so rows are kept only when their anchor appears in declared_anchors
+    — pass the anchors from extract_memitems_with_soup(), which already skips
+    inherited copies. A heading whose rows all drop out is omitted too.
+
+    Returns '' when the page has no memberdecls tables or nothing survives filtering.
+    """
+    tables = soup.find_all('table', class_='memberdecls')
+    if not tables:
+        return ''
+
+    parts: List[str] = []
+    textblock = soup.find('div', class_='textblock')
+    if textblock is not None:
+        description = re.sub(r'\s+', ' ', textblock.get_text(' ', strip=True)).strip()
+        if description:
+            parts.append(description)
+
+    for table in tables:
+        heading_tag = table.find('h2')
+        rows: Dict[str, Dict[str, str]] = {}
+        order: List[str] = []
+        for row in table.find_all('tr'):
+            classes = ' '.join(row.get('class') or [])
+            match = re.search(r'mem(item|desc):(\w+)', classes)
+            if not match:
+                continue
+            kind, anchor = match.group(1), match.group(2)
+            if anchor not in declared_anchors:
+                continue
+            if anchor not in rows:
+                rows[anchor] = {}
+                order.append(anchor)
+            rows[anchor][kind] = re.sub(r'\s+', ' ', row.get_text(' ', strip=True)).strip()
+
+        if not order:
+            continue
+
+        lines = []
+        if heading_tag is not None:
+            lines.append(heading_tag.get_text(strip=True))
+        for anchor in order:
+            signature = rows[anchor].get('item', '')
+            brief = rows[anchor].get('desc', '')
+            line = f"{signature}  {brief}".strip() if brief else signature
+            if line:
+                lines.append(line)
+        parts.append("\n".join(lines))
+
+    return "\n\n".join(parts)
 
 
 def get_page_title(filepath: str) -> str:

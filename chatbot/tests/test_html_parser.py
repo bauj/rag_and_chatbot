@@ -13,6 +13,7 @@ from html_parser import get_page_title, parse_page, save_page_index, search_page
 from html_parser import _split_into_sections, extract_sections_with_soup
 from html_parser import html_to_markdown
 from html_parser import has_memitems, extract_memitems_with_soup
+from html_parser import extract_class_summary
 
 
 # ---------------------------------------------------------------------------
@@ -392,3 +393,149 @@ def test_extract_memitems_empty_list_when_no_memitems():
     from bs4 import BeautifulSoup
     soup = BeautifulSoup("<html><body><p>plain page</p></body></html>", "html.parser")
     assert extract_memitems_with_soup(soup) == []
+
+
+# ---------------------------------------------------------------------------
+# Inherited memitems (task #91)
+#
+# Doxygen runs with INLINE_INHERITED_MEMB, which copies every inherited member's
+# documentation verbatim onto every subclass page — 57% of the SHAPER corpus. The
+# copies are marked <span class="mlabel inherited">inherited</span> inside memproto.
+# Match that class, never the rendered text, which also occurs in prose.
+# ---------------------------------------------------------------------------
+
+def _make_page_with_inherited_memitem():
+    from bs4 import BeautifulSoup
+    html = """
+    <html><body><div class="contents">
+    <a id="adeclared0" name="adeclared0"></a>
+    <div class="memitem">
+    <div class="memproto">
+    <table class="mlabels"><tr><td class="mlabels-left">
+    <table class="memname"><tr><td class="memname">bool SketchPlugin_Circle::execute </td></tr></table>
+    </td><td class="mlabels-right"><span class="mlabel">virtual</span></td></tr></table>
+    </div>
+    <div class="memdoc"><p>Declared on this page.</p></div>
+    </div>
+    <a id="ainherited0" name="ainherited0"></a>
+    <div class="memitem">
+    <div class="memproto">
+    <table class="mlabels"><tr><td class="mlabels-left">
+    <table class="memname"><tr><td class="memname">void ModelAPI_Entity::emptyFunction </td></tr></table>
+    </td><td class="mlabels-right"><span class="mlabel inline">inline</span><span class="mlabel inherited">inherited</span></td></tr></table>
+    </div>
+    <div class="memdoc"><p>Copied here from the base class.</p></div>
+    </div>
+    </div></body></html>
+    """
+    return BeautifulSoup(html, "html.parser")
+
+
+def test_extract_memitems_skips_inherited_copies():
+    soup = _make_page_with_inherited_memitem()
+    items = extract_memitems_with_soup(soup)
+    assert len(items) == 1
+    assert items[0]["symbol_name"] == "bool SketchPlugin_Circle::execute"
+
+
+def test_extract_memitems_keeps_declared_members_with_other_labels():
+    """virtual/inline/static/protected labels must not be mistaken for inherited."""
+    soup = _make_page_with_inherited_memitem()
+    items = extract_memitems_with_soup(soup)
+    assert [i["anchor_id"] for i in items] == ["adeclared0"]
+
+
+def test_extract_memitems_does_not_match_the_word_inherited_in_prose():
+    from bs4 import BeautifulSoup
+    html = """
+    <html><body>
+    <a id="aprose0" name="aprose0"></a>
+    <div class="memitem">
+    <div class="memproto"><table class="memname"><tr>
+    <td class="memname">void Foo::bar </td></tr></table></div>
+    <div class="memdoc"><p>This value is inherited from the parent widget.</p></div>
+    </div>
+    </body></html>
+    """
+    items = extract_memitems_with_soup(BeautifulSoup(html, "html.parser"))
+    assert len(items) == 1
+
+
+# ---------------------------------------------------------------------------
+# extract_class_summary (task #92)
+#
+# Doxygen renders a "Public Member Functions" memberdecls table listing every
+# method with its brief description. It is the only page-level view of a class's
+# API, and the memitem branch used to discard it — so aggregate questions like
+# "what are the public methods of X" had nothing in the corpus to match.
+#
+# With INLINE_INHERITED_MEMB the table MERGES inherited members with no marker on
+# the row, so rows are filtered by the anchors declared on this page.
+# ---------------------------------------------------------------------------
+
+def _make_class_page():
+    from bs4 import BeautifulSoup
+    html = """
+    <html><body><div class="contents">
+    <div class="textblock"><p>Feature function that represents the particular functionality.</p></div>
+    <table class="memberdecls">
+    <tr class="heading"><td><h2 class="groupheader">Public Member Functions</h2></td></tr>
+    <tr class="memitem:adeclared0"><td class="memItemRight">virtual void execute ()=0</td></tr>
+    <tr class="memdesc:adeclared0"><td class="mdescRight">Computes or recomputes the results.</td></tr>
+    <tr class="memitem:ainherited0"><td class="memItemRight">virtual void emptyFunction () const</td></tr>
+    <tr class="memdesc:ainherited0"><td class="mdescRight">Empty function for interface virtualisation.</td></tr>
+    </table>
+    <table class="memberdecls">
+    <tr class="heading"><td><h2 class="groupheader">Static Public Member Functions</h2></td></tr>
+    <tr class="memitem:adeclared1"><td class="memItemRight">static std::string group ()</td></tr>
+    <tr class="memdesc:adeclared1"><td class="mdescRight">Returns the group identifier.</td></tr>
+    </table>
+    </div></body></html>
+    """
+    return BeautifulSoup(html, "html.parser")
+
+
+def test_class_summary_includes_declared_members():
+    summary = extract_class_summary(_make_class_page(), {"adeclared0", "adeclared1"})
+    assert "virtual void execute ()=0" in summary
+    assert "Computes or recomputes the results." in summary
+
+
+def test_class_summary_excludes_inherited_members():
+    """The merged table lists inherited members with no marker; anchors filter them."""
+    summary = extract_class_summary(_make_class_page(), {"adeclared0", "adeclared1"})
+    assert "emptyFunction" not in summary
+
+
+def test_class_summary_groups_under_table_headings():
+    summary = extract_class_summary(_make_class_page(), {"adeclared0", "adeclared1"})
+    assert "Public Member Functions" in summary
+    assert "Static Public Member Functions" in summary
+    assert summary.index("Public Member Functions") < summary.index("Static Public")
+
+
+def test_class_summary_includes_class_description():
+    summary = extract_class_summary(_make_class_page(), {"adeclared0"})
+    assert "particular functionality" in summary
+
+
+def test_class_summary_empty_when_no_declared_rows_survive():
+    summary = extract_class_summary(_make_class_page(), set())
+    assert "execute" not in summary
+    assert "emptyFunction" not in summary
+
+
+def test_class_summary_empty_string_when_no_memberdecls():
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup("<html><body><p>no tables here</p></body></html>", "html.parser")
+    assert extract_class_summary(soup, {"a1"}) == ""
+
+
+def test_class_summary_drops_heading_with_no_surviving_rows():
+    """A table whose rows are all inherited must not leave a bare heading behind."""
+    summary = extract_class_summary(_make_class_page(), {"adeclared1"})
+    assert "execute" not in summary
+    assert "Static Public Member Functions" in summary
+    # the first table contributed nothing, so its heading must be gone; the only
+    # remaining occurrence of the substring is inside "Static Public Member Functions"
+    assert summary.count("Public Member Functions") == 1

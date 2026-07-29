@@ -5,10 +5,45 @@ Routes to terminal or web interface based on CLI arguments
 """
 
 import sys
+import json
 import argparse
 from pathlib import Path
 
 from core import ChatbotConfig, DocumentationChatbot
+
+
+def _emit_json(result, stream):
+    """
+    Write a single ask() result to `stream` as JSON and nothing else.
+
+    Only whitelisted keys are emitted so that a future field on the result dict
+    can't accidentally leak something private (e.g. raw config) to a caller that
+    is parsing stdout. Sources keep their full page content: consumers such as
+    the evaluator judge groundedness against these, and the 200-character
+    preview used by the interactive UIs would make correct answers look
+    hallucinated.
+    """
+    payload = {
+        "answer": result.get("answer"),
+        "error": result.get("error"),
+        "filters": result.get("filters", {}),
+        "sources": [
+            {
+                "title": s.get("title"),
+                "module": s.get("module"),
+                "doc_category": s.get("doc_category"),
+                "doc_type": s.get("doc_type"),
+                "url": s.get("url"),
+                # Prefer the untruncated chunk; fall back to the preview for the
+                # agentic modes, whose sources carry no chunk text at all.
+                "content": s.get("full_content") or s.get("content"),
+            }
+            for s in result.get("sources", [])
+        ],
+    }
+    json.dump(payload, stream, ensure_ascii=False)
+    stream.write("\n")
+    stream.flush()
 
 
 def main():
@@ -72,6 +107,13 @@ Examples:
         action='store_true',
         help='Use deep dive mode (terminal single-question mode)'
     )
+    parser.add_argument(
+        '--json-output',
+        action='store_true',
+        help='With --question, print the result as a single JSON document on stdout '
+             '(answer, error, filters, sources with full content). All progress and '
+             'debug output goes to stderr, so stdout is machine-parseable.'
+    )
 
     parser.add_argument(
         '--mode',
@@ -95,6 +137,21 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    if args.json_output:
+        if args.web:
+            parser.error("--json-output cannot be combined with --web")
+        if not args.question:
+            parser.error("--json-output requires --question")
+
+    # In JSON mode stdout must contain the JSON document and nothing else, so
+    # point sys.stdout at stderr for the whole run. Every existing print() —
+    # including the "DEBUG :" lines emitted while loading the vector store,
+    # reranker and LLM — then lands on stderr untouched. The real stdout is
+    # kept aside and used only by _emit_json at the very end.
+    real_stdout = sys.stdout
+    if args.json_output:
+        sys.stdout = sys.stderr
 
     # Load configuration
     try:
@@ -188,10 +245,16 @@ Examples:
         if args.question:
             if args.mode == 'agentic':
                 result = agentic_chatbot.ask(args.question)
-                print(result['answer'] or result['error'])
             elif args.mode == 'agentic-smol':
                 result = agentic_smol_chatbot.ask(args.question)
-                print(result['answer'] or result['error'])
+            elif args.json_output:
+                # run_single_question() only prints, so ask directly to get the dict.
+                result = chatbot.ask(
+                    args.question,
+                    module=args.module,
+                    doc_type=args.doc_type,
+                    deep_dive=args.deep_dive,
+                )
             else:
                 # Single question mode
                 terminal_ui.run_single_question(
@@ -200,6 +263,15 @@ Examples:
                     doc_type=args.doc_type,
                     deep_dive=args.deep_dive
                 )
+                result = None
+
+            if args.json_output:
+                # A result carrying an "error" is still a valid document, so exit 0
+                # and let the caller read the payload. Non-zero is reserved for the
+                # setup failures handled above (missing ChromaDB, bad config, ...).
+                _emit_json(result, real_stdout)
+            elif result is not None:
+                print(result['answer'] or result['error'])
         else:
             # Interactive mode
             terminal_ui.run_interactive()

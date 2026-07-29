@@ -138,6 +138,88 @@ def test_format_answer_reports_active_retrieval_stages():
     assert "HyDE" not in out
 
 
+def test_emit_json_writes_single_parseable_document():
+    """--json-output must put exactly one JSON doc on the stream, nothing else."""
+    import io, json
+    from chatbot import _emit_json
+    buf = io.StringIO()
+    _emit_json({
+        "answer": "an answer", "error": None, "filters": {"mode": "rag", "bm25": True},
+        "sources": [{"title": "T", "module": "M", "doc_category": "dev",
+                     "doc_type": "d", "url": "u", "content": "short preview...",
+                     "full_content": "the whole chunk"}],
+    }, buf)
+    parsed = json.loads(buf.getvalue())          # strict: parses the entire buffer
+    assert parsed["answer"] == "an answer"
+    assert parsed["filters"]["bm25"] is True
+    assert len(parsed["sources"]) == 1
+
+
+def test_emit_json_prefers_full_content_over_preview():
+    """Groundedness judging needs the untruncated chunk, not the 200-char preview."""
+    import io, json
+    from chatbot import _emit_json
+    buf = io.StringIO()
+    _emit_json({
+        "answer": "a", "error": None, "filters": {},
+        "sources": [{"content": "trunc...", "full_content": "the complete chunk text"}],
+    }, buf)
+    assert json.loads(buf.getvalue())["sources"][0]["content"] == "the complete chunk text"
+
+
+def test_emit_json_falls_back_to_content_for_agentic_sources():
+    """Agentic-mode sources carry no chunk text; emitting must not crash or drop them."""
+    import io, json
+    from chatbot import _emit_json
+    buf = io.StringIO()
+    _emit_json({
+        "answer": "a", "error": None, "filters": {"mode": "agentic-smol", "grounded": True},
+        "sources": [{"title": "T", "module": "M", "doc_category": "dev"}],
+    }, buf)
+    src = json.loads(buf.getvalue())["sources"][0]
+    assert src["title"] == "T"
+    assert src["content"] is None
+    assert src["url"] is None
+
+
+def test_emit_json_omits_unexpected_keys():
+    """Only whitelisted fields are emitted, so new result keys can't leak to stdout."""
+    import io, json
+    from chatbot import _emit_json
+    buf = io.StringIO()
+    _emit_json({
+        "answer": "a", "error": None, "filters": {}, "sources": [],
+        "internal_secret": "must not appear",
+    }, buf)
+    out = buf.getvalue()
+    assert "must not appear" not in out
+    assert sorted(json.loads(out)) == ["answer", "error", "filters", "sources"]
+
+
+def test_ask_sources_include_untruncated_full_content():
+    """rag_chatbot.ask() keeps 'content' as a preview but adds the full chunk."""
+    long_text = "x" * 500
+    doc = Document(page_content=long_text, metadata={"title": "T", "url": "u"})
+
+    bot = _bare_chatbot()
+    bot.config = MagicMock(top_n_after_rerank=15)
+    bot.reranker = None
+    bot.hyde_llm = None
+    bot.available_modules = ["M"]
+
+    holder = [doc]
+    chain = MagicMock()
+    chain.invoke.return_value = "the answer"
+    bot._create_chain = MagicMock(return_value=(chain, MagicMock(), holder))
+
+    from core.rag_chatbot import DocumentationChatbot
+    result = DocumentationChatbot.ask(bot, "q")
+
+    src = result["sources"][0]
+    assert src["content"].endswith("...") and len(src["content"]) == 203
+    assert src["full_content"] == long_text
+
+
 def test_webui_accepts_agentic_chatbot():
     """WebUI stores agentic_chatbot when provided."""
     from ui.web import WebUI
@@ -222,3 +304,146 @@ def test_handle_message_config_default_style_sends_no_temperature():
         max_chars_per_page=8000, max_pages_per_round=3, max_pages_round2=2,
     )
     assert rag.ask.call_args.kwargs["temperature"] is None
+
+
+# ---------------------------------------------------------------------------
+# Inherited-member deduplication (task #89)
+#
+# Doxygen's INLINE_INHERITED_MEMB copies every inherited member's documentation
+# verbatim onto every subclass page. All copies — the declaring class's own copy
+# included — share one Doxygen anchor id, so anchor_id is the dedup key; section
+# chunks carry no anchor and fall back to a content hash.
+# ---------------------------------------------------------------------------
+
+def _memitem(page: str, anchor: str, hierarchy: str, content: str = "inherited doc"):
+    url = f"https://docs.example.org/SHAPER/{page}#{anchor}"
+    return Document(
+        page_content=content,
+        metadata={
+            "url": url,
+            "anchor_id": anchor,
+            "hierarchy": hierarchy,
+            "section_id": url,
+            "chunk_position": "1/1",
+        },
+    )
+
+
+def _rerank_bot(scores=None):
+    """Chatbot stub whose reranker scores docs in the order they are given."""
+    bot = _bare_chatbot()
+    bot.config = MagicMock(top_n_after_rerank=15)
+    bot.reranker = MagicMock()
+    if scores is None:
+        bot.reranker.predict = lambda pairs: [float(len(pairs) - i) for i in range(len(pairs))]
+    else:
+        bot.reranker.predict = lambda pairs: scores
+    return bot
+
+
+def test_rerank_collapses_inherited_copies_sharing_an_anchor():
+    """15 subclass copies of one inherited member must not fill the result set."""
+    anchor = "a4e26d803cc4c58a9342279512e01be6d"
+    docs = [
+        _memitem(f"classSub{i}.html", anchor, "ModelAPI_Feature::lastResult")
+        for i in range(15)
+    ]
+    docs.append(_memitem("classOther.html", "bdifferent", "Other::thing", "different doc"))
+
+    bot = _rerank_bot()
+    result = bot._rerank_and_expand("q", docs)
+
+    assert len(result) == 2
+    assert {d.metadata["anchor_id"] for d in result} == {anchor, "bdifferent"}
+
+
+def test_rerank_prefers_the_declaring_class_copy_when_collapsing():
+    """The survivor should cite classModelAPI__Feature.html, not a random subclass."""
+    anchor = "a4e26d803cc4c58a9342279512e01be6d"
+    hierarchy = "std::shared_ptr< ModelAPI_Result > ModelAPI_Feature::lastResult"
+    docs = [
+        _memitem("classSketchPlugin__ConstraintRigid.html", anchor, hierarchy),
+        _memitem("classFeaturesPlugin__Rotation.html", anchor, hierarchy),
+        # declaring class ranked last by the reranker — it must still win
+        _memitem("classModelAPI__Feature.html", anchor, hierarchy),
+    ]
+
+    bot = _rerank_bot()
+    result = bot._rerank_and_expand("q", docs)
+
+    assert len(result) == 1
+    assert "classModelAPI__Feature.html" in result[0].metadata["url"]
+
+
+def test_rerank_falls_back_to_retrieval_order_when_declaring_page_absent():
+    """Copies in a group are byte-identical, so reranker scores tie; keep the best-retrieved."""
+    anchor = "a4e26d803cc4c58a9342279512e01be6d"
+    hierarchy = "void ModelAPI_Entity::emptyFunction"
+    docs = [
+        _memitem("classSketchPlugin__Circle.html", anchor, hierarchy),
+        _memitem("classBuildPlugin__Face.html", anchor, hierarchy),
+    ]
+
+    bot = _rerank_bot()
+    result = bot._rerank_and_expand("q", docs)
+
+    assert len(result) == 1
+    assert "classSketchPlugin__Circle.html" in result[0].metadata["url"]
+
+
+def test_rerank_deduplicates_anchorless_chunks_by_content():
+    """Section chunks carry no anchor_id; identical text must still collapse."""
+    def section(page, text):
+        url = f"https://docs.example.org/SHAPER/{page}"
+        return Document(
+            page_content=text,
+            metadata={"url": url, "section_id": url, "chunk_position": "1/1"},
+        )
+
+    docs = [section("a.html", "same text"), section("b.html", "same text"),
+            section("c.html", "other text")]
+
+    bot = _rerank_bot()
+    result = bot._rerank_and_expand("q", docs)
+
+    assert len(result) == 2
+    assert {d.page_content for d in result} == {"same text", "other text"}
+
+
+def test_rerank_keeps_distinct_symbols():
+    docs = [_memitem(f"classA.html", f"anchor{i}", f"A::m{i}", f"doc {i}") for i in range(5)]
+
+    bot = _rerank_bot()
+    result = bot._rerank_and_expand("q", docs)
+
+    assert len(result) == 5
+
+
+def test_dedup_applies_when_reranker_is_disabled():
+    """Duplicates flood the context regardless of reranking, so dedup runs first."""
+    anchor = "a4e26d803cc4c58a9342279512e01be6d"
+    docs = [
+        _memitem("classModelAPI__Feature.html", anchor, "ModelAPI_Feature::lastResult"),
+        _memitem("classSub.html", anchor, "ModelAPI_Feature::lastResult"),
+        _memitem("classOther.html", "bdifferent", "Other::thing", "different doc"),
+    ]
+
+    bot = _rerank_bot()
+    result = bot._rerank_and_expand("q", docs, reranker_enabled=False)
+
+    assert len(result) == 2
+    assert "classModelAPI__Feature.html" in result[0].metadata["url"]
+
+
+def test_dedup_applies_when_no_reranker_is_configured():
+    anchor = "a4e26d803cc4c58a9342279512e01be6d"
+    docs = [
+        _memitem("classModelAPI__Feature.html", anchor, "ModelAPI_Feature::lastResult"),
+        _memitem("classSub.html", anchor, "ModelAPI_Feature::lastResult"),
+    ]
+
+    bot = _rerank_bot()
+    bot.reranker = None
+    result = bot._rerank_and_expand("q", docs)
+
+    assert len(result) == 1

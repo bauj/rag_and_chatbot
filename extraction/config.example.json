@@ -18,7 +18,7 @@
       "user_path": "./module_b/html_gui"
     }
   },
-  "_comment_url_for_sources_citation": "Optional base URL for the online docs. When set, source links in chatbot responses point to the live documentation page. When omitted, sources show local file paths.",
+  "_comment_url_for_sources_citation": "Optional base URL for the online docs. When set, source links in chatbot responses point to the live documentation page. When omitted, sources show local file paths. Accepts either a single string for the whole module, or an object keyed by doc category — {\"dev\": \"...\", \"user\": \"...\"} — when the two doc sets are published under different paths, as SALOME does with /tui/ and /gui/. The page path relative to dev_path/user_path is appended, so pages nested in subdirectories keep distinct URLs.",
 
   "embedding": {
     "model": "all-MiniLM-L6-v2",

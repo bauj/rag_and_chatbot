@@ -14,6 +14,8 @@ os.environ['HF_HUB_OFFLINE'] = '1'
 os.environ['TRANSFORMERS_OFFLINE'] = '1'
 os.environ['HF_DATASETS_OFFLINE'] = '1'
 
+import hashlib
+import re
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 
@@ -208,14 +210,75 @@ Passage:"""
         )
         return reciprocal_rank_fusion([vector_docs, bm25_docs], k=k)
 
+    @staticmethod
+    def _declaring_page_names(hierarchy: str) -> set:
+        """
+        Doxygen page names that would hold the declaration of a qualified symbol.
+
+        'std::shared_ptr< ModelAPI_Result > ModelAPI_Feature::lastResult' yields
+        {'classModelAPI__Feature.html', 'structModelAPI__Feature.html',
+         'interfaceModelAPI__Feature.html'} — Doxygen escapes '_' as '__' in filenames
+        and prefixes the file by the entity kind, which the metadata does not record.
+
+        Returns an empty set when no qualified name can be read out of hierarchy.
+        """
+        match = re.search(r'([A-Za-z_]\w*)::~?[A-Za-z_]\w*\s*$', hierarchy or '')
+        if not match:
+            return set()
+        escaped = match.group(1).replace('_', '__')
+        return {f"{kind}{escaped}.html" for kind in ('class', 'struct', 'interface')}
+
+    def _dedup_symbol_copies(self, docs: List) -> List:
+        """
+        Collapse duplicate copies of the same documented symbol.
+
+        When docs are built with Doxygen's INLINE_INHERITED_MEMB, every inherited
+        member's documentation is copied verbatim onto every subclass page — in the
+        SHAPER corpus used for testing, one symbol occupied 180 chunks. Left alone, a
+        single inherited method fills the whole result set and crowds out the class
+        page the question was actually about. Extraction can strip these copies, but
+        this guard also covers corpora extracted before that, and any other source of
+        byte-identical duplicates.
+
+        Copies are keyed by anchor_id, which Doxygen reuses across every page carrying
+        the member, including the declaring class's own page. Chunks with no anchor
+        (section-level chunks) fall back to their exact content.
+
+        The declaring class's own copy wins when it is present, so citations point at
+        the canonical documentation rather than an arbitrary subclass. Otherwise the
+        first-retrieved copy wins: copies within a group are identical or near-identical,
+        so reranker scores tie and retrieval rank is the meaningful tiebreak.
+
+        Input order is preserved.
+        """
+        best: Dict[str, int] = {}
+        result: List = []
+
+        for doc in docs:
+            anchor = doc.metadata.get('anchor_id', '')
+            key = f"a:{anchor}" if anchor else f"c:{hashlib.sha1(doc.page_content.encode('utf-8')).hexdigest()}"
+
+            page = doc.metadata.get('url', '').split('#')[0].rsplit('/', 1)[-1]
+            is_declaring = page in self._declaring_page_names(doc.metadata.get('hierarchy', ''))
+
+            if key not in best:
+                best[key] = len(result)
+                result.append(doc)
+            elif is_declaring:
+                # Replace in place: keeps the group at its best retrieval rank.
+                result[best[key]] = doc
+
+        return result
+
     def _rerank_and_expand(self, query: str, docs: List,
                            reranker_enabled: bool = True,
                            top_n: Optional[int] = None) -> List:
         """
-        Rerank docs with cross-encoder, expand to section context, deduplicate.
+        Deduplicate symbol copies, rerank with cross-encoder, expand to section context.
 
-        If no reranker is configured or reranker_enabled is False, returns docs unchanged.
-        Otherwise:
+        Symbol-level deduplication always runs — duplicates flood the context whether
+        or not reranking is on. If no reranker is configured or reranker_enabled is
+        False, the deduplicated docs are returned as-is. Otherwise:
           1. Scores all (query, page_content) pairs.
           2. Sorts by score descending.
           3. Deduplicates by section_id (keeps highest-scored chunk per section).
@@ -223,9 +286,11 @@ Passage:"""
           5. Returns at most top_n (or config.top_n_after_rerank) docs.
 
         Note: docs with an empty section_id (e.g. old ChromaDB databases without
-        section metadata) bypass deduplication — all such docs pass through. This
-        is intentional backward-compatibility behaviour.
+        section metadata) bypass section deduplication — all such docs pass through.
+        This is intentional backward-compatibility behaviour.
         """
+        docs = self._dedup_symbol_copies(docs)
+
         if self.reranker is None or not reranker_enabled:
             return docs
 
@@ -548,7 +613,13 @@ Answer (based strictly on the documentation above):"""
                     'doc_category': doc.metadata.get('doc_category', 'Unknown'),
                     'doc_type': doc.metadata.get('doc_type', 'Unknown'),
                     'url': doc.metadata.get('url', ''),
-                    'content': doc.page_content[:200] + '...' if len(doc.page_content) > 200 else doc.page_content
+                    'content': doc.page_content[:200] + '...' if len(doc.page_content) > 200 else doc.page_content,
+                    # Untruncated text the LLM actually saw. 'content' above stays a
+                    # short preview for display; automated consumers (groundedness
+                    # judging in particular) need the whole chunk, since scoring an
+                    # answer against a 200-character excerpt flags correct statements
+                    # as hallucinations.
+                    'full_content': doc.page_content,
                 })
 
             return {
