@@ -182,7 +182,23 @@ def extract_memitems_with_soup(soup: BeautifulSoup) -> List[Dict[str, str]]:
     return items
 
 
-def extract_class_summary(soup: BeautifulSoup, declared_anchors: Set[str]) -> str:
+def _member_name_for_anchor(row: Tag, anchor: str) -> str:
+    """
+    The member's own name from a memberdecls row.
+
+    Take the link whose href ends in this row's anchor, NOT the first link in the
+    row: the leading link is often the return type, so
+    'virtual std::shared_ptr< ModelAPI_Document > document () const' would yield
+    'ModelAPI_Document' instead of 'document'.
+    """
+    for link in row.find_all('a'):
+        if (link.get('href') or '').endswith('#' + anchor):
+            return link.get_text(strip=True)
+    return ''
+
+
+def extract_class_summary(soup: BeautifulSoup, declared_anchors: Set[str],
+                          class_name: str = '') -> str:
     """
     Build a page-level summary of a Doxygen class: description + member listing.
 
@@ -201,6 +217,14 @@ def extract_class_summary(soup: BeautifulSoup, declared_anchors: Set[str]) -> st
     on the row, so rows are kept only when their anchor appears in declared_anchors
     — pass the anchors from extract_memitems_with_soup(), which already skips
     inherited copies. A heading whose rows all drop out is omitted too.
+
+    When `class_name` is given, each member line is prefixed with `Class::member`.
+    Doxygen's table lists BARE member names, so without this every class summary
+    reads alike and they compete with each other for "methods of <class>" queries —
+    the class name would appear once per chunk while the query term needs to
+    outweigh a thousand near-identical pages. The per-symbol detail chunks carry
+    the qualified name inline already, which is why symbol-level questions resolve
+    and page-level ones do not.
 
     Returns '' when the page has no memberdecls tables or nothing survives filtering.
     """
@@ -231,6 +255,8 @@ def extract_class_summary(soup: BeautifulSoup, declared_anchors: Set[str]) -> st
                 rows[anchor] = {}
                 order.append(anchor)
             rows[anchor][kind] = re.sub(r'\s+', ' ', row.get_text(' ', strip=True)).strip()
+            if kind == 'item' and class_name:
+                rows[anchor]['member'] = _member_name_for_anchor(row, anchor)
 
         if not order:
             continue
@@ -242,6 +268,9 @@ def extract_class_summary(soup: BeautifulSoup, declared_anchors: Set[str]) -> st
             signature = rows[anchor].get('item', '')
             brief = rows[anchor].get('desc', '')
             line = f"{signature}  {brief}".strip() if brief else signature
+            member = rows[anchor].get('member', '')
+            if class_name and member:
+                line = f"{class_name}::{member}  {line}".strip()
             if line:
                 lines.append(line)
         parts.append("\n".join(lines))

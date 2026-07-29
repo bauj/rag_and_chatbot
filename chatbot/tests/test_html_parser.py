@@ -539,3 +539,74 @@ def test_class_summary_drops_heading_with_no_surviving_rows():
     # the first table contributed nothing, so its heading must be gone; the only
     # remaining occurrence of the substring is inside "Static Public Member Functions"
     assert summary.count("Public Member Functions") == 1
+
+
+# ---------------------------------------------------------------------------
+# Qualified member names in the class summary (task #93)
+#
+# Doxygen's member table lists bare member names, so every class summary reads
+# alike and they compete with each other for "methods of <class>" questions.
+# The per-symbol detail chunks do NOT have this problem because each carries the
+# qualified name inline — which is why symbol questions resolve and page-level
+# ones do not.
+# ---------------------------------------------------------------------------
+
+def _make_qualified_class_page():
+    from bs4 import BeautifulSoup
+    html = """
+    <html><body><div class="contents">
+    <div class="textblock"><p>Feature function of this operation.</p></div>
+    <table class="memberdecls">
+    <tr class="heading"><td><h2 class="groupheader">Public Member Functions</h2></td></tr>
+    <tr class="memitem:a001"><td class="memItemRight">virtual const std::string &amp;
+        <a class="el" href="classModelAPI__Feature.html#a001">getKind</a> ()=0</td></tr>
+    <tr class="memdesc:a001"><td class="mdescRight">Returns the unique kind of a feature.</td></tr>
+    <tr class="memitem:a002"><td class="memItemRight">virtual std::shared_ptr&lt;
+        <a class="el" href="classModelAPI__Document.html">ModelAPI_Document</a> &gt;
+        <a class="el" href="classModelAPI__Feature.html#a002">document</a> () const</td></tr>
+    <tr class="memdesc:a002"><td class="mdescRight">Returns the document.</td></tr>
+    </table>
+    </div></body></html>
+    """
+    return BeautifulSoup(html, "html.parser")
+
+
+def test_class_summary_qualifies_each_member_with_the_class_name():
+    summary = extract_class_summary(
+        _make_qualified_class_page(), {"a001", "a002"}, class_name="ModelAPI_Feature"
+    )
+    assert "ModelAPI_Feature::getKind" in summary
+    assert "ModelAPI_Feature::document" in summary
+
+
+def test_class_summary_picks_the_member_link_not_the_return_type():
+    """The first <a> in a row can be the return type; the member is the link whose
+    href matches the row's own anchor."""
+    summary = extract_class_summary(
+        _make_qualified_class_page(), {"a002"}, class_name="ModelAPI_Feature"
+    )
+    assert "ModelAPI_Feature::document" in summary
+    assert "ModelAPI_Feature::ModelAPI_Document" not in summary
+
+
+def test_class_summary_repeats_the_class_name_once_per_member():
+    summary = extract_class_summary(
+        _make_qualified_class_page(), {"a001", "a002"}, class_name="ModelAPI_Feature"
+    )
+    # once in each of the two member lines; the header is added by process_docs
+    assert summary.count("ModelAPI_Feature::") == 2
+
+
+def test_class_summary_keeps_signature_and_brief_alongside_the_qualified_name():
+    summary = extract_class_summary(
+        _make_qualified_class_page(), {"a001"}, class_name="ModelAPI_Feature"
+    )
+    assert "Returns the unique kind of a feature." in summary
+    assert "()=0" in summary
+
+
+def test_class_summary_without_class_name_is_unchanged():
+    """class_name is optional; omitting it must preserve the previous output."""
+    summary = extract_class_summary(_make_qualified_class_page(), {"a001", "a002"})
+    assert "ModelAPI_Feature::" not in summary
+    assert "getKind" in summary

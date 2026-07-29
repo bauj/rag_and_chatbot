@@ -3,6 +3,7 @@ Documentation Processor — extracts HTML docs (Sphinx/Doxygen) into ChromaDB.
 Modules are fully config-driven via config.json. No hardcoded defaults.
 """
 
+import collections
 import json
 import re
 import gc
@@ -481,6 +482,24 @@ class DocumentationProcessor:
             return True  # If encoding fails, assume it's OK
 
     @staticmethod
+    def _class_name_from_memitems(memitems: List[Dict]) -> str:
+        """
+        The class a page documents, taken from its declared symbols.
+
+        Read from the qualified names ('bool ModelAPI_Feature::execute' ->
+        'ModelAPI_Feature') rather than the page title: titles carry a
+        project-specific prefix and wording, qualified names do not. The most
+        common owner wins, so a stray cross-referenced symbol cannot rename the
+        page. Returns '' when no symbol is qualified.
+        """
+        owners = collections.Counter()
+        for item in memitems:
+            match = re.search(r'([A-Za-z_]\w*)::~?[A-Za-z_]\w*\s*$', item.get('symbol_name', ''))
+            if match:
+                owners[match.group(1)] += 1
+        return owners.most_common(1)[0][0] if owners else ''
+
+    @staticmethod
     def _citation_base_url(module_info: Dict, doc_category: str) -> str:
         """
         Citation base URL for a module, optionally per doc category.
@@ -588,7 +607,9 @@ class DocumentationProcessor:
             # Page-level view of the class API. The per-symbol chunks below cannot
             # answer "what are the public methods of X" — no single one lists them.
             class_summary = extract_class_summary(
-                soup, {i['anchor_id'] for i in memitems if i['anchor_id']}
+                soup,
+                {i['anchor_id'] for i in memitems if i['anchor_id']},
+                class_name=self._class_name_from_memitems(memitems),
             )
             # A page whose every memitem is inherited extracts to nothing, since
             # extract_memitems_with_soup skips inherited copies. Fall back to section

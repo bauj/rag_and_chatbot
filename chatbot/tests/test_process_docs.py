@@ -580,3 +580,34 @@ def test_citation_url_still_accepts_a_plain_string(tmp_path):
     assert chunks[0].url.startswith(
         "https://docs.example.org/latest/tui/SHAPER/SketchPlugin/pointFeature.html"
     )
+
+
+def test_summary_member_lines_carry_the_qualified_name(tmp_path):
+    """Task #93: bare member names make every class summary look alike."""
+    html_file = tmp_path / "classModelAPI__Feature.html"
+    html_file.write_text(_class_page_html().replace(
+        '<td class="memItemRight">bool execute (const std::string &amp;name)</td>',
+        '<td class="memItemRight">bool <a class="el" href="#a1a2b3c4d5">execute</a> '
+        '(const std::string &amp;name)</td>'
+    ))
+    processor = DocumentationProcessor(_memitem_config(tmp_path))
+    chunks = processor.process_file(str(html_file), "test_module", "dev")
+    summaries = [c for c in chunks if not c.metadata.get("anchor_id")]
+
+    assert summaries
+    assert "ModelAPI_Feature::execute" in summaries[0].content
+
+
+def test_summary_class_name_comes_from_the_memitems(tmp_path):
+    """Derived from the declared symbols' qualified names, not parsed from the
+    page title — titles are project-formatted, qualified names are not."""
+    from process_docs import DocumentationProcessor as P
+    assert P._class_name_from_memitems([
+        {"symbol_name": "bool ModelAPI_Feature::execute"},
+        {"symbol_name": "virtual const std::string & ModelAPI_Feature::getKind"},
+    ]) == "ModelAPI_Feature"
+
+
+def test_summary_class_name_empty_when_no_qualified_symbols(tmp_path):
+    from process_docs import DocumentationProcessor as P
+    assert P._class_name_from_memitems([{"symbol_name": "someFreeFunction"}]) == ""
