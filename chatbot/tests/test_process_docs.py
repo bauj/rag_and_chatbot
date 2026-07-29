@@ -611,3 +611,80 @@ def test_summary_class_name_comes_from_the_memitems(tmp_path):
 def test_summary_class_name_empty_when_no_qualified_symbols(tmp_path):
     from process_docs import DocumentationProcessor as P
     assert P._class_name_from_memitems([{"symbol_name": "someFreeFunction"}]) == ""
+
+
+# Generated navigation and source-browser pages (task #103)
+
+def _walk_config(tmp_path):
+    return {
+        "project_name": "test",
+        "output_dir": str(tmp_path),
+        "modules": {},
+        "embedding": {"model": "all-MiniLM-L6-v2", "type": "local"},
+        "chunking": {"max_tokens": 384, "overlap_tokens": 50, "char_chunk_size": 1000, "char_overlap": 200},
+        "quality": {"min_score": 0.3, "min_word_count": 50, "substantial_word_count": 100},
+    }
+
+
+def _write(root: Path, relative: str) -> Path:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("<html><body><p>x</p></body></html>")
+    return path
+
+
+def test_find_html_files_skips_doxygen_source_browser_pages(tmp_path):
+    """Doxygen SOURCE_BROWSER pages are raw code dumps, not documentation."""
+    docs = tmp_path / "docs"
+    _write(docs, "classMyClass.html")
+    _write(docs, "MyClass_8h_source.html")
+
+    processor = DocumentationProcessor(_walk_config(tmp_path))
+    names = {p.name for p in processor.find_html_files(docs)}
+
+    assert names == {"classMyClass.html"}
+
+
+def test_find_html_files_skips_generated_navigation_pages(tmp_path):
+    """Doxygen and Sphinx index pages are link lists carrying no prose."""
+    docs = tmp_path / "docs"
+    _write(docs, "classMyClass.html")
+    for generated in ("annotated.html", "classes.html", "hierarchy.html", "files.html",
+                      "namespaces.html", "functions_func.html", "genindex.html",
+                      "search.html", "py-modindex.html", "dir_a1b2c3.html"):
+        _write(docs, generated)
+
+    processor = DocumentationProcessor(_walk_config(tmp_path))
+    names = {p.name for p in processor.find_html_files(docs)}
+
+    assert names == {"classMyClass.html"}
+
+
+def test_find_html_files_skips_sphinx_viewcode_but_keeps_examples(tmp_path):
+    """_modules/ duplicates docstrings already rendered on the API page.
+    auto_examples/ is real documentation and must survive — the two are easy
+    to conflate because both hold mostly code."""
+    docs = tmp_path / "docs"
+    _write(docs, "_modules/mypkg/core.html")
+    _write(docs, "auto_examples/plot_basic.html")
+    _write(docs, "examples/tutorial.html")
+
+    processor = DocumentationProcessor(_walk_config(tmp_path))
+    found = {str(p.relative_to(docs)) for p in processor.find_html_files(docs)}
+
+    assert found == {"auto_examples/plot_basic.html", "examples/tutorial.html"}
+
+
+def test_find_html_files_keeps_pages_whose_names_merely_contain_the_words(tmp_path):
+    """Match generated pages exactly, not by substring: a documented class
+    called 'Search' or a page about source control is ordinary content."""
+    docs = tmp_path / "docs"
+    for keeper in ("classSearchEngine.html", "sourceControl.html", "classFileManager.html",
+                   "group__functions.html"):
+        _write(docs, keeper)
+
+    processor = DocumentationProcessor(_walk_config(tmp_path))
+    names = {p.name for p in processor.find_html_files(docs)}
+
+    assert names == {"classSearchEngine.html", "sourceControl.html",
+                     "classFileManager.html", "group__functions.html"}

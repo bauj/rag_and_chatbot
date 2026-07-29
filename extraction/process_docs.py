@@ -246,9 +246,64 @@ class DocumentationProcessor:
         return bool(self.modules[name])
 
     def find_html_files(self, doc_path: Path) -> List[Path]:
-        """Find all HTML files in a directory"""
-        html_files = list(doc_path.rglob("*.html"))
-        return html_files
+        """
+        Find the HTML files worth indexing, skipping generator-produced
+        navigation and source-browser pages.
+
+        Doxygen and Sphinx both emit two kinds of page that answer no
+        documentation question but score well against keyword search, because
+        they are dense with identifier tokens and nothing else:
+
+          - source browsers (Doxygen SOURCE_BROWSER, Sphinx viewcode) — raw
+            code plus licence headers. The declaring page already carries the
+            documentation, and anyone wanting the code opens the file.
+          - index pages — alphabetical member lists, class lists, inheritance
+            trees, directory listings. Link soup with no prose.
+
+        Measured on the SHAPER corpus before this filter: source browsers were
+        3,982 chunks and navigation pages 1,231, together 27.9% of the index
+        and 38% of its text. Four of fifteen reranked chunks on one evaluation
+        question were source dumps, one of them scoring 0.71 on GPL boilerplate.
+
+        Match generated pages exactly rather than by substring — a documented
+        class called 'Search', or a page named sourceControl.html, is ordinary
+        content. Sphinx's auto_examples/ and examples/ are real documentation
+        and must survive; only _modules/ (viewcode) is dropped.
+        """
+        return [
+            path for path in doc_path.rglob("*.html")
+            if not self._is_generated_page(path)
+        ]
+
+    # Exact filenames emitted by Doxygen and Sphinx as navigation.
+    _GENERATED_PAGE_NAMES = frozenset({
+        'annotated.html', 'classes.html', 'hierarchy.html', 'files.html',
+        'namespaces.html', 'namespacemembers.html', 'functions.html',
+        'globals.html', 'pages.html', 'modules.html', 'todo.html',
+        'deprecated.html', 'bug.html', 'inherits.html',
+        'genindex.html', 'search.html', 'py-modindex.html', 'modindex.html',
+    })
+
+    # Families of generated pages: Doxygen splits its member indexes by letter
+    # and category (functions_func.html, globals_vars.html) and names directory
+    # pages by hash (dir_a1b2c3.html).
+    _GENERATED_PAGE_PATTERNS = (
+        re.compile(r'^[^/]*_source\.html$'),
+        re.compile(r'^(functions|globals|namespacemembers|classmembers)_[\w]*\.html$'),
+        re.compile(r'^dir_[0-9a-f]+\.html$'),
+    )
+
+    @classmethod
+    def _is_generated_page(cls, path: Path) -> bool:
+        """True for a navigation or source-browser page — see find_html_files."""
+        name = path.name
+        if name in cls._GENERATED_PAGE_NAMES:
+            return True
+        if any(pattern.match(name) for pattern in cls._GENERATED_PAGE_PATTERNS):
+            return True
+        # Sphinx viewcode lives in a _modules/ directory; its content duplicates
+        # docstrings already rendered on the API pages.
+        return '_modules' in path.parts
 
     def extract_content_doxygen(self, soup: BeautifulSoup) -> Dict:
         """Extract content from Doxygen HTML"""
