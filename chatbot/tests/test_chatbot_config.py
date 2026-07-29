@@ -101,3 +101,36 @@ def test_smol_enabled_from_json(tmp_path):
     }))
     cfg = ChatbotConfig.load(str(config_json))
     assert cfg.smol_enabled is True
+
+
+def test_k_retrieve_defaults_none():
+    """None = backwards compatible: per-channel retrieval depth equals the pool size."""
+    cfg = ChatbotConfig(project_name="test", chromadb_path="/tmp/db/chromadb")
+    assert cfg.k_retrieve is None
+
+
+def test_k_retrieve_from_json(tmp_path):
+    config_json = tmp_path / "config.json"
+    config_json.write_text(json.dumps({
+        "project_name": "test",
+        "chromadb_path": "/tmp/db/chromadb",
+        "k_retrieve": 80,
+    }))
+    cfg = ChatbotConfig.load(str(config_json))
+    assert cfg.k_retrieve == 80
+
+
+def test_title_boost_enabled_defaults_false():
+    cfg = ChatbotConfig(project_name="test", chromadb_path="/tmp/db/chromadb")
+    assert cfg.title_boost_enabled is False
+
+
+def test_title_boost_enabled_from_json(tmp_path):
+    config_json = tmp_path / "config.json"
+    config_json.write_text(json.dumps({
+        "project_name": "test",
+        "chromadb_path": "/tmp/db/chromadb",
+        "title_boost_enabled": True,
+    }))
+    cfg = ChatbotConfig.load(str(config_json))
+    assert cfg.title_boost_enabled is True

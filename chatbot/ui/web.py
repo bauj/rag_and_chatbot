@@ -81,12 +81,14 @@ class WebUI:
             notes.append("Deep Dive mode (batch summarization then synthesis)")
             bypassed = filters.get("bypassed_by_deep_dive")
             if bypassed:
-                pretty = {"reranker": "reranking", "hyde": "HyDE", "bm25": "BM25 hybrid retrieval"}
+                pretty = {"reranker": "reranking", "hyde": "HyDE", "bm25": "BM25 hybrid retrieval",
+                          "title_boost": "title/identifier boost"}
                 names = ", ".join(pretty.get(b, b) for b in bypassed)
                 notes.append(f"**{names} skipped** — Deep Dive uses its own retrieval path")
         else:
             stages = [name for key, name in
-                      (("bm25", "BM25 hybrid"), ("hyde", "HyDE"), ("reranker", "reranker"))
+                      (("bm25", "BM25 hybrid"), ("title_boost", "title boost"),
+                       ("hyde", "HyDE"), ("reranker", "reranker"))
                       if filters.get(key)]
             if stages:
                 notes.append("Retrieval: " + " + ".join(stages))

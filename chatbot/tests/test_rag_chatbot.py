@@ -11,6 +11,8 @@ if str(CHATBOT_DIR) not in sys.path:
     sys.path.insert(0, str(CHATBOT_DIR))
 
 from langchain_core.documents import Document
+from langchain_core.runnables import RunnableLambda
+from langchain_core.prompts import PromptTemplate
 
 
 def _bare_chatbot(bm25_index=None):
@@ -72,6 +74,298 @@ def test_hybrid_retrieve_skips_bm25_when_runtime_disabled():
     assert result == vector_docs
 
 
+# ---------------------------------------------------------------------------
+# retrieve_k: per-channel retrieval depth decoupled from the reranker pool (k)
+#
+# reciprocal_rank_fusion([dense_k, bm25_k], k) merges two k-length lists and
+# truncates the result back to k, so each channel effectively contributes only
+# ~k/2 of its candidates to the fused pool. A doc ranked outside that in only
+# one channel never reaches the pool even when a deeper look would find it —
+# measured on the real corpus: a target chunk sat at dense rank 46-47 / BM25
+# rank 44, inside both channels' top-60/80, and still missed the fused pool
+# when retrieve depth == pool size. retrieve_k lets each channel search deeper
+# without growing k (the reranker cost driver).
+# ---------------------------------------------------------------------------
+
+def test_hybrid_retrieve_uses_retrieve_k_for_bm25_search_depth():
+    """retrieve_k, not k, sets how deep BM25 is asked to search."""
+    fake_bm25 = MagicMock()
+    fake_bm25.search.return_value = []
+    bot = _bare_chatbot(bm25_index=fake_bm25)
+    vector_docs = [Document(page_content="v", metadata={"url": "u1", "section_id": "s1", "chunk_position": "1/1"})]
+
+    bot._hybrid_retrieve(
+        "query", vector_docs, k=5, module_filter=None, doc_category_filter=None, retrieve_k=80,
+    )
+
+    fake_bm25.search.assert_called_once_with("query", k=80, module_filter=None, doc_category_filter=None)
+
+
+def test_hybrid_retrieve_retrieve_k_defaults_to_k_when_unset():
+    """Backwards compatibility: omitting retrieve_k reproduces today's behaviour."""
+    fake_bm25 = MagicMock()
+    fake_bm25.search.return_value = []
+    bot = _bare_chatbot(bm25_index=fake_bm25)
+    vector_docs = [Document(page_content="v", metadata={"url": "u1", "section_id": "s1", "chunk_position": "1/1"})]
+
+    bot._hybrid_retrieve("query", vector_docs, k=5, module_filter=None, doc_category_filter=None)
+
+    fake_bm25.search.assert_called_once_with("query", k=5, module_filter=None, doc_category_filter=None)
+
+
+def test_hybrid_retrieve_still_truncates_fused_pool_to_k_regardless_of_retrieve_k():
+    """Deeper per-channel search must not inflate the reranker pool size."""
+    fake_bm25 = MagicMock()
+    fake_bm25.search.return_value = [
+        Document(page_content=f"b{i}", metadata={"url": f"b{i}", "section_id": f"b{i}", "chunk_position": "1/1"})
+        for i in range(80)
+    ]
+    bot = _bare_chatbot(bm25_index=fake_bm25)
+    vector_docs = [
+        Document(page_content=f"v{i}", metadata={"url": f"v{i}", "section_id": f"v{i}", "chunk_position": "1/1"})
+        for i in range(80)
+    ]
+
+    result = bot._hybrid_retrieve(
+        "query", vector_docs, k=5, module_filter=None, doc_category_filter=None, retrieve_k=80,
+    )
+
+    assert len(result) == 5
+
+
+def test_hybrid_retrieve_retrieve_k_recovers_doc_beyond_pool_k():
+    """
+    The measured recall leak, reproduced: a doc ranked 46th (index 45) in both
+    the dense and BM25 channels reaches the fused pool when each channel is
+    searched to retrieve_k=80, but is invisible to both channels — and so to
+    fusion — when retrieval depth is left at the pool size (k=40), today's
+    behaviour and the backwards-compatible default when retrieve_k is unset.
+    """
+    target = Document(page_content="target", metadata={"url": "target", "section_id": "target", "chunk_position": "1/1"})
+
+    def _filler(prefix, n):
+        return [
+            Document(page_content=f"{prefix}{i}", metadata={"url": f"{prefix}{i}", "section_id": f"{prefix}{i}", "chunk_position": "1/1"})
+            for i in range(n)
+        ]
+
+    # target sits at index 45 (rank 46) in both channels' full 80-deep ranking.
+    dense_full = _filler("v", 45) + [target] + _filler("v_tail", 34)
+    bm25_full = _filler("b", 45) + [target] + _filler("b_tail", 34)
+
+    fake_bm25 = MagicMock()
+    fake_bm25.search.side_effect = lambda query, k, module_filter=None, doc_category_filter=None: bm25_full[:k]
+    bot = _bare_chatbot(bm25_index=fake_bm25)
+
+    # New behaviour: vector retriever and BM25 both searched to retrieve_k=80.
+    result_deep = bot._hybrid_retrieve(
+        "query", dense_full, k=40, module_filter=None, doc_category_filter=None, retrieve_k=80,
+    )
+    assert "target" in {d.metadata["url"] for d in result_deep}
+
+    # Old / backwards-compatible behaviour: both channels limited to the pool size (40).
+    result_shallow = bot._hybrid_retrieve(
+        "query", dense_full[:40], k=40, module_filter=None, doc_category_filter=None,
+    )
+    assert "target" not in {d.metadata["url"] for d in result_shallow}
+
+
+# ---------------------------------------------------------------------------
+# Title/identifier channel: a third RRF list, gated by title_boost_enabled
+#
+# A question naming a class is an entity lookup, not a semantic search: the
+# discriminating identifier is one token among ~150 in a chunk's body (diluted
+# further by every subclass page that mentions the parent class) but is the
+# whole of the page's title. RRF only looks at rank, so even a short,
+# high-precision title list can out-rank a body/dense channel where the same
+# page is buried at rank 40+.
+# ---------------------------------------------------------------------------
+
+def test_hybrid_retrieve_skips_title_channel_by_default():
+    fake_bm25 = MagicMock()
+    fake_bm25.search.return_value = []
+    bot = _bare_chatbot(bm25_index=fake_bm25)
+    vector_docs = [Document(page_content="v", metadata={"url": "u1", "section_id": "s1", "chunk_position": "1/1"})]
+
+    bot._hybrid_retrieve("query", vector_docs, k=5, module_filter=None, doc_category_filter=None)
+
+    fake_bm25.search_titles.assert_not_called()
+
+
+def test_hybrid_retrieve_adds_title_channel_when_enabled():
+    title_doc = Document(page_content="class summary", metadata={"url": "u3", "section_id": "s3", "chunk_position": "1/4"})
+    fake_bm25 = MagicMock()
+    fake_bm25.search.return_value = []
+    fake_bm25.search_titles.return_value = [title_doc]
+    bot = _bare_chatbot(bm25_index=fake_bm25)
+    vector_docs = [Document(page_content="v", metadata={"url": "u1", "section_id": "s1", "chunk_position": "1/1"})]
+
+    result = bot._hybrid_retrieve(
+        "ModelAPI_Feature", vector_docs, k=5, module_filter=None, doc_category_filter=None,
+        bm25_enabled=False, title_boost_enabled=True,
+    )
+
+    fake_bm25.search_titles.assert_called_once_with(
+        "ModelAPI_Feature", k=10, module_filter=None, doc_category_filter=None,
+    )
+    assert "u3" in {d.metadata["url"] for d in result}
+
+
+def test_hybrid_retrieve_title_channel_promotes_a_deeply_buried_page():
+    """
+    The reason this channel exists: a page ranked 21st in dense search (and
+    absent from body BM25) should reach rank 0 of the fused pool once the
+    title channel places it at rank 0 of its own short list.
+    """
+    target = Document(page_content="deep hit", metadata={"url": "target", "section_id": "target", "chunk_position": "1/1"})
+    filler_vector = [
+        Document(page_content=f"v{i}", metadata={"url": f"v{i}", "section_id": f"v{i}", "chunk_position": "1/1"})
+        for i in range(20)
+    ]
+    vector_docs = filler_vector + [target]
+
+    fake_bm25 = MagicMock()
+    fake_bm25.search.return_value = []
+    fake_bm25.search_titles.return_value = [target]
+
+    bot = _bare_chatbot(bm25_index=fake_bm25)
+    result = bot._hybrid_retrieve(
+        "ModelAPI_Feature", vector_docs, k=5, module_filter=None, doc_category_filter=None,
+        bm25_enabled=False, title_boost_enabled=True,
+    )
+
+    assert result[0].metadata["url"] == "target"
+
+
+# ---------------------------------------------------------------------------
+# _create_chain: k_retrieve sets the vector retriever's search depth,
+# decoupled from k (the reranker pool). Deep dive must stay untouched — it
+# deliberately bypasses rerank/BM25/HyDE and keeps using k_deep_dive.
+# ---------------------------------------------------------------------------
+
+def _chain_bot(k_retrieve=None, bm25_index=None):
+    """
+    Build a DocumentationChatbot with just enough real/stub attributes for
+    _create_chain() to run end to end without loading a real ChromaDB or LLM:
+    base_prompt is a real PromptTemplate (LCEL needs a real Runnable to pipe
+    through) and _initialize_llm returns a RunnableLambda stand-in.
+    """
+    from core.rag_chatbot import DocumentationChatbot
+    bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    bot.config = MagicMock(
+        k_standard=40, k_deep_dive=60, k_retrieve=k_retrieve,
+        deep_dive_batch_size=10, top_n_after_rerank=15,
+        bm25_enabled=bm25_index is not None, title_boost_enabled=False,
+        temperature=0.0, max_tokens=2000, project_name="P",
+    )
+    bot.reranker = None
+    bot.hyde_llm = None
+    bot.bm25_index = bm25_index
+    bot.base_prompt = PromptTemplate.from_template("{context} {question}")
+    bot._initialize_llm = MagicMock(return_value=RunnableLambda(lambda x: "stub"))
+    bot.vectorstore = MagicMock()
+    return bot
+
+
+def test_create_chain_uses_k_retrieve_for_vector_search_depth():
+    """k_retrieve, not k_standard, sets the Chroma retriever's per-channel depth."""
+    bot = _chain_bot(k_retrieve=80)
+    bot._create_chain()
+    kwargs = bot.vectorstore.as_retriever.call_args.kwargs
+    assert kwargs["search_kwargs"]["k"] == 80
+
+
+def test_create_chain_defaults_retrieve_depth_to_pool_k_when_k_retrieve_unset():
+    """Backwards compatible: k_retrieve=None reproduces today's behaviour."""
+    bot = _chain_bot(k_retrieve=None)
+    bot._create_chain()
+    kwargs = bot.vectorstore.as_retriever.call_args.kwargs
+    assert kwargs["search_kwargs"]["k"] == 40
+
+
+def test_create_chain_deep_dive_ignores_k_retrieve():
+    """Deep dive deliberately bypasses this pipeline; it must keep using k_deep_dive."""
+    bot = _chain_bot(k_retrieve=80)
+    bot._create_chain(deep_dive=True)
+    kwargs = bot.vectorstore.as_retriever.call_args.kwargs
+    assert kwargs["search_kwargs"]["k"] == 60
+
+
+def test_ask_reports_title_boost_filter_when_enabled():
+    """title_boost must appear in filters, mirroring bm25/hyde reporting."""
+    doc = Document(page_content="x", metadata={"title": "T", "url": "u"})
+    bot = _bare_chatbot(bm25_index=MagicMock())
+    bot.config = MagicMock(top_n_after_rerank=15, title_boost_enabled=True)
+    bot.reranker = None
+    bot.hyde_llm = None
+    bot.available_modules = ["M"]
+    holder = [doc]
+    chain = MagicMock()
+    chain.invoke.return_value = "answer"
+    bot._create_chain = MagicMock(return_value=(chain, MagicMock(), holder))
+
+    from core.rag_chatbot import DocumentationChatbot
+    result = DocumentationChatbot.ask(bot, "q")
+
+    assert result["filters"]["title_boost"] is True
+
+
+def test_ask_title_boost_false_when_config_disabled():
+    doc = Document(page_content="x", metadata={"title": "T", "url": "u"})
+    bot = _bare_chatbot(bm25_index=MagicMock())
+    bot.config = MagicMock(top_n_after_rerank=15, title_boost_enabled=False)
+    bot.reranker = None
+    bot.hyde_llm = None
+    bot.available_modules = ["M"]
+    holder = [doc]
+    chain = MagicMock()
+    chain.invoke.return_value = "answer"
+    bot._create_chain = MagicMock(return_value=(chain, MagicMock(), holder))
+
+    from core.rag_chatbot import DocumentationChatbot
+    result = DocumentationChatbot.ask(bot, "q")
+
+    assert result["filters"]["title_boost"] is False
+
+
+def test_ask_title_boost_false_when_no_bm25_index_even_if_config_true():
+    """The title index lives inside BM25Index — no index loaded, no title channel."""
+    doc = Document(page_content="x", metadata={"title": "T", "url": "u"})
+    bot = _bare_chatbot(bm25_index=None)
+    bot.config = MagicMock(top_n_after_rerank=15, title_boost_enabled=True)
+    bot.reranker = None
+    bot.hyde_llm = None
+    bot.available_modules = ["M"]
+    holder = [doc]
+    chain = MagicMock()
+    chain.invoke.return_value = "answer"
+    bot._create_chain = MagicMock(return_value=(chain, MagicMock(), holder))
+
+    from core.rag_chatbot import DocumentationChatbot
+    result = DocumentationChatbot.ask(bot, "q")
+
+    assert result["filters"]["title_boost"] is False
+
+
+def test_ask_title_boost_runtime_override_can_disable():
+    """The UI can turn title boost OFF even when config enabled it at startup."""
+    doc = Document(page_content="x", metadata={"title": "T", "url": "u"})
+    bot = _bare_chatbot(bm25_index=MagicMock())
+    bot.config = MagicMock(top_n_after_rerank=15, title_boost_enabled=True)
+    bot.reranker = None
+    bot.hyde_llm = None
+    bot.available_modules = ["M"]
+    holder = [doc]
+    chain = MagicMock()
+    chain.invoke.return_value = "answer"
+    bot._create_chain = MagicMock(return_value=(chain, MagicMock(), holder))
+
+    from core.rag_chatbot import DocumentationChatbot
+    result = DocumentationChatbot.ask(bot, "q", title_boost_enabled=False)
+
+    assert result["filters"]["title_boost"] is False
+
+
 def test_response_styles_only_declare_temperature():
     """Presets must not declare keys the UI ignores (k/deep_dive were dead config)."""
     from core.config import ChatbotConfig
@@ -125,6 +419,20 @@ def test_format_answer_reports_deep_dive_bypass():
     assert "reranking" in out and "HyDE" in out and "BM25" in out
 
 
+def test_format_answer_reports_title_boost_bypass():
+    """Deep dive skipping the title channel must be visible too."""
+    from ui.web import WebUI
+    ui = WebUI(MagicMock())
+    out = ui._format_answer_markdown({
+        "answer": "a", "sources": [],
+        "filters": {"mode": "rag", "deep_dive": True,
+                    "bypassed_by_deep_dive": ["title_boost"]},
+        "error": None,
+    })
+    assert "skipped" in out
+    assert "title" in out.lower()
+
+
 def test_format_answer_reports_active_retrieval_stages():
     from ui.web import WebUI
     ui = WebUI(MagicMock())
@@ -136,6 +444,17 @@ def test_format_answer_reports_active_retrieval_stages():
     assert "BM25 hybrid" in out
     assert "reranker" in out
     assert "HyDE" not in out
+
+
+def test_format_answer_reports_title_boost_stage():
+    from ui.web import WebUI
+    ui = WebUI(MagicMock())
+    out = ui._format_answer_markdown({
+        "answer": "a", "sources": [],
+        "filters": {"mode": "rag", "bm25": False, "hyde": False, "reranker": False, "title_boost": True},
+        "error": None,
+    })
+    assert "title" in out.lower()
 
 
 def test_emit_json_writes_single_parseable_document():

@@ -54,10 +54,11 @@ def _write_jsonl(tmp_path, rows):
     return path
 
 
-def _row(content, module="SHAPER", doc_category="dev", url="u1", section_id="s1", chunk_position="1/1"):
+def _row(content, module="SHAPER", doc_category="dev", url="u1", section_id="s1",
+         chunk_position="1/1", title="T", chunk_id=0):
     return {
-        "title": "T", "content": content, "url": url, "doc_type": "class",
-        "hierarchy": "h", "chunk_id": 0, "module": module, "doc_category": doc_category,
+        "title": title, "content": content, "url": url, "doc_type": "class",
+        "hierarchy": "h", "chunk_id": chunk_id, "module": module, "doc_category": doc_category,
         "metadata": {
             "parent_doc_id": "", "chunk_position": chunk_position, "quality_score": 0.5,
             "has_code": False, "section_id": section_id, "section_text": content,
@@ -151,3 +152,103 @@ def test_rrf_truncates_to_k():
 
 def test_rrf_empty_lists_returns_empty():
     assert reciprocal_rank_fusion([[], []], k=5) == []
+
+
+# ---------------------------------------------------------------------------
+# Title/identifier channel (task: retrieval pool + title channel)
+#
+# A question naming a class ("What are the public methods of the
+# ModelAPI_Feature class?") is an entity lookup: the discriminating token is
+# diluted across ~1,800 chunk bodies (every subclass memitem mentions the
+# parent class) but is the whole of the ~112 chunk titles that carry it — 16x
+# sharper. search_titles ranks by title-only BM25 and collapses each page's
+# many chunks down to its one page-level (first) chunk, so a title match
+# doesn't flood the RRF pool with near-duplicate hits of the same page.
+# ---------------------------------------------------------------------------
+
+def test_search_titles_ranks_by_title_not_body_relevance(tmp_path):
+    """The whole point of this channel: score the TITLE, not the diluted body."""
+    rows = [
+        _row("body mentions ModelAPI_Feature repeatedly ModelAPI_Feature ModelAPI_Feature",
+             title="Other Class Reference", url="u1", section_id="s1"),
+        _row("unrelated body text", title="ModelAPI_Feature Class Reference", url="u2", section_id="s2"),
+        # A third, wholly unrelated doc — with only two docs, BM25's IDF formula
+        # gives exactly 0 for any term appearing in half the corpus, which would
+        # mask the effect this test exists to demonstrate.
+        _row("installation guide", title="Unrelated Tutorial", url="u3", section_id="s3"),
+    ]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    results = index.search_titles("ModelAPI_Feature", k=5)
+    assert results[0].metadata["url"] == "u2"
+
+
+def test_search_titles_collapses_multiple_chunks_of_one_page_to_the_first(tmp_path):
+    """All chunks of a page share its title; a raw title search must not flood
+    the pool with every chunk of the same page — only the page's first
+    (summary) chunk should survive."""
+    rows = [
+        _row("chunk 2 body", title="ModelAPI_Feature Class Reference",
+             url="page1#frag2", section_id="s2", chunk_position="2/3", chunk_id=1),
+        _row("chunk 1 body (the summary)", title="ModelAPI_Feature Class Reference",
+             url="page1", section_id="s1", chunk_position="1/3", chunk_id=0),
+        _row("chunk 3 body", title="ModelAPI_Feature Class Reference",
+             url="page1#frag3", section_id="s3", chunk_position="3/3", chunk_id=2),
+        _row("other page body", title="Other Class Reference",
+             url="page2", section_id="o1", chunk_position="1/1", chunk_id=0),
+    ]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    results = index.search_titles("ModelAPI_Feature", k=5)
+    page1_hits = [r for r in results if r.metadata["url"].split("#")[0] == "page1"]
+    assert len(page1_hits) == 1
+    assert page1_hits[0].page_content == "chunk 1 body (the summary)"
+
+
+def test_search_titles_breaks_score_ties_deterministically(tmp_path):
+    """Two pages with identical titles score identically; ordering must not
+    depend on incidental dict/insertion order."""
+    rows = [
+        _row("body", title="Alpha Beta", url="pageB", section_id="b1"),
+        _row("body", title="Alpha Beta", url="pageA", section_id="a1"),
+    ]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    results = index.search_titles("Alpha Beta", k=5)
+    assert [r.metadata["url"] for r in results] == ["pageA", "pageB"]
+
+
+def test_search_titles_applies_module_filter(tmp_path):
+    rows = [
+        _row("body", title="Alpha", module="SHAPER", url="u1", section_id="s1"),
+        _row("body", title="Alpha", module="GEOM", url="u2", section_id="s2"),
+    ]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    results = index.search_titles("Alpha", k=5, module_filter="GEOM")
+    assert [r.metadata["url"] for r in results] == ["u2"]
+
+
+def test_search_titles_applies_doc_category_filter(tmp_path):
+    rows = [
+        _row("body", title="Alpha", doc_category="dev", url="u1", section_id="s1"),
+        _row("body", title="Alpha", doc_category="user", url="u2", section_id="s2"),
+    ]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    results = index.search_titles("Alpha", k=5, doc_category_filter="user")
+    assert [r.metadata["url"] for r in results] == ["u2"]
+
+
+def test_search_titles_respects_k_limit(tmp_path):
+    rows = [_row("body", title=f"Alpha Page {i}", url=f"u{i}", section_id=f"s{i}") for i in range(5)]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    results = index.search_titles("Alpha", k=2)
+    assert len(results) == 2
+
+
+def test_search_titles_empty_corpus_returns_empty_list(tmp_path):
+    path = _write_jsonl(tmp_path, [])
+    index = BM25Index(str(path))
+    assert index.search_titles("anything", k=5) == []

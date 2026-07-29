@@ -55,9 +55,26 @@ class ChatbotConfig:
     # Retrieval parameters
     k_standard: int = 40
     k_deep_dive: int = 60
+    # Per-channel retrieval depth (how many candidates the vector retriever and BM25 each
+    # fetch before fusion), decoupled from k_standard/k_deep_dive (the reranker pool size —
+    # what RRF's fused output is truncated to). None means "old behaviour": per-channel
+    # depth equals the pool size. Reciprocal rank fusion merges two k-length lists and
+    # truncates back to k, so each channel effectively contributes only ~k/2 of its
+    # candidates to the pool — a doc ranked outside that in only one channel never
+    # reaches reranking even if a deeper look would have found it. Setting k_retrieve
+    # deeper than the pool (e.g. 80 vs a 40 pool) fixes that without growing reranker
+    # cost, which tracks the pool size, not this value.
+    k_retrieve: Optional[int] = None
     deep_dive_batch_size: int = 10
     top_n_after_rerank: int = 15    # docs to keep after cross-encoder reranking
     bm25_enabled: bool = False      # opt-in BM25 hybrid retrieval (fused with vector search via RRF)
+    # opt-in third RRF list: BM25 over chunk TITLES only, collapsed to one hit per page.
+    # A question naming a class/identifier is an entity lookup, not a semantic search — the
+    # identifier is one token among the ~100+ of a chunk body but the whole of a page's
+    # title, so this channel is far more precise for "what does class X do" style questions.
+    # The title index lives inside BM25Index, so this requires bm25_enabled's index to be
+    # loaded; it has no effect on its own.
+    title_boost_enabled: bool = False
     hyde_enabled: bool = False      # opt-in HyDE: embed an LLM-written hypothetical passage instead of the raw question
     smol_enabled: bool = False      # opt-in agentic-smol mode (smolagents CodeAgent multi-hop). Requires agentic block too.
 
@@ -118,9 +135,9 @@ class ChatbotConfig:
         data = {k: v for k, v in data.items() if not k.startswith("_")}
 
         # Known top-level keys (scalars + nested blocks)
-        scalar_keys = {"project_name", "chromadb_path", "k_standard", "k_deep_dive",
+        scalar_keys = {"project_name", "chromadb_path", "k_standard", "k_deep_dive", "k_retrieve",
                        "deep_dive_batch_size", "top_n_after_rerank", "temperature", "max_tokens",
-                       "bm25_enabled", "hyde_enabled", "smol_enabled"}
+                       "bm25_enabled", "title_boost_enabled", "hyde_enabled", "smol_enabled"}
         nested_keys = {"llm", "embedding", "reranker", "agentic"}
         valid_keys = scalar_keys | nested_keys
         invalid = set(data.keys()) - valid_keys

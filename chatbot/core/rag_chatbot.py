@@ -194,21 +194,76 @@ Passage:"""
             print(f"Warning: HyDE passage generation failed ({e}) — falling back to raw question")
             return question
 
+    # Title channel size: how many page-level hits search_titles() contributes to
+    # fusion. Kept far shallower than retrieve_k (10 vs. e.g. 80) because the title
+    # channel is high-precision/low-recall by construction — few pages share an
+    # exact identifier, so there is little to gain from searching it deep, and a
+    # short list keeps an unrelated but token-overlapping title from crowding the
+    # fused pool. See _hybrid_retrieve's docstring for the full rationale.
+    _TITLE_CHANNEL_K = 10
+
     def _hybrid_retrieve(self, query: str, vector_docs: List, k: int,
                          module_filter: Optional[str], doc_category_filter: Optional[str],
-                         bm25_enabled: bool = True) -> List:
+                         bm25_enabled: bool = True, retrieve_k: Optional[int] = None,
+                         title_boost_enabled: bool = False) -> List:
         """
-        Fuse BM25 keyword search results with the vector retriever's results via RRF.
-        Returns vector_docs unchanged when no BM25 index is loaded or when
-        bm25_enabled is False (runtime toggle from the UI).
+        Fuse the vector retriever's results with BM25 keyword search and, optionally,
+        a title/identifier search, via Reciprocal Rank Fusion (RRF).
+
+        Two k's, two jobs:
+          - retrieve_k: how deep BM25 (and, via the caller's search_kwargs, the
+            vector retriever) searches before fusion. Defaults to k when unset,
+            reproducing the historical behaviour where one number did both jobs.
+          - k: the fused pool size handed onward to reranking — the pre-existing
+            k_standard/k override semantics, unchanged.
+          Splitting them matters because reciprocal_rank_fusion(lists, k) merges
+          k-length lists and truncates the result back to k: a doc appearing in
+          only one channel effectively gets ~k/2 of headroom before it is cut.
+          Measured on the SHAPER corpus: a target chunk sat at dense rank 46-47
+          and BM25 rank 44 — inside both channels' top-60/80 — and still missed
+          the fused pool when retrieval depth equalled the pool size. Searching
+          deeper per channel while keeping k fixed fixes that without growing
+          reranker cost, which tracks k, not retrieve_k.
+
+        Title channel (gated by title_boost_enabled): a question naming a class
+        ("What are the public methods of the ModelAPI_Feature class?") is an
+        entity lookup, not a semantic search. The discriminating identifier is
+        one token among ~150 in a chunk's body — diluted further in corpora with
+        Doxygen inherited-member copies, where every subclass page's memitems
+        repeat the parent class's name (measured: 1,796 chunk bodies vs. 112
+        chunk titles contain the same identifier, 16x sharper) — but it is the
+        *entire* title of the page that declares it. RRF only looks at rank, not
+        score, so even a short, high-precision title list can out-rank a
+        body/dense channel where the same page is buried at rank 40+.
+        BM25Index.search_titles() collapses each page's chunks to one hit before
+        this ever sees them.
+
+        Returns vector_docs unchanged when no BM25 index is loaded, or when
+        neither bm25_enabled nor title_boost_enabled contribute anything to fuse
+        (preserves the original list, including its identity, for callers that
+        compare by ==).
         """
-        if self.bm25_index is None or not bm25_enabled:
+        if self.bm25_index is None:
             return vector_docs
 
-        bm25_docs = self.bm25_index.search(
-            query, k=k, module_filter=module_filter, doc_category_filter=doc_category_filter,
-        )
-        return reciprocal_rank_fusion([vector_docs, bm25_docs], k=k)
+        effective_retrieve_k = retrieve_k if retrieve_k is not None else k
+
+        ranked_lists = [vector_docs]
+
+        if bm25_enabled:
+            ranked_lists.append(self.bm25_index.search(
+                query, k=effective_retrieve_k, module_filter=module_filter, doc_category_filter=doc_category_filter,
+            ))
+
+        if title_boost_enabled:
+            ranked_lists.append(self.bm25_index.search_titles(
+                query, k=self._TITLE_CHANNEL_K, module_filter=module_filter, doc_category_filter=doc_category_filter,
+            ))
+
+        if len(ranked_lists) == 1:
+            return vector_docs
+
+        return reciprocal_rank_fusion(ranked_lists, k=k)
 
     @staticmethod
     def _declaring_page_names(hierarchy: str) -> set:
@@ -362,7 +417,8 @@ Answer (based strictly on the documentation above):"""
                      reranker_enabled: bool = True,
                      top_n: Optional[int] = None,
                      hyde_enabled: Optional[bool] = None,
-                     bm25_enabled: Optional[bool] = None):
+                     bm25_enabled: Optional[bool] = None,
+                     title_boost_enabled: Optional[bool] = None):
         """
         Create RAG chain with optional filtering
 
@@ -377,6 +433,8 @@ Answer (based strictly on the documentation above):"""
             top_n: Override docs kept after reranking
             hyde_enabled: Runtime toggle for HyDE (None = whatever was configured)
             bm25_enabled: Runtime toggle for BM25 hybrid retrieval (None = whatever was configured)
+            title_boost_enabled: Runtime toggle for the title/identifier RRF channel
+                (None = whatever was configured)
 
         Returns:
             Tuple of (chain, retriever, source_docs_holder). source_docs_holder is a
@@ -386,13 +444,27 @@ Answer (based strictly on the documentation above):"""
         # Set k based on priority: runtime override > deep_dive mode > config default
         if k is None:
             k = self.config.k_deep_dive if deep_dive else self.config.k_standard
-        search_kwargs = {"k": k}
+
+        # retrieve_k decouples per-channel search depth from k (the reranker pool).
+        # Deep dive deliberately keeps using k unchanged — it bypasses this whole
+        # rerank/BM25/title pipeline and retrieves+summarizes directly, so there is
+        # no fusion step here for a deeper per-channel search to feed.
+        retrieve_k = k
+        if not deep_dive and self.config.k_retrieve is not None:
+            retrieve_k = self.config.k_retrieve
+        search_kwargs = {"k": retrieve_k}
 
         effective_hyde = hyde_enabled if hyde_enabled is not None else (self.hyde_llm is not None)
         effective_hyde = effective_hyde and self.hyde_llm is not None
 
         effective_bm25 = bm25_enabled if bm25_enabled is not None else (self.bm25_index is not None)
         effective_bm25 = effective_bm25 and self.bm25_index is not None
+
+        # Unlike bm25/hyde, no dedicated object's nullity encodes "config enabled this
+        # at startup" — the title index lives inside bm25_index regardless of this flag.
+        # So the startup gate is config.title_boost_enabled itself, not an object check.
+        effective_title_boost = title_boost_enabled if title_boost_enabled is not None else True
+        effective_title_boost = effective_title_boost and self.config.title_boost_enabled and self.bm25_index is not None
 
         if deep_dive:
             # Deep dive uses its own retrieve-and-summarize path, so the whole
@@ -404,6 +476,8 @@ Answer (based strictly on the documentation above):"""
                 skipped.append("HyDE")
             if effective_bm25:
                 skipped.append("BM25 hybrid retrieval")
+            if effective_title_boost:
+                skipped.append("title/identifier channel")
             if skipped:
                 print(f"Note: deep_dive=True — {', '.join(skipped)} skipped in deep dive mode.")
 
@@ -485,6 +559,8 @@ Answer (based strictly on the documentation above):"""
                     module_filter=module_filter if module_filter and module_filter != "All" else None,
                     doc_category_filter=doc_type_filter.lower() if doc_type_filter and doc_type_filter != "All" else None,
                     bm25_enabled=effective_bm25,
+                    retrieve_k=retrieve_k,
+                    title_boost_enabled=effective_title_boost,
                 )
                 reranked = self._rerank_and_expand(
                     question, raw_docs,
@@ -517,7 +593,8 @@ Answer (based strictly on the documentation above):"""
             reranker_enabled: bool = True,
             top_n: Optional[int] = None,
             hyde_enabled: Optional[bool] = None,
-            bm25_enabled: Optional[bool] = None) -> Dict[str, Any]:
+            bm25_enabled: Optional[bool] = None,
+            title_boost_enabled: Optional[bool] = None) -> Dict[str, Any]:
         """
         Ask a question and get an answer with sources
 
@@ -533,6 +610,8 @@ Answer (based strictly on the documentation above):"""
             top_n: Override docs kept after reranking
             hyde_enabled: Runtime toggle for HyDE (None = whatever was configured)
             bm25_enabled: Runtime toggle for BM25 hybrid retrieval (None = whatever was configured)
+            title_boost_enabled: Runtime toggle for the title/identifier RRF channel
+                (None = whatever was configured)
 
         Returns:
             Dict with:
@@ -572,13 +651,23 @@ Answer (based strictly on the documentation above):"""
         want_rerank = reranker_enabled and self.reranker is not None
         want_hyde = (hyde_enabled if hyde_enabled is not None else True) and self.hyde_llm is not None
         want_bm25 = (bm25_enabled if bm25_enabled is not None else True) and self.bm25_index is not None
+        # No dedicated object's nullity encodes "title boost was enabled at startup"
+        # (the title index lives inside bm25_index regardless of this flag), so the
+        # startup gate is config.title_boost_enabled itself — see _create_chain.
+        want_title_boost = (
+            (title_boost_enabled if title_boost_enabled is not None else True)
+            and self.config.title_boost_enabled
+            and self.bm25_index is not None
+        )
         filters['reranker'] = want_rerank and not deep_dive
         filters['hyde'] = want_hyde and not deep_dive
         filters['bm25'] = want_bm25 and not deep_dive
-        if deep_dive and (want_rerank or want_hyde or want_bm25):
+        filters['title_boost'] = want_title_boost and not deep_dive
+        if deep_dive and (want_rerank or want_hyde or want_bm25 or want_title_boost):
             filters['bypassed_by_deep_dive'] = [
                 name for name, wanted in
-                (('reranker', want_rerank), ('hyde', want_hyde), ('bm25', want_bm25))
+                (('reranker', want_rerank), ('hyde', want_hyde), ('bm25', want_bm25),
+                 ('title_boost', want_title_boost))
                 if wanted
             ]
 
@@ -589,6 +678,7 @@ Answer (based strictly on the documentation above):"""
                 k=k, temperature=temperature, max_tokens=max_tokens,
                 reranker_enabled=reranker_enabled, top_n=top_n,
                 hyde_enabled=hyde_enabled, bm25_enabled=bm25_enabled,
+                title_boost_enabled=title_boost_enabled,
             )
             answer = chain.invoke(question)
             # Reuse docs already retrieved+reranked inside the standard chain.

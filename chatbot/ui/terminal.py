@@ -29,6 +29,10 @@ class TerminalUI:
         has_reranker = self.chatbot.reranker is not None
         has_hyde = self.chatbot.hyde_llm is not None
         has_bm25 = self.chatbot.bm25_index is not None
+        # No dedicated object gates this one (the title index lives inside bm25_index
+        # regardless of the flag) — availability is config.title_boost_enabled plus an
+        # index actually being loaded to search titles against.
+        has_title_boost = self.chatbot.config.title_boost_enabled and has_bm25
         print("=" * 70)
         print(f"{project} Documentation Chatbot")
         print("=" * 70)
@@ -38,6 +42,7 @@ class TerminalUI:
         # off (or silently unavailable) is invisible until you read the config.
         stages = []
         stages.append(f"BM25 hybrid: {'on' if has_bm25 else 'off'}")
+        stages.append(f"title boost: {'on' if has_title_boost else 'off'}")
         stages.append(f"HyDE: {'on' if has_hyde else 'off'}")
         stages.append(f"reranker: {'on' if has_reranker else 'off'}")
         print(f"Retrieval:  {' · '.join(stages)}")
@@ -100,7 +105,8 @@ class TerminalUI:
                 print(f"Note: {', '.join(bypassed)} skipped — Deep Dive uses its own retrieval path")
             else:
                 stages = [name for key, name in
-                          (('bm25', 'BM25 hybrid'), ('hyde', 'HyDE'), ('reranker', 'reranker'))
+                          (('bm25', 'BM25 hybrid'), ('title_boost', 'title boost'),
+                           ('hyde', 'HyDE'), ('reranker', 'reranker'))
                           if filters.get(key)]
                 if stages:
                     print(f"Retrieval: {' + '.join(stages)}")
@@ -174,6 +180,9 @@ class TerminalUI:
         reranker_enabled = self.chatbot.reranker is not None
         hyde_enabled = self.chatbot.hyde_llm is not None
         bm25_enabled = self.chatbot.bm25_index is not None
+        # No runtime toggle for this one (see chatbot.ask()'s title_boost_enabled
+        # param) — it is config-only for now, so "active" just mirrors availability.
+        title_boost_active = self.chatbot.config.title_boost_enabled and self.chatbot.bm25_index is not None
         top_n_override = None
         agentic_chars_override = None
         agentic_pages1_override = None
@@ -326,6 +335,7 @@ class TerminalUI:
                             # currently-active stages it will bypass instead of silently dropping them.
                             skipped = [name for active, name in
                                        ((bm25_enabled, "BM25 hybrid retrieval"),
+                                        (title_boost_active, "title/identifier boost"),
                                         (hyde_enabled, "HyDE"),
                                         (reranker_enabled, "reranking"))
                                        if active]
