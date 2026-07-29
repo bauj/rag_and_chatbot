@@ -33,7 +33,7 @@
   "k_standard": 40,
   "k_deep_dive": 60,
   "k_retrieve": null,
-  "_comment_k_retrieve": "Per-channel retrieval depth: how many candidates each channel (dense vector search, BM25) fetches BEFORE fusion, decoupled from the reranker pool size (k_standard/k_deep_dive/top_n_after_rerank). Reciprocal Rank Fusion truncates its merged output back to the pool size, so when k_retrieve equals the pool size (or is null), each channel effectively contributes only ~half its candidates to the fused pool — a recall leak for anything ranked outside the top ~k/2 in only one channel. Setting it deeper than the pool (e.g. 80 vs a 40 pool) closes that without growing reranker cost, which is driven by the pool size, not this value. Ships as null (per-channel depth equals the pool size) because the leak is real in theory but unproven in practice: on the only dataset measured so far, depth 80 against a 40 pool changed recall on 0 of 17 questions.",
+  "_comment_k_retrieve": "Per-channel retrieval depth: how many candidates each channel (dense vector search, BM25) fetches BEFORE fusion, decoupled from the reranker pool size (k_standard/k_deep_dive). Reciprocal Rank Fusion truncates its merged output back to the pool size, so when this is null each channel effectively contributes only ~half its candidates. Setting it deeper than the pool (e.g. 80 vs a 40 pool) widens recall without growing reranker cost, which tracks pool size. null = per-channel depth equals the pool size.",
   "deep_dive_batch_size": 10,
   "top_n_after_rerank": 15,
   "_comment_top_n": "Docs kept after cross-encoder reranking. Only used when reranker is enabled.",
@@ -41,11 +41,11 @@
   "temperature": 0.0,
   "max_tokens": 2000,
 
-  "bm25_enabled": false,
-  "_comment_bm25_enabled": "Opt-in BM25 keyword search fused with vector search via Reciprocal Rank Fusion. Requires <project_name>_docs.jsonl next to chromadb_path (produced by extraction).",
+  "bm25_enabled": true,
+  "_comment_bm25_enabled": "BM25 keyword search fused with vector search via Reciprocal Rank Fusion. Requires <project_name>_docs.jsonl next to chromadb_path (produced by extraction); if that file is missing the chatbot warns at startup and falls back to pure vector search. Set false to A/B against pure vector search.",
 
-  "title_boost_enabled": false,
-  "_comment_title_boost_enabled": "Opt-in third RRF list: BM25 keyword search over chunk TITLES only (not bodies), collapsed to one hit per page. A question naming a class/identifier is an entity lookup — the identifier is one token among ~150 in a chunk body but the whole of a page's title, so this channel is far more precise for 'what does class X do' style questions than body BM25 or dense search alone. Requires bm25_enabled: true (the title index is built alongside the body index in the same BM25Index).",
+  "title_boost_enabled": true,
+  "_comment_title_boost_enabled": "Third RRF list: BM25 over chunk TITLES only, collapsed to one hit per page. A question naming a class or identifier is an entity lookup — that token is one of ~150 in a chunk body but the whole of a page's title, so this channel is far more precise for 'what does X do' questions than body BM25 or dense search. Requires bm25_enabled. Set false if your pages have uniform or repeated titles, where it degrades to injecting arbitrary pages into the rerank pool.",
 
   "hyde_enabled": false,
   "_comment_hyde_enabled": "Opt-in HyDE: before vector search, an LLM writes a short hypothetical documentation passage and that passage (not your literal question) is embedded and searched. Helps when questions are phrased very differently from the docs. BM25 and reranking still use the real question. Costs one extra LLM call per question."
