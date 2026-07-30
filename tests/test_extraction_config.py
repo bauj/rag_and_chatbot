@@ -130,7 +130,7 @@ def test_extract_sections_with_soup_user_uses_role_main():
 
 
 def test_process_file_chunks_have_section_metadata(tmp_path):
-    """Each chunk produced by process_file must carry section_id and section_text."""
+    """Each chunk carries section_id; section_text is no longer duplicated into it."""
     html_content = """<!DOCTYPE html>
 <html>
 <head><title>Test Page</title></head>
@@ -156,8 +156,38 @@ at least one chunk of documentation content for testing purposes here.</p>
     assert len(chunks) > 0
     for chunk in chunks:
         assert 'section_id' in chunk.metadata
-        assert 'section_text' in chunk.metadata
+        assert 'section_text' not in chunk.metadata
 
     # Two sections in the HTML — at least 2 unique section_ids
     section_ids = {c.metadata['section_id'] for c in chunks}
     assert len(section_ids) >= 2
+
+
+# ---------------------------------------------------------------------------
+# section_text used to be copied into EVERY chunk of its section and capped at
+# 5,000 chars to contain the resulting bloat (measured on the SHAPER corpus:
+# 4.4 MB of chunk content carrying 9.5 MB of duplicated section_text). The cap
+# made half the class summaries unanswerable in full — a 60-method class was
+# expanded back to its first ~6 methods. The chatbot now rebuilds a section
+# from its own chunks, so the copy is redundant and the cap is gone; what the
+# chunks must guarantee instead is that they cover the whole section.
+# ---------------------------------------------------------------------------
+
+def test_process_file_chunks_cover_a_section_longer_than_the_old_5000_char_cap(tmp_path):
+    """A long section must be fully recoverable from its chunks, uncapped."""
+    body = " ".join(f"paragraph{i} describes behaviour number {i} in detail." for i in range(400))
+    html_file = tmp_path / "long.html"
+    html_file.write_text(
+        f'<!DOCTYPE html><html><head><title>Long Page</title></head>'
+        f'<body><div class="contents"><h2>Big Section</h2><p>{body}</p></div></body></html>'
+    )
+
+    from process_docs import DocumentationProcessor
+    processor = DocumentationProcessor(project_name="test_proj")
+    processor.quality_threshold = 0.0
+    chunks = processor.process_file(html_file, "MOD", "dev")
+
+    joined = " ".join(c.content for c in chunks)
+    assert len(body) > 5000, "fixture must exceed the old cap to be meaningful"
+    assert "paragraph399" in joined
+    assert "paragraph0 " in joined

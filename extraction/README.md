@@ -134,8 +134,8 @@ Content extraction (format-specific parsers, navigation removed)
         ↓
 Dev-category pages with Doxygen memitems → one chunk per documented symbol
 (class/method/function), see "Per-symbol Doxygen chunking" below.
-All other pages → section splitting (h2/h3 boundaries → section_id +
-section_text stored in metadata)
+All other pages → section splitting (h2/h3 boundaries → section_id; the
+chatbot rebuilds a whole section from the chunks sharing its section_id)
         ↓
 Code blocks (<pre>, Doxygen div.fragment) → converted to fenced Markdown via
 markdownify, preserved inline in chunk text (not just stripped/stored separately)
@@ -188,7 +188,6 @@ Each chunk stored in ChromaDB includes:
 | `title` | Document title | `"FeatureAPI Class Reference"` |
 | `parent_doc_id` | Source document ID | `"MODULE_A:dev:FeatureAPI"` |
 | `section_id` | Section anchor within the page | `"classFeatureAPI#createFeature"` |
-| `section_text` | Full section text (up to 5000 chars, for reranker expansion) | `"createFeature(...)..."` |
 | `chunk_position` | Position within parent | `"3/7"` |
 | `quality_score` | Content quality (0–1) | `0.85` |
 | `has_code` | Contains code blocks | `true` |

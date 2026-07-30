@@ -1,3 +1,4 @@
+import json
 import sys
 from unittest.mock import MagicMock
 
@@ -15,14 +16,18 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.prompts import PromptTemplate
 
 
-def _bare_chatbot(bm25_index=None):
+def _bare_chatbot(bm25_index=None, jsonl_path="/nonexistent/corpus.jsonl"):
     """
     Build a DocumentationChatbot instance without running __init__ (which
     loads a real ChromaDB + LLM). Only sets the attributes _hybrid_retrieve needs.
+
+    jsonl_path defaults to a path that does not exist, so section reconstruction
+    finds no corpus unless a test deliberately supplies one.
     """
     from core.rag_chatbot import DocumentationChatbot
     bot = DocumentationChatbot.__new__(DocumentationChatbot)
     bot.bm25_index = bm25_index
+    bot.config = MagicMock(bm25_jsonl_path=jsonl_path)
     return bot
 
 
@@ -648,10 +653,11 @@ def _memitem(page: str, anchor: str, hierarchy: str, content: str = "inherited d
     )
 
 
-def _rerank_bot(scores=None):
+def _rerank_bot(scores=None, bm25_index=None, jsonl_path="/nonexistent/corpus.jsonl"):
     """Chatbot stub whose reranker scores docs in the order they are given."""
-    bot = _bare_chatbot()
-    bot.config = MagicMock(top_n_after_rerank=15)
+    bot = _bare_chatbot(bm25_index=bm25_index, jsonl_path=jsonl_path)
+    bot.config = MagicMock(top_n_after_rerank=15, expansion_char_budget=60000,
+                           bm25_jsonl_path=jsonl_path)
     bot.reranker = MagicMock()
     if scores is None:
         bot.reranker.predict = lambda pairs: [float(len(pairs) - i) for i in range(len(pairs))]
@@ -766,3 +772,193 @@ def test_dedup_applies_when_no_reranker_is_configured():
     result = bot._rerank_and_expand("q", docs)
 
     assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# Full-section reconstruction from the corpus rows (#107)
+#
+# A page-level class summary larger than the chunk size is split into many
+# chunks that all share one section_id, so section dedup keeps exactly one of
+# them, and the repair mechanism — expansion to metadata['section_text'] — is
+# capped at 5,000 chars by the extractor. For 51% of class pages the model
+# therefore sees only the head of the summary and answers as if that were the
+# whole API. The chatbot already holds every chunk in memory for BM25, so the
+# section can be rebuilt from those rows instead, uncapped and with no
+# re-extraction. Fragments overlap by the chunker's overlap window and each
+# summary fragment repeats the page title, so both must be removed on the join.
+# ---------------------------------------------------------------------------
+
+def _corpus_rows(section_id, title, bodies):
+    """JSONL-shaped rows for one section, one per fragment."""
+    total = len(bodies)
+    return [
+        {
+            "title": title,
+            "content": f"{title}\n\n{body}",
+            "url": section_id.split("#")[0],
+            "metadata": {
+                "section_id": section_id,
+                "chunk_position": f"{i + 1}/{total}",
+                "section_text": "capped",
+            },
+        }
+        for i, body in enumerate(bodies)
+    ]
+
+
+class _FakeCorpus:
+    """Stands in for BM25Index — only .rows is needed to rebuild a section."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+
+def test_full_section_text_joins_fragments_stripping_the_chunker_overlap():
+    sid = "https://docs.example.org/classA.html#__summary"
+    rows = _corpus_rows(sid, "A Class Reference",
+                        ["alpha beta", "beta gamma", "gamma delta"])
+
+    bot = _bare_chatbot(bm25_index=_FakeCorpus(rows))
+
+    assert bot._full_section_text(sid) == "A Class Reference\n\nalpha beta gamma delta"
+
+
+def test_full_section_text_orders_fragments_by_chunk_position():
+    """Corpus order is not guaranteed; 10/11 must not sort before 2/11."""
+    sid = "https://docs.example.org/classA.html#__summary"
+    rows = _corpus_rows(sid, "A", ["one ", "two ", "three "] + [f"{i} " for i in range(4, 12)])
+    shuffled = list(reversed(rows))
+
+    bot = _bare_chatbot(bm25_index=_FakeCorpus(shuffled))
+
+    assert bot._full_section_text(sid) == "A\n\none two three 4 5 6 7 8 9 10 11"
+
+
+def test_full_section_text_returns_empty_for_an_unknown_section():
+    bot = _bare_chatbot(bm25_index=_FakeCorpus(_corpus_rows("s1", "A", ["x"])))
+
+    assert bot._full_section_text("https://docs.example.org/other.html#__summary") == ""
+
+
+def test_full_section_text_returns_empty_when_the_corpus_file_is_missing():
+    """No BM25 index and no JSONL on disk: expansion degrades, never raises."""
+    bot = _bare_chatbot(bm25_index=None, jsonl_path="/nonexistent/corpus.jsonl")
+
+    assert bot._full_section_text("s1") == ""
+
+
+def test_rerank_expands_a_summary_past_the_5000_char_cap():
+    """The whole summary must reach the LLM, not the first 5,000 chars of it."""
+    sid = "https://docs.example.org/classModelAPI__Feature.html#__summary"
+    bodies = [f"method{i}() does thing {i}. " * 40 for i in range(11)]
+    rows = _corpus_rows(sid, "ModelAPI_Feature Class Reference", bodies)
+
+    doc = Document(
+        page_content=rows[0]["content"],
+        metadata={"url": sid.split("#")[0], "section_id": sid, "chunk_position": "1/11",
+                  "section_text": "TRUNCATED HEAD"},
+    )
+
+    bot = _rerank_bot(bm25_index=_FakeCorpus(rows))
+    result = bot._rerank_and_expand("q", [doc])
+
+    assert len(result) == 1
+    assert len(result[0].page_content) > 5000
+    assert "method10()" in result[0].page_content
+
+
+def test_rerank_falls_back_to_section_text_when_the_section_is_not_in_the_corpus():
+    """Old ChromaDB indexes and bm25-disabled runs must keep working unchanged."""
+    doc = Document(
+        page_content="head",
+        metadata={"url": "https://docs.example.org/a.html", "section_id": "s1",
+                  "chunk_position": "1/2", "section_text": "the capped section text"},
+    )
+
+    bot = _rerank_bot(bm25_index=None)
+    result = bot._rerank_and_expand("q", [doc])
+
+    assert result[0].page_content == "the capped section text"
+
+
+def test_rerank_stops_expanding_once_the_char_budget_is_spent():
+    """A 54k-char section must not be able to blow the context window open."""
+    rows = []
+    docs = []
+    for i in range(3):
+        sid = f"https://docs.example.org/page{i}.html#__summary"
+        rows += _corpus_rows(sid, f"Page {i}", [f"body{i} " * 500])
+        docs.append(Document(
+            page_content=f"head{i}",
+            metadata={"url": sid.split("#")[0], "section_id": sid,
+                      "chunk_position": "1/1", "section_text": f"short{i}"},
+        ))
+
+    bot = _rerank_bot(bm25_index=_FakeCorpus(rows))
+    bot.config = MagicMock(top_n_after_rerank=15, expansion_char_budget=4000)
+    result = bot._rerank_and_expand("q", docs)
+
+    assert len(result) == 3
+    assert len(result[0].page_content) > 1000        # first one expanded
+    assert result[2].page_content == "short2"        # budget spent, falls back
+
+
+# ---------------------------------------------------------------------------
+# Section reconstruction must not depend on BM25 (#107, option 1)
+#
+# Expansion reads the corpus, not metadata: the extractor no longer duplicates
+# section_text into every chunk. The corpus is the same JSONL the BM25 index is
+# built from, but expansion is a retrieval-independent concern — a run with
+# bm25_enabled=False still has to expand its survivors — so the rows are loaded
+# from the configured path when no BM25 index is in memory to borrow them from.
+# ---------------------------------------------------------------------------
+
+def _write_corpus(tmp_path, rows):
+    path = tmp_path / "corpus.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    return str(path)
+
+
+def test_full_section_text_loads_the_corpus_when_bm25_is_disabled(tmp_path):
+    sid = "https://docs.example.org/classA.html#__summary"
+    path = _write_corpus(tmp_path, _corpus_rows(sid, "A", ["alpha beta", "beta gamma"]))
+
+    bot = _bare_chatbot(bm25_index=None, jsonl_path=path)
+
+    assert bot._full_section_text(sid) == "A\n\nalpha beta gamma"
+
+
+def test_full_section_text_prefers_the_loaded_bm25_rows_over_rereading_the_file(tmp_path):
+    """The BM25 index already holds the corpus; don't parse it a second time."""
+    sid = "https://docs.example.org/classA.html#__summary"
+    path = _write_corpus(tmp_path, _corpus_rows(sid, "A", ["from disk"]))
+    in_memory = _FakeCorpus(_corpus_rows(sid, "A", ["from memory"]))
+
+    bot = _bare_chatbot(bm25_index=in_memory, jsonl_path=path)
+
+    assert bot._full_section_text(sid) == "A\n\nfrom memory"
+
+
+def test_rerank_expands_from_the_corpus_with_bm25_disabled(tmp_path):
+    """The end of the chain that broke when section_text left the metadata."""
+    sid = "https://docs.example.org/classA.html#__summary"
+    path = _write_corpus(tmp_path, _corpus_rows(sid, "A", ["alpha beta", "beta gamma"]))
+    doc = Document(page_content="A\n\nalpha beta",
+                   metadata={"url": sid.split("#")[0], "section_id": sid, "chunk_position": "1/2"})
+
+    bot = _rerank_bot(bm25_index=None, jsonl_path=path)
+    result = bot._rerank_and_expand("q", [doc])
+
+    assert result[0].page_content == "A\n\nalpha beta gamma"
+
+
+def test_rerank_leaves_docs_unchanged_when_no_corpus_and_no_section_text():
+    """Post-#107 corpora carry no metadata copy; a missing corpus must not raise."""
+    doc = Document(page_content="just the chunk",
+                   metadata={"url": "https://docs.example.org/a.html", "section_id": "s1",
+                             "chunk_position": "1/2"})
+
+    bot = _rerank_bot(bm25_index=None)
+    result = bot._rerank_and_expand("q", [doc])
+
+    assert result[0].page_content == "just the chunk"

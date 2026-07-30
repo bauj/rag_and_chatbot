@@ -728,7 +728,6 @@ class DocumentationProcessor:
                             'chunk_position': f"{i+1}/{len(summary_chunks)}",
                             'parent_doc_id': parent_doc_id,
                             'section_id': f"{section_prefix}#__summary",
-                            'section_text': f"{summary_header}\n\n{class_summary}"[:5000],
                             'source': f'{self.project_name} {module_name} {doc_category.title()} Documentation',
                             'file': rel_path,
                             'module_description': self.MODULE_INFO.get(module_name, {}).get('description', ''),
@@ -775,7 +774,6 @@ class DocumentationProcessor:
                             'chunk_position': f"{i+1}/{len(text_chunks)}",
                             'parent_doc_id': parent_doc_id,
                             'section_id': section_id,
-                            'section_text': text_to_chunk[:5000],
                             'source': f'{self.project_name} {module_name} {doc_category.title()} Documentation',
                             'file': rel_path,
                             'module_description': self.MODULE_INFO.get(module_name, {}).get('description', ''),
@@ -807,9 +805,6 @@ class DocumentationProcessor:
                 normalized = re.sub(r'[^\w]', '_', raw_id.lower())[:50]
                 section_id = f"{prefix}#{normalized}"
 
-                # Cap section_text stored in metadata to avoid bloating ChromaDB
-                stored_section_text = section_text[:5000]
-
                 text_chunks = self.chunk_text(text_to_chunk)
 
                 for i, chunk_text_content in enumerate(text_chunks):
@@ -834,7 +829,6 @@ class DocumentationProcessor:
                             'chunk_position': f"{i+1}/{len(text_chunks)}",
                             'parent_doc_id': parent_doc_id,
                             'section_id': section_id,
-                            'section_text': stored_section_text,
                             'source': f'{self.project_name} {module_name} {doc_category.title()} Documentation',
                             'file': rel_path,
                             'module_description': self.MODULE_INFO.get(module_name, {}).get('description', ''),
@@ -1028,7 +1022,6 @@ class DocumentationProcessor:
                         'quality_score': chunk.metadata.get('quality_score', 0.0),
                         'has_code': chunk.metadata.get('has_code', False),
                         'section_id': chunk.metadata.get('section_id', ''),
-                        'section_text': chunk.metadata.get('section_text', ''),
                     })
                     batch_ids.append(f"{i + idx:06d}")
 

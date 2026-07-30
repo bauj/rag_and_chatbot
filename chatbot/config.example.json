@@ -37,6 +37,8 @@
   "deep_dive_batch_size": 10,
   "top_n_after_rerank": 15,
   "_comment_top_n": "Docs kept after cross-encoder reranking. Only used when reranker is enabled.",
+  "expansion_char_budget": 60000,
+  "_comment_expansion_char_budget": "Total characters parent-section expansion may add across all surviving docs. Each survivor is expanded from the chunk that was retrieved to the full text of its section, rebuilt from the corpus JSONL (uncapped). This budget stops one very large page — SHAPER's biggest section is ~55,000 chars — from crowding the context window; sections that no longer fit are left as the retrieved chunk.",
 
   "temperature": 0.0,
   "max_tokens": 2000,
