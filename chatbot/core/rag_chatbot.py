@@ -441,123 +441,6 @@ Passage:"""
 
         return LCDocument(page_content=text, metadata=doc.metadata), len(text)
 
-    def _rerank_and_expand(self, query: str, docs: List,
-                           reranker_enabled: bool = True,
-                           top_n: Optional[int] = None) -> List:
-        """
-        Every chunk of the corpus, as written by the extraction pipeline.
-
-        Borrowed from the BM25 index when one is loaded, since that is the same JSONL
-        parsed already. Expansion is not a retrieval concern, though — a bm25_enabled
-        =False run still has to expand its survivors — so the file is read directly
-        when there is no index to borrow from. A missing file yields no rows, which
-        degrades expansion to "leave the chunk as retrieved" rather than raising.
-        """
-        index = getattr(self, 'bm25_index', None)
-        if index is not None:
-            return getattr(index, 'rows', [])
-
-        path = Path(self.config.bm25_jsonl_path)
-        if not path.is_absolute():
-            path = (Path(__file__).parent.parent / path).resolve()
-        if not path.exists():
-            return []
-
-        rows = []
-        with open(path, encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    rows.append(json.loads(line))
-        return rows
-
-    def _section_rows(self) -> dict:
-        """
-        Map section_id -> its chunks, ordered by chunk_position, built once from the
-        corpus. Empty when no corpus is available.
-        """
-        cached = getattr(self, '_section_rows_cache', None)
-        if cached is not None:
-            return cached
-
-        rows: dict = {}
-        for row in self._corpus_rows():
-            section_id = row.get('metadata', {}).get('section_id', '')
-            if section_id:
-                rows.setdefault(section_id, []).append(row)
-
-        def position(row):
-            pos = row.get('metadata', {}).get('chunk_position', '')
-            head = pos.split('/')[0]
-            return int(head) if head.isdigit() else 0
-
-        for fragments in rows.values():
-            fragments.sort(key=position)
-
-        self._section_rows_cache = rows
-        return rows
-
-    # Longest suffix/prefix match used to rejoin fragments. The extractor's chunker
-    # overlaps consecutive chunks (200 chars by default, or the token equivalent), so
-    # a naive concatenation would repeat that window.
-    _MAX_FRAGMENT_OVERLAP = 500
-
-    def _full_section_text(self, section_id: str) -> str:
-        """
-        Rebuild a section's complete text from its chunks.
-
-        A page-level class summary longer than the chunk size is split into many chunks
-        sharing one section_id; section dedup keeps one of them and expansion to
-        metadata['section_text'] is capped at 5,000 chars by the extractor, so half the
-        class summaries can never reach the LLM in full (task #107). The chunks
-        themselves are already in memory for BM25, so the section can be reassembled
-        from them — uncapped, and with no re-extraction.
-
-        Returns '' when the section is unknown, which callers treat as "fall back to
-        metadata['section_text']" (old ChromaDB indexes, or bm25 disabled).
-        """
-        fragments = self._section_rows().get(section_id, [])
-        if not fragments:
-            return ''
-
-        text = fragments[0].get('content', '')
-        for row in fragments[1:]:
-            piece = row.get('content', '')
-            # Every summary fragment repeats the page title as its first line.
-            header = f"{row.get('title', '')}\n\n"
-            if row.get('title') and piece.startswith(header):
-                piece = piece[len(header):]
-
-            window = min(len(text), len(piece), self._MAX_FRAGMENT_OVERLAP)
-            overlap = 0
-            for size in range(window, 0, -1):
-                if text.endswith(piece[:size]):
-                    overlap = size
-                    break
-            text += piece[overlap:]
-
-        return text.strip()
-
-    def _expand_to_section(self, doc, budget: int):
-        """
-        Swap a chunk for its full section text, honouring a remaining char budget.
-
-        Returns (doc, chars_spent). Prefers the corpus reconstruction and falls back to
-        the extractor's capped metadata copy — which is also what a section too large
-        for the remaining budget gets, so one 54,000-char page cannot crowd out the
-        other survivors.
-        """
-        from langchain_core.documents import Document as LCDocument
-
-        capped = doc.metadata.get('section_text', '')
-        full = self._full_section_text(doc.metadata.get('section_id', ''))
-
-        text = full if full and len(full) <= budget else capped
-        if not text:
-            return doc, 0
-
-        return LCDocument(page_content=text, metadata=doc.metadata), len(text)
-
     def _order_by_reranker(self, query: str, docs: List) -> List:
         """Sort docs by cross-encoder relevance to the query, best first."""
         pairs = [(query, doc.page_content) for doc in docs]
@@ -578,17 +461,14 @@ Passage:"""
         metadata existed) all pass through. Intentional backward compatibility.
         """
         result = []
-        seen_sections: set = set()
-        budget = self.config.expansion_char_budget
+        seen: set = set()
 
         for doc in docs:
             section_id = doc.metadata.get('section_id', '')
             if section_id:
-                seen_sections.add(section_id)
-
-            doc, spent = self._expand_to_section(doc, budget)
-            budget -= spent
-
+                if section_id in seen:
+                    continue
+                seen.add(section_id)
             result.append(doc)
 
         return result

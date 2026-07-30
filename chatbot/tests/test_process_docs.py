@@ -203,7 +203,7 @@ def test_section_id_is_page_scoped_not_module_scoped(tmp_path):
 
     section_id used to be built from the MODULE base_url, which is identical for
     every page, so any two pages with the same heading collided. Since
-    _rerank_and_expand() deduplicates by section_id, those collisions silently
+    _select_context() deduplicates by section_id, those collisions silently
     dropped good chunks: in the SHAPER corpus a single '#root' id covered 1288
     unrelated pages, starving results below top_n_after_rerank.
     """

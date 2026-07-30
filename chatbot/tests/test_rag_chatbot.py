@@ -676,7 +676,7 @@ def test_rerank_collapses_inherited_copies_sharing_an_anchor():
     docs.append(_memitem("classOther.html", "bdifferent", "Other::thing", "different doc"))
 
     bot = _rerank_bot()
-    result = bot._rerank_and_expand("q", docs)
+    result = bot._select_context("q", docs)
 
     assert len(result) == 2
     assert {d.metadata["anchor_id"] for d in result} == {anchor, "bdifferent"}
@@ -694,7 +694,7 @@ def test_rerank_prefers_the_declaring_class_copy_when_collapsing():
     ]
 
     bot = _rerank_bot()
-    result = bot._rerank_and_expand("q", docs)
+    result = bot._select_context("q", docs)
 
     assert len(result) == 1
     assert "classModelAPI__Feature.html" in result[0].metadata["url"]
@@ -710,7 +710,7 @@ def test_rerank_falls_back_to_retrieval_order_when_declaring_page_absent():
     ]
 
     bot = _rerank_bot()
-    result = bot._rerank_and_expand("q", docs)
+    result = bot._select_context("q", docs)
 
     assert len(result) == 1
     assert "classSketchPlugin__Circle.html" in result[0].metadata["url"]
@@ -729,7 +729,7 @@ def test_rerank_deduplicates_anchorless_chunks_by_content():
             section("c.html", "other text")]
 
     bot = _rerank_bot()
-    result = bot._rerank_and_expand("q", docs)
+    result = bot._select_context("q", docs)
 
     assert len(result) == 2
     assert {d.page_content for d in result} == {"same text", "other text"}
@@ -739,7 +739,7 @@ def test_rerank_keeps_distinct_symbols():
     docs = [_memitem(f"classA.html", f"anchor{i}", f"A::m{i}", f"doc {i}") for i in range(5)]
 
     bot = _rerank_bot()
-    result = bot._rerank_and_expand("q", docs)
+    result = bot._select_context("q", docs)
 
     assert len(result) == 5
 
@@ -754,7 +754,7 @@ def test_dedup_applies_when_reranker_is_disabled():
     ]
 
     bot = _rerank_bot()
-    result = bot._rerank_and_expand("q", docs, reranker_enabled=False)
+    result = bot._select_context("q", docs, reranker_enabled=False)
 
     assert len(result) == 2
     assert "classModelAPI__Feature.html" in result[0].metadata["url"]
@@ -769,7 +769,7 @@ def test_dedup_applies_when_no_reranker_is_configured():
 
     bot = _rerank_bot()
     bot.reranker = None
-    result = bot._rerank_and_expand("q", docs)
+    result = bot._select_context("q", docs)
 
     assert len(result) == 1
 
@@ -860,7 +860,7 @@ def test_rerank_expands_a_summary_past_the_5000_char_cap():
     )
 
     bot = _rerank_bot(bm25_index=_FakeCorpus(rows))
-    result = bot._rerank_and_expand("q", [doc])
+    result = bot._select_context("q", [doc])
 
     assert len(result) == 1
     assert len(result[0].page_content) > 5000
@@ -876,7 +876,7 @@ def test_rerank_falls_back_to_section_text_when_the_section_is_not_in_the_corpus
     )
 
     bot = _rerank_bot(bm25_index=None)
-    result = bot._rerank_and_expand("q", [doc])
+    result = bot._select_context("q", [doc])
 
     assert result[0].page_content == "the capped section text"
 
@@ -896,7 +896,7 @@ def test_rerank_stops_expanding_once_the_char_budget_is_spent():
 
     bot = _rerank_bot(bm25_index=_FakeCorpus(rows))
     bot.config = MagicMock(top_n_after_rerank=15, expansion_char_budget=4000)
-    result = bot._rerank_and_expand("q", docs)
+    result = bot._select_context("q", docs)
 
     assert len(result) == 3
     assert len(result[0].page_content) > 1000        # first one expanded
@@ -947,7 +947,7 @@ def test_rerank_expands_from_the_corpus_with_bm25_disabled(tmp_path):
                    metadata={"url": sid.split("#")[0], "section_id": sid, "chunk_position": "1/2"})
 
     bot = _rerank_bot(bm25_index=None, jsonl_path=path)
-    result = bot._rerank_and_expand("q", [doc])
+    result = bot._select_context("q", [doc])
 
     assert result[0].page_content == "A\n\nalpha beta gamma"
 
@@ -959,6 +959,156 @@ def test_rerank_leaves_docs_unchanged_when_no_corpus_and_no_section_text():
                              "chunk_position": "1/2"})
 
     bot = _rerank_bot(bm25_index=None)
-    result = bot._rerank_and_expand("q", [doc])
+    result = bot._select_context("q", [doc])
 
     assert result[0].page_content == "just the chunk"
+
+
+# ---------------------------------------------------------------------------
+# Reranker-off path keeps the same downstream shape (#106)
+#
+# `_select_context` used to return straight after symbol dedup when the
+# cross-encoder was off, which silently switched off three unrelated things:
+# the one-chunk-per-section pick, the top_n cap and parent-section expansion.
+# "Reranker off" therefore meant "whole 40-doc pool, unexpanded, with duplicate
+# fragments of the same section" — three changes at once, so the obvious
+# experiment (is the cross-encoder worth ~80% of wall clock?) could not be
+# attributed. Only the ORDERING depends on the reranker; with it off, the
+# incoming RRF fusion order is the ordering.
+# ---------------------------------------------------------------------------
+
+def _fragment(page: str, anchor: str, position: str, content: str):
+    """Two chunks of one section: distinct anchors, one shared section_id."""
+    url = f"https://docs.example.org/SHAPER/{page}"
+    return Document(
+        page_content=content,
+        metadata={
+            "url": f"{url}#{anchor}",
+            "anchor_id": anchor,
+            "hierarchy": "",
+            "section_id": f"{url}#__summary",
+            "chunk_position": position,
+        },
+    )
+
+
+def test_reranker_off_keeps_one_representative_per_section():
+    docs = [
+        _fragment("classA.html", "a1", "1/2", "first half"),
+        _fragment("classA.html", "a2", "2/2", "second half"),
+        _fragment("classB.html", "b1", "1/1", "other page"),
+    ]
+
+    bot = _rerank_bot()
+    result = bot._select_context("q", docs, reranker_enabled=False)
+
+    assert len(result) == 2
+    assert [d.metadata["anchor_id"] for d in result] == ["a1", "b1"]
+
+
+def test_reranker_off_applies_the_top_n_cap():
+    docs = [_memitem(f"class{i}.html", f"anchor{i}", f"C{i}::m", f"doc {i}")
+            for i in range(20)]
+
+    bot = _rerank_bot()
+    result = bot._select_context("q", docs, reranker_enabled=False, top_n=5)
+
+    assert len(result) == 5
+
+
+def test_reranker_off_falls_back_to_the_configured_top_n():
+    docs = [_memitem(f"class{i}.html", f"anchor{i}", f"C{i}::m", f"doc {i}")
+            for i in range(20)]
+
+    bot = _rerank_bot()
+    result = bot._select_context("q", docs, reranker_enabled=False)
+
+    assert len(result) == 15
+
+
+def test_reranker_off_expands_survivors_to_the_full_section():
+    sid = "https://docs.example.org/classA.html#__summary"
+    rows = _corpus_rows(sid, "A Class Reference", ["alpha beta", "beta gamma"])
+    doc = Document(page_content="A Class Reference\n\nalpha beta",
+                   metadata={"url": sid.split("#")[0], "section_id": sid,
+                             "chunk_position": "1/2"})
+
+    bot = _rerank_bot(bm25_index=_FakeCorpus(rows))
+    result = bot._select_context("q", [doc], reranker_enabled=False)
+
+    assert result[0].page_content == "A Class Reference\n\nalpha beta gamma"
+
+
+def test_reranker_off_preserves_the_incoming_fusion_order():
+    """With no cross-encoder the RRF rank is the ordering; nothing may resort it."""
+    docs = [_memitem(f"class{i}.html", f"anchor{i}", f"C{i}::m", f"doc {i}")
+            for i in range(5)]
+
+    bot = _rerank_bot()
+    result = bot._select_context("q", docs, reranker_enabled=False)
+
+    assert [d.page_content for d in result] == [f"doc {i}" for i in range(5)]
+
+
+def test_no_reranker_configured_takes_the_same_path_as_the_toggle():
+    docs = [
+        _fragment("classA.html", "a1", "1/2", "first half"),
+        _fragment("classA.html", "a2", "2/2", "second half"),
+    ]
+
+    bot = _rerank_bot()
+    bot.reranker = None
+    result = bot._select_context("q", docs)
+
+    assert len(result) == 1
+    assert result[0].metadata["anchor_id"] == "a1"
+
+
+def test_ask_reports_the_context_size_it_actually_sent():
+    """Pool size and expansion both move context size; the payload must record it."""
+    docs = [Document(page_content="x" * 100, metadata={"title": "T", "url": "u"}),
+            Document(page_content="y" * 50, metadata={"title": "T2", "url": "u2"})]
+
+    bot = _bare_chatbot()
+    bot.config = MagicMock(top_n_after_rerank=15, title_boost_enabled=False)
+    bot.reranker = None
+    bot.hyde_llm = None
+    bot.bm25_index = None
+    bot.available_modules = ["M"]
+
+    chain = MagicMock()
+    chain.invoke.return_value = "the answer"
+    bot._create_chain = MagicMock(return_value=(chain, MagicMock(), list(docs)))
+
+    from core.rag_chatbot import DocumentationChatbot
+    result = DocumentationChatbot.ask(bot, "q")
+
+    assert result["filters"]["context_docs"] == 2
+    assert result["filters"]["context_chars"] == 150
+
+
+def test_format_answer_reports_the_context_size():
+    """Retrieval toggles move context size invisibly; the UI should say what it sent."""
+    from ui.web import WebUI
+    ui = WebUI(MagicMock())
+    out = ui._format_answer_markdown({
+        "answer": "a", "sources": [],
+        "filters": {"mode": "rag", "reranker": False, "context_docs": 12,
+                    "context_chars": 48000},
+        "error": None,
+    })
+    assert "12" in out and "48,000" in out
+
+
+def test_terminal_print_answer_reports_the_context_size(capsys):
+    """CLI parity with the web UI — same number, same trigger."""
+    from ui.terminal import TerminalUI
+    ui = TerminalUI(MagicMock())
+    ui._print_answer({
+        "answer": "a", "sources": [],
+        "filters": {"mode": "rag", "reranker": False, "context_docs": 12,
+                    "context_chars": 48000},
+        "error": None,
+    })
+    out = capsys.readouterr().out
+    assert "12" in out and "48,000" in out

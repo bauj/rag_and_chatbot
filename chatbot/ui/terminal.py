@@ -112,6 +112,9 @@ class TerminalUI:
                 if stages:
                     print(f"Retrieval: {' + '.join(stages)}")
 
+            if filters.get('context_docs') is not None:
+                print(f"Context: {filters['context_docs']} documents, "
+                      f"{filters.get('context_chars', 0):,} characters")
             if filters.get('rounds_used') is not None:
                 print(f"Agentic rounds used: {filters['rounds_used']}")
             if filters.get('steps_used') is not None:

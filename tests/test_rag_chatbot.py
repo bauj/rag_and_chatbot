@@ -49,14 +49,22 @@ def _make_bot_with_reranker(reranker=None, top_n=3):
     return bot
 
 
-def test_rerank_and_expand_no_reranker_returns_docs_unchanged():
+def test_select_context_without_a_reranker_skips_only_the_ordering_step():
+    """
+    No reranker means no reordering — not a bypass of the rest of the pipeline.
+
+    These docs carry no section_id and no corpus backs them, so representative
+    selection and expansion are both no-ops here and the list survives intact.
+    Sections and expansion with the reranker off are covered in
+    chatbot/tests/test_rag_chatbot.py.
+    """
     bot = _make_bot_with_reranker(reranker=None)
     docs = [Document(page_content="chunk A"), Document(page_content="chunk B")]
-    result = bot._rerank_and_expand("query", docs)
+    result = bot._select_context("query", docs)
     assert result == docs
 
 
-def test_rerank_and_expand_reranks_by_score():
+def test_select_context_reranks_by_score():
     """The doc with the higher score should come first."""
     mock_reranker = MagicMock()
     mock_reranker.predict.return_value = [0.1, 0.9]  # doc B scores higher
@@ -65,21 +73,21 @@ def test_rerank_and_expand_reranks_by_score():
         Document(page_content="chunk A", metadata={}),
         Document(page_content="chunk B", metadata={}),
     ]
-    result = bot._rerank_and_expand("query", docs)
+    result = bot._select_context("query", docs)
     assert result[0].page_content == "chunk B"
     assert result[1].page_content == "chunk A"
 
 
-def test_rerank_and_expand_limits_to_top_n():
+def test_select_context_limits_to_top_n():
     mock_reranker = MagicMock()
     mock_reranker.predict.return_value = [0.5, 0.4, 0.3, 0.2]
     bot = _make_bot_with_reranker(reranker=mock_reranker, top_n=2)
     docs = [Document(page_content=f"chunk {i}", metadata={}) for i in range(4)]
-    result = bot._rerank_and_expand("query", docs)
+    result = bot._select_context("query", docs)
     assert len(result) == 2
 
 
-def test_rerank_and_expand_expands_to_section_text():
+def test_select_context_expands_to_section_text():
     """When section_text is in metadata, page_content must be replaced."""
     mock_reranker = MagicMock()
     mock_reranker.predict.return_value = [0.9]
@@ -88,11 +96,11 @@ def test_rerank_and_expand_expands_to_section_text():
         page_content="small chunk",
         metadata={"section_id": "sec1", "section_text": "full section text here"},
     )]
-    result = bot._rerank_and_expand("query", docs)
+    result = bot._select_context("query", docs)
     assert result[0].page_content == "full section text here"
 
 
-def test_rerank_and_expand_deduplicates_by_section_id():
+def test_select_context_deduplicates_by_section_id():
     """Two chunks from the same section should result in a single expanded doc."""
     mock_reranker = MagicMock()
     mock_reranker.predict.return_value = [0.9, 0.8]
@@ -102,6 +110,6 @@ def test_rerank_and_expand_deduplicates_by_section_id():
         Document(page_content="chunk 1", metadata=shared_meta),
         Document(page_content="chunk 2", metadata=shared_meta),
     ]
-    result = bot._rerank_and_expand("query", docs)
+    result = bot._select_context("query", docs)
     assert len(result) == 1
     assert result[0].page_content == "full section"

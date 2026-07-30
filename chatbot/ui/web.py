@@ -92,6 +92,11 @@ class WebUI:
                       if filters.get(key)]
             if stages:
                 notes.append("Retrieval: " + " + ".join(stages))
+        if filters.get("context_docs") is not None:
+            notes.append(
+                f"Context: {filters['context_docs']} documents, "
+                f"{filters.get('context_chars', 0):,} characters"
+            )
         if filters.get("rounds_used") is not None:
             notes.append(f"Agentic rounds used: {filters['rounds_used']}")
         if filters.get("steps_used") is not None:
