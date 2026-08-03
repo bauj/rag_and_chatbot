@@ -112,13 +112,6 @@ Examples:
         action='store_true',
         help='Use deep dive mode (terminal single-question mode)'
     )
-    parser.add_argument(
-        '--json-output',
-        action='store_true',
-        help='With --question, print the result as a single JSON document on stdout '
-             '(answer, error, filters, sources with full content). All progress and '
-             'debug output goes to stderr, so stdout is machine-parseable.'
-    )
 
     parser.add_argument(
         '--mode',

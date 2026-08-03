@@ -67,6 +67,11 @@ class ChatbotConfig:
     k_retrieve: Optional[int] = None
     deep_dive_batch_size: int = 10
     top_n_after_rerank: int = 15    # docs to keep after cross-encoder reranking
+    # Total characters parent-section expansion may add across all surviving docs.
+    # Expansion rebuilds each doc's full section from the corpus (uncapped, unlike the
+    # extractor's 5,000-char metadata copy), so a single 54,000-char page could otherwise
+    # crowd the context window. Sections that no longer fit fall back to the capped copy.
+    expansion_char_budget: int = 60000
     bm25_enabled: bool = False      # opt-in BM25 hybrid retrieval (fused with vector search via RRF)
     # opt-in third RRF list: BM25 over chunk TITLES only, collapsed to one hit per page.
     # A question naming a class/identifier is an entity lookup, not a semantic search — the
@@ -136,7 +141,7 @@ class ChatbotConfig:
 
         # Known top-level keys (scalars + nested blocks)
         scalar_keys = {"project_name", "chromadb_path", "k_standard", "k_deep_dive", "k_retrieve",
-                       "deep_dive_batch_size", "top_n_after_rerank", "temperature", "max_tokens",
+                       "deep_dive_batch_size", "top_n_after_rerank", "expansion_char_budget", "temperature", "max_tokens",
                        "bm25_enabled", "title_boost_enabled", "hyde_enabled", "smol_enabled"}
         nested_keys = {"llm", "embedding", "reranker", "agentic"}
         valid_keys = scalar_keys | nested_keys

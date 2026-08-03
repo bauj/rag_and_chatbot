@@ -14,6 +14,7 @@ os.environ['HF_HUB_OFFLINE'] = '1'
 os.environ['TRANSFORMERS_OFFLINE'] = '1'
 os.environ['HF_DATASETS_OFFLINE'] = '1'
 
+import json
 import hashlib
 import re
 from pathlib import Path
@@ -325,57 +326,193 @@ Passage:"""
 
         return result
 
-    def _rerank_and_expand(self, query: str, docs: List,
-                           reranker_enabled: bool = True,
-                           top_n: Optional[int] = None) -> List:
+    def _corpus_rows(self) -> List[dict]:
         """
-        Deduplicate symbol copies, rerank with cross-encoder, expand to section context.
+        Every chunk of the corpus, as written by the extraction pipeline.
 
-        Symbol-level deduplication always runs — duplicates flood the context whether
-        or not reranking is on. If no reranker is configured or reranker_enabled is
-        False, the deduplicated docs are returned as-is. Otherwise:
-          1. Scores all (query, page_content) pairs.
-          2. Sorts by score descending.
-          3. Deduplicates by section_id (keeps highest-scored chunk per section).
-          4. Expands each surviving doc to its full section_text if available.
-          5. Returns at most top_n (or config.top_n_after_rerank) docs.
-
-        Note: docs with an empty section_id (e.g. old ChromaDB databases without
-        section metadata) bypass section deduplication — all such docs pass through.
-        This is intentional backward-compatibility behaviour.
+        Borrowed from the BM25 index when one is loaded, since that is the same JSONL
+        parsed already. Expansion is not a retrieval concern, though — a bm25_enabled
+        =False run still has to expand its survivors — so the file is read directly
+        when there is no index to borrow from. A missing file yields no rows, which
+        degrades expansion to "leave the chunk as retrieved" rather than raising.
         """
-        docs = self._dedup_symbol_copies(docs)
+        index = getattr(self, 'bm25_index', None)
+        if index is not None:
+            return getattr(index, 'rows', [])
 
-        if self.reranker is None or not reranker_enabled:
-            return docs
+        path = Path(self.config.bm25_jsonl_path)
+        if not path.is_absolute():
+            path = (Path(__file__).parent.parent / path).resolve()
+        if not path.exists():
+            return []
 
-        limit = top_n if top_n is not None else self.config.top_n_after_rerank
+        rows = []
+        with open(path, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    rows.append(json.loads(line))
+        return rows
 
+    def _section_rows(self) -> dict:
+        """
+        Map section_id -> its chunks, ordered by chunk_position, built once from the
+        corpus. Empty when no corpus is available.
+        """
+        cached = getattr(self, '_section_rows_cache', None)
+        if cached is not None:
+            return cached
+
+        rows: dict = {}
+        for row in self._corpus_rows():
+            section_id = row.get('metadata', {}).get('section_id', '')
+            if section_id:
+                rows.setdefault(section_id, []).append(row)
+
+        def position(row):
+            pos = row.get('metadata', {}).get('chunk_position', '')
+            head = pos.split('/')[0]
+            return int(head) if head.isdigit() else 0
+
+        for fragments in rows.values():
+            fragments.sort(key=position)
+
+        self._section_rows_cache = rows
+        return rows
+
+    # Longest suffix/prefix match used to rejoin fragments. The extractor's chunker
+    # overlaps consecutive chunks (200 chars by default, or the token equivalent), so
+    # a naive concatenation would repeat that window.
+    _MAX_FRAGMENT_OVERLAP = 500
+
+    def _full_section_text(self, section_id: str) -> str:
+        """
+        Rebuild a section's complete text from its chunks.
+
+        A page-level class summary longer than the chunk size is split into many chunks
+        sharing one section_id; section dedup keeps one of them and expansion to
+        metadata['section_text'] is capped at 5,000 chars by the extractor, so half the
+        class summaries can never reach the LLM in full (task #107). The chunks
+        themselves are already in memory for BM25, so the section can be reassembled
+        from them — uncapped, and with no re-extraction.
+
+        Returns '' when the section is unknown, which callers treat as "fall back to
+        metadata['section_text']" (old ChromaDB indexes, or bm25 disabled).
+        """
+        fragments = self._section_rows().get(section_id, [])
+        if not fragments:
+            return ''
+
+        text = fragments[0].get('content', '')
+        for row in fragments[1:]:
+            piece = row.get('content', '')
+            # Every summary fragment repeats the page title as its first line.
+            header = f"{row.get('title', '')}\n\n"
+            if row.get('title') and piece.startswith(header):
+                piece = piece[len(header):]
+
+            window = min(len(text), len(piece), self._MAX_FRAGMENT_OVERLAP)
+            overlap = 0
+            for size in range(window, 0, -1):
+                if text.endswith(piece[:size]):
+                    overlap = size
+                    break
+            text += piece[overlap:]
+
+        return text.strip()
+
+    def _expand_to_section(self, doc, budget: int):
+        """
+        Swap a chunk for its full section text, honouring a remaining char budget.
+
+        Returns (doc, chars_spent). Prefers the corpus reconstruction and falls back to
+        the extractor's capped metadata copy — which is also what a section too large
+        for the remaining budget gets, so one 54,000-char page cannot crowd out the
+        other survivors.
+        """
+        from langchain_core.documents import Document as LCDocument
+
+        capped = doc.metadata.get('section_text', '')
+        full = self._full_section_text(doc.metadata.get('section_id', ''))
+
+        text = full if full and len(full) <= budget else capped
+        if not text:
+            return doc, 0
+
+        return LCDocument(page_content=text, metadata=doc.metadata), len(text)
+
+    def _order_by_reranker(self, query: str, docs: List) -> List:
+        """Sort docs by cross-encoder relevance to the query, best first."""
         pairs = [(query, doc.page_content) for doc in docs]
         scores = self.reranker.predict(pairs)
+        return [doc for _score, doc in
+                sorted(zip(scores, docs), key=lambda x: float(x[0]), reverse=True)]
 
-        scored = sorted(zip(scores, docs), key=lambda x: float(x[0]), reverse=True)
+    def _pick_section_representatives(self, docs: List) -> List:
+        """
+        Keep one chunk per section_id, the first in the given order.
 
+        Expansion swaps each survivor for its whole section, so two chunks of one
+        section would send that section's text twice. "First" is only as meaningful
+        as the ordering handed in — cross-encoder score when reranking is on, RRF
+        fusion rank when it is off.
+
+        Docs with an empty section_id (old ChromaDB databases written before section
+        metadata existed) all pass through. Intentional backward compatibility.
+        """
         result = []
-        seen_sections: set = set()
+        seen: set = set()
 
-        for _score, doc in scored:
-            if len(result) >= limit:
-                break
+        for doc in docs:
             section_id = doc.metadata.get('section_id', '')
-            if section_id and section_id in seen_sections:
-                continue
             if section_id:
-                seen_sections.add(section_id)
-
-            section_text = doc.metadata.get('section_text', '')
-            if section_text:
-                from langchain_core.documents import Document as LCDocument
-                doc = LCDocument(page_content=section_text, metadata=doc.metadata)
-
+                if section_id in seen:
+                    continue
+                seen.add(section_id)
             result.append(doc)
 
         return result
+
+    def _expand_survivors(self, docs: List) -> List:
+        """Swap each doc for its full section, spending one shared char budget."""
+        result = []
+        budget = self.config.expansion_char_budget
+
+        for doc in docs:
+            doc, spent = self._expand_to_section(doc, budget)
+            budget -= spent
+            result.append(doc)
+
+        return result
+
+    def _select_context(self, query: str, docs: List,
+                        reranker_enabled: bool = True,
+                        top_n: Optional[int] = None) -> List:
+        """
+        Turn a retrieval pool into the documents the LLM actually reads.
+
+        Four independent steps, only one of which the cross-encoder owns:
+          1. Collapse copies of the same documented symbol (corpus-defect guard).
+          2. Order the pool — by cross-encoder score, or by the incoming RRF rank
+             when reranking is off or unconfigured.
+          3. Keep one representative per section, then cap at top_n
+             (or config.top_n_after_rerank).
+          4. Expand each survivor to its full section text.
+
+        Disabling the reranker used to skip steps 3 and 4 as a side effect of an
+        early return, so it changed ranking, context size and chunk granularity at
+        once. It now varies exactly the ordering.
+        """
+        limit = top_n if top_n is not None else self.config.top_n_after_rerank
+
+        docs = self._dedup_symbol_copies(docs)
+
+        if self.reranker is not None and reranker_enabled:
+            docs = self._order_by_reranker(query, docs)
+
+        docs = self._pick_section_representatives(docs)[:limit]
+
+        return self._expand_survivors(docs)
 
     def _create_prompt(self) -> PromptTemplate:
         """Create the base prompt template"""
@@ -563,7 +700,7 @@ Answer (based strictly on the documentation above):"""
                     retrieve_k=retrieve_k,
                     title_boost_enabled=effective_title_boost,
                 )
-                reranked = self._rerank_and_expand(
+                reranked = self._select_context(
                     question, raw_docs,
                     reranker_enabled=reranker_enabled,
                     top_n=top_n,
@@ -602,7 +739,7 @@ Answer (based strictly on the documentation above):"""
         Args:
             question: The question to ask
             module: Optional module filter
-            doc_type: Optional doc type filter (dev, user, methodology)
+            doc_type: Optional doc type filter (dev, user)
             deep_dive: Use deep dive mode for comprehensive analysis
             k: Override number of chunks to retrieve (higher priority than config/deep_dive)
             temperature: Override LLM temperature (higher priority than config)
@@ -689,7 +826,7 @@ Answer (based strictly on the documentation above):"""
                 source_docs = list(source_docs_holder)
             else:
                 raw_source_docs = retriever.invoke(question)
-                source_docs = self._rerank_and_expand(
+                source_docs = self._select_context(
                     question, raw_source_docs,
                     reranker_enabled=reranker_enabled,
                     top_n=top_n,
@@ -712,6 +849,13 @@ Answer (based strictly on the documentation above):"""
                     # as hallucinations.
                     'full_content': doc.page_content,
                 })
+
+            # How much text the LLM actually read. Retrieval settings move this
+            # silently — before #106, turning the reranker off swapped 15 expanded
+            # sections for the whole ~40-doc pool unexpanded — so every eval result
+            # file should carry the number rather than leave it to be inferred.
+            filters['context_docs'] = len(source_docs)
+            filters['context_chars'] = sum(len(d.page_content) for d in source_docs)
 
             return {
                 "answer": answer,
