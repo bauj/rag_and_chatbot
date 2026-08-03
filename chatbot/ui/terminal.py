@@ -56,6 +56,7 @@ class TerminalUI:
             print(f"  module:{mod:<12} - Filter by {mod} (RAG only)")
         print("  type:dev          - Filter developer docs only (RAG only)")
         print("  type:user         - Filter user docs only (RAG only)")
+        print("  type:methodology  - Filter methodology docs only (RAG only)")
         print("  deep              - Toggle Deep Dive mode (RAG only)")
         if has_reranker:
             print("  reranker          - Toggle cross-encoder reranker on/off (RAG only)")
@@ -145,7 +146,7 @@ class TerminalUI:
                 if len(modules_used) > 1:
                     info.append(f"{len(modules_used)} modules: {', '.join(sorted(modules_used))}")
                 if len(doc_types_used) > 1:
-                    info.append(f"dev + user docs")
+                    info.append(f"dev + user + methodology docs")
                 print(f"\n   ℹ️  Answer uses {', '.join(info)}")
             print()
 
@@ -165,6 +166,7 @@ class TerminalUI:
             print(f"  {module}:")
             print(f"    Dev:  {mod_stats['dev']:5} chunks")
             print(f"    User: {mod_stats['user']:5} chunks")
+            print(f"    Methodology: {mod_stats['methodology']:5} chunks")
             print(f"    Total: {mod_stats['total']:5} chunks")
 
         print("="*70 + "\n")
@@ -367,11 +369,11 @@ class TerminalUI:
                     # Handle type filter
                     if user_input.lower().startswith('type:'):
                         dtype = user_input.split(':', 1)[1].strip().lower()
-                        if dtype in ['dev', 'user']:
+                        if dtype in ['dev', 'user', 'methodology']:
                             current_type = dtype
                             print(f"OK: Doc type filter: {dtype}\n")
                         else:
-                            print("Warning: Unknown type (use: dev or user)\n")
+                            print("Warning: Unknown type (use: dev or user or methodology)\n")
                         continue
 
                 # Ask question

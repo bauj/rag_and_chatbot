@@ -93,13 +93,18 @@ Examples:
         help='Ask single question and exit (terminal only)'
     )
     parser.add_argument(
+        '--json-output',
+        action='store_true',
+        help='Return answer and sources as JSON (for evaluation mode)'
+    )
+    parser.add_argument(
         '--module',
         help='Filter by module name (must exist in the database)'
     )
     parser.add_argument(
         '--type',
         dest='doc_type',
-        choices=['dev', 'user'],
+        choices=['dev', 'user', 'methodology'],
         help='Filter by doc type (terminal single-question mode)'
     )
     parser.add_argument(

@@ -45,6 +45,20 @@ rag_and_chatbot/
 │   ├── chatbot.py           # Unified entry point
 │   └── config.example.json
 │
+├── evaluator/               # Benchmark & evaluation suite
+│   ├── base/                # Base evaluator module
+│   │   ├── evaluator.py     # Core evaluation metrics
+│   │   ├── config.json      # Evaluator configuration
+│   │   ├── dataset.json     # Test questions with tags
+│   │   └── README.md
+│   │
+│   └── benchmark/           # Benchmark orchestration
+│       ├── run_benchmark.py # CLI entry point for benchmarks
+│       ├── benchmark.py     # Benchmark execution engine
+│       ├── analyze_results.py # Results analysis & graphing
+│       ├── benchmark_config.json # Hyperparameter configurations
+│       └── README.md
+│
 ├── tests/                   # Unit tests
 ├── requirements.txt
 └── README.md
@@ -400,6 +414,209 @@ print(result['filters']['grounded'])  # False if the agent answered without read
 ```
 
 All three `.ask()` methods return the same dict shape: `{answer, sources, filters, error}`.
+
+## Evaluation & Benchmarking
+
+### Overview
+
+The evaluator suite provides comprehensive testing and analysis of RAG and Agentic chatbot modes. It includes:
+
+- **Base Evaluator** — Core evaluation metrics (Correctness, Relevance, Groundedness, Retrieval Relevance)
+- **Benchmark Suite** — Automated testing across multiple hyperparameter configurations
+- **Analysis Tools** — Detailed results analysis with graphs and per-question/tag breakdowns
+
+### Step 1: Configure the Base Evaluator
+
+```bash
+cd evaluator/base
+
+# Copy configuration template
+cp config.example.json config.json
+
+# Edit config.json to set:
+# - chatbot_path: relative path to your chatbot directory (e.g., "../../chatbot")
+```
+
+The base evaluator configuration defines:
+- `chatbot_path` — Path to the chatbot directory for running evaluations
+- `evaluator_options` — Additional LLM settings for scoring
+
+### Step 2: Configure the Test Dataset
+
+The test questions are defined in `evaluator/base/dataset.json`. Each question can include tags for categorization:
+
+```json
+[
+  {
+    "inputs": {"question": "How do I create a mesh?"},
+    "outputs": {"answer": "Expected answer or reference"},
+    "tags": ["code", "tutorial", "mesh"]
+  }
+]
+```
+
+Edit this file to add or modify test questions. Tags help group results by theme in the analysis.
+
+### Step 3: Run Base Evaluator
+
+Evaluate all questions in the dataset directly:
+
+```bash
+cd evaluator/base
+python evaluator.py
+```
+
+This:
+- Loads all questions from `dataset.json`
+- Runs the chatbot in both RAG or Agentic mode accordingly to the config file
+- Scores each answer using the evaluation metrics
+- Saves results to `evaluation_results.json`
+
+### Evaluation Metrics
+
+All evaluations use LLM-based scoring (0-10 scale):
+
+- **Correctness** — Factual accuracy of the answer
+- **Relevance** — Overall relevance to the question
+- **Groundedness** — Answers grounded in retrieved documents (RAG only)
+- **Retrieval Relevance** — Quality of retrieved documents (RAG only)
+
+Each metric includes:
+- `score` — Numeric score (0-10)
+- `explanation` — Reasoning behind the score
+
+### Base Evaluator Results
+
+Results are saved to `evaluation_results.json` with structure:
+
+```json
+[
+  {
+    "question": "How do I create a mesh?",
+    "mode": "rag",
+    "generated_answer": "You can create a mesh by...",
+    "evaluations": {
+      "correctness": {"score": 8.5, "explanation": "..."},
+      "relevance": {"score": 9.0, "explanation": "..."}
+    }
+  }
+]
+```
+
+---
+
+### Step 4: Configure Benchmark Hyperparameters
+
+For systematic testing across multiple configurations:
+
+```bash
+cd evaluator/benchmark
+
+# Copy benchmark configuration template
+cp benchmark_config.example.json benchmark_config.json
+```
+
+Edit `benchmark_config.json` to define which hyperparameters to test:
+
+```json
+{
+  "rag_hyperparams": {
+    "k": [3, 5, 10],
+    "temperature": [0.3, 0.7],
+    "reranker_enabled": [true, false],
+    "top_n": [5, 10]
+  },
+  "agentic_hyperparams": {
+    "temperature": [0.7]
+  }
+}
+```
+
+For example, this generates **16 RAG configurations** (all combinations) and **1 Agentic configuration**, testing each against all questions.
+
+### Step 5: Run Benchmarks
+
+```bash
+cd evaluator/benchmark
+
+# Validate setup
+python3 run_benchmark.py --help
+
+# Quick test (2 questions, all modes)
+python3 run_benchmark.py --limit 2
+
+# Full test (all questions, ~30 min/config)
+python3 run_benchmark.py
+
+# Test specific modes only
+python3 run_benchmark.py --modes rag
+python3 run_benchmark.py --modes agentic
+
+# Compare with previous results
+python3 run_benchmark.py --compare
+```
+
+### Benchmark Results Format
+
+Benchmark results are saved to `benchmark_results/benchmark_YYYYMMDD_HHMMSS.json` with structure:
+
+```json
+{
+  "metadata": {
+    "timestamp": "2026-04-07T12:00:00",
+    "total_questions": 13,
+    "modes": ["rag", "agentic"]
+  },
+  "results": [
+    {
+      "mode": "rag",
+      "configuration": {"k": 5, "temperature": 0.3, "reranker_enabled": true, "top_n": 10},
+      "average_scores": {"correctness": 7.2, "relevance": 7.5, ...},
+      "questions": [
+        {
+          "question_id": 1,
+          "question": "How do I create a mesh?",
+          "tags": ["code", "tutorial"],
+          "evaluations": {"correctness": {"score": 8.0}, ...}
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Step 6: Analyze Results and Generate Graphs
+
+```bash
+cd evaluator/benchmark
+
+# Analyze latest results
+python3 analyze_results.py --latest
+
+# Generate visualization graphs
+python3 analyze_results.py --latest --graphs
+
+# List all benchmark results
+python3 analyze_results.py --list
+
+# Analyze specific file
+python3 analyze_results.py benchmark_results/benchmark_20260407_120000.json
+```
+
+The analysis tool generates:
+
+- **Summary table** — Average scores for all configurations
+- **Per-question analysis** — Best/worst configurations per question
+- **Mode comparison** — RAG vs Agentic across all metrics
+- **Metric statistics** — Min/max/average per metric
+- **Graphs** (with `--graphs` flag):
+  - Scores by question (bar chart comparing all metrics)
+  - Metric distributions (histograms showing score spread)
+  - Scores by tag (grouped bar chart showing performance by question theme)
+
+Graphs are saved in the `graphs/` folder.
+
+
 
 ## Troubleshooting
 

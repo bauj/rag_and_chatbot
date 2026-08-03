@@ -42,7 +42,7 @@ class DocumentChunk:
     hierarchy: str
     chunk_id: int
     module: str  # e.g. MODULE_A, MODULE_B
-    doc_category: str  # 'dev' or 'user'
+    doc_category: str  # 'dev', 'user', 'methodology'
     metadata: Dict  # Extended metadata including code blocks, quality score, parent doc
 
 class DocumentationProcessor:
@@ -99,6 +99,7 @@ class DocumentationProcessor:
                 description=module_config.get("description", ""),
                 dev_path=module_config.get("dev_path", ""),
                 user_path=module_config.get("user_path", ""),
+                methodology_path=module_config.get("methodology_path", ""),
                 url_for_sources_citation=module_config.get("url_for_sources_citation", "")
             )
 
@@ -207,7 +208,7 @@ class DocumentationProcessor:
     def docs_json_path(self) -> Path:
         return self.output_dir / f"{self.project_name}_docs.json"
 
-    def add_module(self, name: str = None, description: str = "", dev_path: str = None, user_path: str = None, module_name: str = None, url_for_sources_citation: str = ""):
+    def add_module(self, name: str = None, description: str = "", dev_path: str = None, user_path: str = None, methodology_path: str = None, module_name: str = None, url_for_sources_citation: str = ""):
         """Add a module with dev and/or user docs"""
         # Support both positional (old API: module_name) and keyword (new API: name)
         if name is None and module_name is not None:
@@ -242,6 +243,14 @@ class DocumentationProcessor:
                 print(f"OK: Added {name} user docs: {user_path}")
             else:
                 print(f"Warning: User path not found for {name}: {user_path}")
+
+        if methodology_path:
+            path = Path(methodology_path)
+            if path.exists():
+                self.modules[name]['methodology'] = path
+                print(f"OK: Added {name} methodology docs: {methodology_path}")
+            else:
+                print(f"Warning: Methodology path not found for {name}: {methodology_path}")
 
         return bool(self.modules[name])
 
@@ -378,8 +387,18 @@ class DocumentationProcessor:
                 return 'module'
             else:
                 return 'page'
-        else:
+        elif doc_category == 'user':
             # Sphinx structure (user docs)
+            if 'tutorial' in name:
+                return 'tutorial'
+            elif 'guide' in name or 'howto' in name:
+                return 'guide'
+            elif 'api' in name or 'reference' in name:
+                return 'reference'
+            else:
+                return 'page'
+        else:
+            # Sphinx structure (methodology docs)
             if 'tutorial' in name:
                 return 'tutorial'
             elif 'guide' in name or 'howto' in name:
@@ -834,7 +853,7 @@ class DocumentationProcessor:
 
     def process_doc_category_generator(self, module_name: str, doc_path: Path, doc_category: str) -> Iterator[DocumentChunk]:
         """
-        Process all files for a specific doc category (dev or user) - memory efficient version
+        Process all files for a specific doc category (dev or user or methodology) - memory efficient version
         Yields chunks as they're created instead of accumulating in memory
         """
         html_files = self.find_html_files(doc_path)
@@ -860,7 +879,7 @@ class DocumentationProcessor:
         print(f"    OK: Extracted {chunk_count} chunks")
 
     def process_doc_category(self, module_name: str, doc_path: Path, doc_category: str) -> List[DocumentChunk]:
-        """Process all files for a specific doc category (dev or user) - returns list"""
+        """Process all files for a specific doc category (dev or user or methodology) - returns list"""
         print(f"  Processing {doc_category} docs...")
         return list(self.process_doc_category_generator(module_name, doc_path, doc_category))
 
@@ -878,6 +897,10 @@ class DocumentationProcessor:
 
         if 'user' in module_paths:
             chunks = self.process_doc_category(module_name, module_paths['user'], 'user')
+            all_chunks.extend(chunks)
+
+        if 'methodology' in module_paths:
+            chunks = self.process_doc_category(module_name, module_paths['methodology'], 'methodology')
             all_chunks.extend(chunks)
 
         print(f"Total for {module_name}: {len(all_chunks)} chunks")
@@ -918,11 +941,13 @@ class DocumentationProcessor:
             module_chunks = [c for c in chunks if c.module == module_name]
             dev_chunks = [c for c in module_chunks if c.doc_category == 'dev']
             user_chunks = [c for c in module_chunks if c.doc_category == 'user']
+            methodology_chunks = [c for c in module_chunks if c.doc_category == 'methodology']
 
             stats['modules'][module_name] = {
                 'total_chunks': len(module_chunks),
                 'dev_chunks': len(dev_chunks),
                 'user_chunks': len(user_chunks),
+                'methodology_chunks': len(methodology_chunks),
                 'description': self.MODULE_INFO.get(module_name, {}).get('description', '')
             }
 
@@ -1067,7 +1092,7 @@ Examples:
         processor.output_dir.mkdir(parents=True, exist_ok=True)
 
     if not processor.modules:
-        print("Error: No modules defined in config. Add at least one module with dev_path or user_path.")
+        print("Error: No modules defined in config. Add at least one module with dev_path, user_path, or methodology_path.")
         sys.exit(1)
 
     print(f"Project: {processor.project_name}")

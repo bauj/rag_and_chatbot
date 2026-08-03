@@ -282,6 +282,7 @@ class AgenticChatbot:
                 "title": e["title"],
                 "module": e["module"],
                 "doc_category": e["doc_category"],
+                "content": e.get("content", ""),
             }
             for e in read_entries
         ]

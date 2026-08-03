@@ -235,10 +235,10 @@ class WebUI:
                             info="Restrict search to one module, or keep All to search across all.",
                         )
                         doc_type_filter = gr.Dropdown(
-                            choices=["All", "Dev", "User"],
+                            choices=["All", "Dev", "User", "Methodology"],
                             value="All",
                             label="Doc Type",
-                            info="Dev = API reference & classes · User = tutorials & guides",
+                            info="Dev = API reference & classes · User = tutorials & guides · Methodology = conceptual explanations & theory",
                         )
 
                         gr.Markdown("---")

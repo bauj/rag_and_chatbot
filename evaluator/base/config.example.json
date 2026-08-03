@@ -1,0 +1,24 @@
+{
+  "project_name": "my_project",
+  "_comment_project_name": "No spaces — used as ChromaDB collection name. Use underscores.",
+  "chatbot_path": "your_chatbot_dir_path_here", // Default: "../../chatbot"
+  
+  "llm": 
+  {  
+    "base_url": "your_base_url_here",
+    "_comment_base_url": "Full base URL for OpenAI-compatible API (include /v1 if needed). Examples: 'http://localhost:8080/v1' for LiteLLM, 'http://localhost:11434/v1' for Ollama",
+
+    "model": "your_model_here",
+    "api_key": "your_api_key_here",
+    "_comment_api_key": "API key for LLM endpoint. Use 'dummy' for local models without auth. For API providers, use your actual key.",
+
+    "ssl_cert_file": "your_ssl_cert_file_path_here",
+    "_comment_ssl": "Path to SSL certificate bundle file (e.g., '/etc/ssl/certs/ca-bundle.crt' or '~/certificates/ca-bundle.crt'). Leave empty to use system default. Automatically sets SSL_CERT_FILE environment variable."
+  },
+
+  "evaluator_options":
+  {
+    "agentic_mode": true,
+    "_comment_agentic_mode": "If true, the evaluator will use an agentic approach. Otherwise, RAG evaluation will be done."
+  }
+}
