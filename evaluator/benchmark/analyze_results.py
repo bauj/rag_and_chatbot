@@ -19,7 +19,12 @@ except ImportError:
 
 class BenchmarkAnalyzer:
     """Analyze and compare benchmark results"""
-    
+
+    # Tags that describe question difficulty / language rather than topic.
+    # Anything not in these sets is treated as a topic tag (Sampler, Sensitivity, ...).
+    DIFFICULTY_TAGS = {"easy", "medium", "hard"}
+    LANGUAGE_TAGS = {"Fr", "En"}
+
     def __init__(self, results_file: str):
         """Load benchmark results from file"""
         with open(results_file, "r", encoding="utf-8") as f:
@@ -339,7 +344,20 @@ class BenchmarkAnalyzer:
         if not tags:
             tags = ["untagged"]
         return tags
-    
+
+    @classmethod
+    def _classify_tags(cls, tags: List[str]) -> Dict[str, List[str]]:
+        """Split a normalized tag list into topic / difficulty / language buckets."""
+        buckets = {"topic": [], "difficulty": [], "language": []}
+        for tag in tags:
+            if tag in cls.DIFFICULTY_TAGS:
+                buckets["difficulty"].append(tag)
+            elif tag in cls.LANGUAGE_TAGS:
+                buckets["language"].append(tag)
+            else:
+                buckets["topic"].append(tag)
+        return buckets
+
     def _get_config_labels(self):
         """Generate short and full config labels for all runs"""
         config_labels_short = {}
@@ -417,13 +435,19 @@ class BenchmarkAnalyzer:
         
         print("  Generating: Scores by Tag and Config...")
         self._graph_scores_by_tag(output_path)
-        
+
         print("  Generating: Response Time by Config...")
         self._graph_response_time_by_config(output_path)
-        
+
         print("  Generating: Response Time by Question and Config...")
         self._graph_response_time_by_question(output_path)
-        
+
+        print("  Generating: Scores by Difficulty and Config...")
+        self._graph_scores_by_difficulty(output_path)
+
+        print("  Generating: Scores by Language and Config...")
+        self._graph_scores_by_language(output_path)
+
         print("Graphs generated successfully!")
     
     def _graph_scores_by_question_and_config(self, output_path: Path):
@@ -518,80 +542,82 @@ class BenchmarkAnalyzer:
         
         self._save_graph(fig, output_path, "02_metric_distributions.png")
     
-    def _graph_scores_by_tag(self, output_path: Path):
-        """Generate subplots of scores by tag with box plots for each config grouped by tag"""
+    def _graph_scores_by_dimension(self, output_path: Path, get_labels, dimension_name: str, filename: str):
+        """Generate subplots of scores by an arbitrary tag dimension (topic, difficulty, language),
+        with box plots for each config grouped by label. `get_labels(q_data)` returns the list of
+        labels along that dimension for one question (e.g. its topic tags, or its difficulty tag)."""
         metrics = ["correctness", "relevance", "groundedness", "retrieval_relevance"]
-        
-        # Collect data by tag, config, and metric
-        tag_config_data = {}
-        all_configs, _, _ = self._get_config_labels()
-        
+
+        # Collect data by label, config, and metric
+        label_config_data = {}
+        all_configs, _, config_labels_full = self._get_config_labels()
+
         for run in self.data["results"]:
             mode = run["mode"]
             config = self._format_config(run["configuration"])
             config_label = f"{mode.upper()}\n{config}"
-            short_label = [k for k, v in self._get_config_labels()[2].items() if v == config_label][0]
-            
+            short_label = [k for k, v in config_labels_full.items() if v == config_label][0]
+
             for q_data in run["questions"]:
-                tags = self._normalize_tags(q_data.get("tags", []))
-                
-                for tag in tags:
-                    if tag not in tag_config_data:
-                        tag_config_data[tag] = {}
-                    if short_label not in tag_config_data[tag]:
-                        tag_config_data[tag][short_label] = {
+                labels = get_labels(q_data)
+
+                for label in labels:
+                    if label not in label_config_data:
+                        label_config_data[label] = {}
+                    if short_label not in label_config_data[label]:
+                        label_config_data[label][short_label] = {
                             "correctness": [],
                             "relevance": [],
                             "groundedness": [],
                             "retrieval_relevance": []
                         }
-                    
+
                     for metric, eval_data in q_data["evaluations"].items():
                         score = eval_data.get("score", 0)
-                        tag_config_data[tag][short_label][metric].append(score)
-        
-        if not tag_config_data:
+                        label_config_data[label][short_label][metric].append(score)
+
+        if not label_config_data:
             return
-        
-        tags = sorted(tag_config_data.keys())
-        
+
+        labels_sorted = sorted(label_config_data.keys())
+
         # Create subplots for each metric
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         axes = axes.ravel()
         colors = self._get_colors(len(all_configs))
-        
+
         for metric_idx, metric in enumerate(metrics):
             ax = axes[metric_idx]
-            
-            # Prepare data: for each tag, collect all config data
+
+            # Prepare data: for each label, collect all config data
             box_data = []
             box_labels = []
             box_colors = []
-            
-            for tag_idx, tag in enumerate(tags):
+
+            for label_idx, label in enumerate(labels_sorted):
                 for config_idx, config in enumerate(all_configs):
-                    tag_config_scores = tag_config_data[tag].get(config, {}).get(metric, [])
-                    if tag_config_scores:
-                        box_data.append(tag_config_scores)
+                    label_config_scores = label_config_data[label].get(config, {}).get(metric, [])
+                    if label_config_scores:
+                        box_data.append(label_config_scores)
                         box_labels.append(config)
                         box_colors.append(colors[config_idx])
-                
-                # Add spacing between tags
-                if tag_idx < len(tags) - 1:
+
+                # Add spacing between labels
+                if label_idx < len(labels_sorted) - 1:
                     box_data.append([])
                     box_labels.append('')
                     box_colors.append('white')
-            
+
             # Create box plot
-            bp = ax.boxplot(box_data, tick_labels=box_labels, patch_artist=True, widths=0.6, 
+            bp = ax.boxplot(box_data, tick_labels=box_labels, patch_artist=True, widths=0.6,
                            positions=range(len(box_data)))
-            
+
             # Color the boxes
             for patch, color in zip(bp['boxes'], box_colors):
                 if patch.get_facecolor() != (1, 1, 1, 1):  # Skip spacing boxes
                     patch.set_facecolor(color)
                     patch.set_alpha(0.7)
-            
+
             # Customize box plot appearance
             for whisker in bp['whiskers']:
                 whisker.set(linewidth=1, alpha=0.7)
@@ -599,35 +625,62 @@ class BenchmarkAnalyzer:
                 cap.set(linewidth=1, alpha=0.7)
             for median in bp['medians']:
                 median.set(linewidth=2, color='red')
-            
-            # Add tag separators with labels
+
+            # Add label separators with headers
             ax.set_ylabel('Score')
-            ax.set_title(f'{metric.title()} by Tag and Configuration', fontsize=12, fontweight='bold')
+            ax.set_title(f'{metric.title()} by {dimension_name} and Configuration', fontsize=12, fontweight='bold')
             ax.grid(True, alpha=0.3, axis='y')
             ax.tick_params(axis='x', rotation=45, labelsize=8)
-            
-            # Add tag labels on top
-            tag_positions = []
+
+            # Add label headers on top
+            label_positions = []
             pos = 0
-            for tag_idx, tag in enumerate(tags):
+            for label_idx, label in enumerate(labels_sorted):
                 start_pos = pos
                 pos += len(all_configs)
                 end_pos = pos - 1
-                tag_positions.append((start_pos, end_pos, tag))
-                if tag_idx < len(tags) - 1:
+                label_positions.append((start_pos, end_pos, label))
+                if label_idx < len(labels_sorted) - 1:
                     pos += 1
 
-            # Draw vertical lines between tags and annotate tag groups
-            for tag_idx, (start, end, tag) in enumerate(tag_positions):
-                if tag_idx > 0:
+            # Draw vertical lines between labels and annotate label groups
+            for label_idx, (start, end, label) in enumerate(label_positions):
+                if label_idx > 0:
                     ax.axvline(x=start - 0.5, color='gray', linestyle='--', alpha=0.3, linewidth=1)
                 center = (start + end) / 2
-                ax.text(center, 10.5, tag, ha='center', va='bottom', fontsize=10, fontweight='bold', color='black')
+                ax.text(center, 10.5, label, ha='center', va='bottom', fontsize=10, fontweight='bold', color='black')
 
-            ax.set_xlabel('Configuration grouped by tag')
+            ax.set_xlabel(f'Configuration grouped by {dimension_name.lower()}')
             ax.set_ylim(0, 11)
-        
-        self._save_graph(fig, output_path, "05_scores_by_tag_config.png")
+
+        self._save_graph(fig, output_path, filename)
+
+    def _graph_scores_by_tag(self, output_path: Path):
+        """Scores broken down by topic tag (e.g. Sampler, Sensitivity) and configuration."""
+        def topic_labels(q_data):
+            tags = self._normalize_tags(q_data.get("tags", []))
+            topics = self._classify_tags(tags)["topic"]
+            return topics or ["untagged"]
+
+        self._graph_scores_by_dimension(output_path, topic_labels, "Topic", "05_scores_by_tag_config.png")
+
+    def _graph_scores_by_difficulty(self, output_path: Path):
+        """Scores broken down by difficulty tag (easy/medium/hard) and configuration."""
+        def difficulty_labels(q_data):
+            tags = self._normalize_tags(q_data.get("tags", []))
+            difficulties = self._classify_tags(tags)["difficulty"]
+            return difficulties or ["unspecified"]
+
+        self._graph_scores_by_dimension(output_path, difficulty_labels, "Difficulty", "08_scores_by_difficulty_config.png")
+
+    def _graph_scores_by_language(self, output_path: Path):
+        """Scores broken down by language tag (Fr/En) and configuration."""
+        def language_labels(q_data):
+            tags = self._normalize_tags(q_data.get("tags", []))
+            languages = self._classify_tags(tags)["language"]
+            return languages or ["unspecified"]
+
+        self._graph_scores_by_dimension(output_path, language_labels, "Language", "09_scores_by_language_config.png")
     
     def _graph_response_time_by_config(self, output_path: Path):
         """Generate bar chart of response time by configuration"""

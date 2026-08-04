@@ -151,12 +151,30 @@ def _build_documents(sources: list) -> list:
         documents.append(doc)
     return documents
 
-def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None) -> dict:
-    """Call chatbot.py and return parsed answer/documents."""
+def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
+                   config: Optional[Dict[str, Any]] = None) -> dict:
+    """Call chatbot.py and return parsed answer/documents.
+
+    `config` carries hyperparameter overrides (k, temperature, reranker_enabled,
+    top_n, deep_dive for rag mode; temperature for agentic mode) and is translated
+    into the matching chatbot.py CLI flags.
+    """
     start_time = time.perf_counter()
     cmd = [sys.executable, "chatbot.py", "--question", question, "--json-output"]
     if mode:
         cmd.extend(["--mode", mode])
+
+    if config:
+        if config.get("k") is not None:
+            cmd.extend(["--k", str(config["k"])])
+        if config.get("temperature") is not None:
+            cmd.extend(["--temperature", str(config["temperature"])])
+        if config.get("top_n") is not None:
+            cmd.extend(["--top-n", str(config["top_n"])])
+        if config.get("reranker_enabled") is False:
+            cmd.append("--no-rerank")
+        if config.get("deep_dive"):
+            cmd.append("--deep-dive")
 
     try:
         result = subprocess.run(

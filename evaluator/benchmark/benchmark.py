@@ -10,7 +10,7 @@ import os
 import argparse
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 from itertools import product
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -136,14 +136,18 @@ def run_benchmark(
         question_id: int,
         example: Dict[str, Any],
         mode: str,
-        executor: Optional[ThreadPoolExecutor] = None,
+        config: Dict[str, Any],
         timeout_seconds: int = None,
     ) -> Dict[str, Any]:
         question = example["inputs"]["question"]
         reference_answer = example["outputs"]["answer"]
 
-        answer_dict = _call_chatbot(question, mode, timeout_seconds)
-        evaluations = run_evaluation(question, answer_dict, reference_answer, executor=executor)
+        answer_dict = _call_chatbot(question, mode, timeout_seconds, config=config)
+        # Metrics run sequentially here on purpose: this function itself runs inside a
+        # worker thread of the per-question pool below. Submitting more work to that
+        # same bounded pool from within one of its own workers can deadlock once all
+        # workers are occupied waiting on sub-tasks that have no free thread to run on.
+        evaluations = run_evaluation(question, answer_dict, reference_answer)
         request_time = answer_dict.get("request_time", 0.0)
 
         with progress_lock:
@@ -179,7 +183,7 @@ def run_benchmark(
             if max_workers > 1:
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = {
-                        executor.submit(_run_question, q_idx, example, mode, executor, timeout_seconds): q_idx
+                        executor.submit(_run_question, q_idx, example, mode, config, timeout_seconds): q_idx
                         for q_idx, example in enumerate(dataset, 1)
                     }
 
@@ -190,7 +194,7 @@ def run_benchmark(
                     questions.sort(key=lambda x: x["question_id"])
             else:
                 questions = [
-                    _run_question(q_idx, example, mode, None, timeout_seconds)
+                    _run_question(q_idx, example, mode, config, timeout_seconds)
                     for q_idx, example in enumerate(dataset, 1)
                 ]
 
@@ -301,7 +305,7 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", action="store_true",
                         help="Verbose output")
     parser.add_argument("--workers", type=int, default=1,
-                        help="Number of worker threads for parallel execution (chatbot + evaluation share the same pool; use -1 for all CPUs)")
+                        help="Number of worker threads for parallel execution, one per question (use -1 for all CPUs)")
     parser.add_argument("--timeout", type=int, default=None,
                         help="Timeout in seconds for each chatbot request (default: no timeout)")
 

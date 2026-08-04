@@ -127,9 +127,13 @@ Use `--graphs` to generate visualizations:
 - **Metric distribution**: Box plots showing the score dispersion for each evaluation metric (correctness, relevance, groundedness, retrieval) across configurations
 - **Performance heatmap**: Colored matrix providing a visual overview of average scores achieved by each configuration across all evaluated metrics
 - **Scores by question config**: Grouped bar chart comparing the overall performance of each configuration on the first 15 benchmark questions
-- **Scores by tag config**: Box plots organized by question categories (tags) to identify strengths and weaknesses of configurations according to question types
+- **Scores by tag config**: Box plots organized by topic tag (e.g. `Sampler`, `Sensitivity`) to identify strengths and weaknesses of configurations according to question topic
 - **Response time by config**: Bar chart displaying the average response times for each tested configuration
 - **Response time by question config**: Grouped bar chart detailing response time variations according to questions and configurations
+- **Scores by difficulty config**: Box plots organized by difficulty tag (`easy`/`medium`/`hard`) to see how each configuration holds up as questions get harder
+- **Scores by language config**: Box plots organized by language tag (`Fr`/`En`) to check for language-dependent performance gaps
+
+Topic, difficulty, and language tags are recognized automatically from `dataset.json`'s `tags` field (see `evaluator/base/README.md`); any tag not matching `easy`/`medium`/`hard` or `Fr`/`En` is treated as a topic tag.
 
 Graphs are saved in the `graphs/` folder.
 

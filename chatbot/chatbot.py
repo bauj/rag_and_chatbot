@@ -112,6 +112,27 @@ Examples:
         action='store_true',
         help='Use deep dive mode (terminal single-question mode)'
     )
+    parser.add_argument(
+        '--k',
+        type=int,
+        help='Override number of chunks to retrieve (rag mode only, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--top-n',
+        type=int,
+        dest='top_n',
+        help='Override number of docs kept after reranking (rag mode only, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--no-rerank',
+        action='store_true',
+        help='Disable reranking for this query (rag mode only, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--temperature',
+        type=float,
+        help='Override LLM temperature (terminal single-question mode)'
+    )
 
     parser.add_argument(
         '--mode',
@@ -204,6 +225,9 @@ Examples:
             if args.deep_dive:
                 print(f"Warning: --deep-dive is not supported in {args.mode} mode and will be ignored.",
                       file=sys.stderr)
+            if args.k is not None or args.top_n is not None or args.no_rerank:
+                print("Warning: --k, --top-n and --no-rerank are not supported in agentic mode and will be ignored.",
+                      file=sys.stderr)
         from core import AgenticChatbot
         print("Loading agentic chatbot (page index)...")
         agentic_chatbot = AgenticChatbot(config)
@@ -242,7 +266,7 @@ Examples:
 
         if args.question:
             if args.mode == 'agentic':
-                result = agentic_chatbot.ask(args.question)
+                result = agentic_chatbot.ask(args.question, temperature=args.temperature)
             elif args.mode == 'agentic-smol':
                 result = agentic_smol_chatbot.ask(args.question)
             elif args.json_output:
@@ -252,6 +276,10 @@ Examples:
                     module=args.module,
                     doc_type=args.doc_type,
                     deep_dive=args.deep_dive,
+                    k=args.k,
+                    temperature=args.temperature,
+                    reranker_enabled=not args.no_rerank,
+                    top_n=args.top_n,
                 )
             else:
                 # Single question mode
@@ -259,7 +287,11 @@ Examples:
                     args.question,
                     module=args.module,
                     doc_type=args.doc_type,
-                    deep_dive=args.deep_dive
+                    deep_dive=args.deep_dive,
+                    k=args.k,
+                    temperature=args.temperature,
+                    reranker_enabled=not args.no_rerank,
+                    top_n=args.top_n,
                 )
                 result = None
 
