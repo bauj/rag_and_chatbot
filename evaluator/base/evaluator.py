@@ -100,6 +100,33 @@ class MistralLLM:
         self.structured_output_enabled = False
         self.json_schema = None
 
+    def _post(self, payload: dict, headers: dict) -> requests.Response:
+        """POST to the chat completions endpoint, retrying transient failures
+        (connection errors, timeouts, and 5xx server errors) with backoff. A
+        transient failure isn't the same as a bad answer and shouldn't just
+        propagate straight to a fake 0.0 score."""
+        attempt = 0
+        while True:
+            try:
+                response = requests.post(
+                    f"{self.api_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    verify=SSL_CERTIF if SSL_CERTIF else True,
+                    timeout=LLM_REQUEST_TIMEOUT,
+                )
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                if attempt < LLM_REQUEST_RETRIES:
+                    time.sleep(2 ** attempt)  # 1s, 2s, ...
+                    attempt += 1
+                    continue
+                raise
+            if response.status_code >= 500 and attempt < LLM_REQUEST_RETRIES:
+                time.sleep(2 ** attempt)  # 1s, 2s, ...
+                attempt += 1
+                continue
+            return response
+
     def invoke(self, messages: list) -> Any:
         """Call Mistral API and return response"""
         headers = {
@@ -124,34 +151,14 @@ class MistralLLM:
                 else {"type": "json_object"}
             )
 
-        for attempt in range(LLM_REQUEST_RETRIES + 1):
-            try:
-                response = requests.post(
-                    f"{self.api_url}/chat/completions",
-                    headers=headers,
-                    json=payload,
-                    verify=SSL_CERTIF if SSL_CERTIF else True,
-                    timeout=LLM_REQUEST_TIMEOUT,
-                )
-                break
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-                if attempt < LLM_REQUEST_RETRIES:
-                    time.sleep(2 ** attempt)  # 1s, 2s, ...
-                    continue
-                raise
+        response = self._post(payload, headers)
 
         # Not every OpenAI-compatible gateway supports strict json_schema
         # response_format; some reject it outright with a 400. Fall back to the
         # more widely-supported generic json_object mode before giving up.
         if response.status_code == 400 and used_json_schema:
             payload["response_format"] = {"type": "json_object"}
-            response = requests.post(
-                f"{self.api_url}/chat/completions",
-                headers=headers,
-                json=payload,
-                verify=SSL_CERTIF if SSL_CERTIF else True,
-                timeout=LLM_REQUEST_TIMEOUT,
-            )
+            response = self._post(payload, headers)
 
         response.raise_for_status()
 
