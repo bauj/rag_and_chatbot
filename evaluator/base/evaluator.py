@@ -353,13 +353,26 @@ def run_evaluation(question: str, answer_dict: Dict, reference_answer: str, exec
     return evaluations
 
 ############################################################################################
-####################################### Correctness ########################################
+################################## Shared grading LLM #######################################
 ############################################################################################
 
-# Grade output schema
-class CorrectnessGrade(TypedDict):
+# All four metrics below grade on the same {score, explanation} shape, so they
+# share a single schema and a single Mistral client instead of four identical
+# ones — the prompts (system instructions) are what actually differ per metric.
+class Grade(TypedDict):
     explanation: Annotated[str, ..., "A single paragraph in English justifying the score based on the criteria"]
     score: Annotated[float, ..., "A number between 0 and 10"]
+
+grader_llm = MistralLLM(
+    api_url=LLM_API_URL,
+    model=LLM_MODEL,
+    api_key=LLM_API_KEY,
+    temperature=0
+).with_structured_output(Grade, method="json_schema", strict=True)
+
+############################################################################################
+####################################### Correctness ########################################
+############################################################################################
 
 # Grade prompt
 correctness_instructions = """You are an expert evaluator grading the factual accuracy of an ANSWER produced by a RAG chatbot, by comparing it against a REFERENCE ANSWER. You will be given a QUESTION, the REFERENCE ANSWER, and the ANSWER TO GRADE.
@@ -386,14 +399,6 @@ Your output MUST be in JSON format with only two keys:
 - "score": a number between 0 and 10 (use intermediate values when the answer falls between two rubric anchors)
 - "explanation": a single paragraph written in English, citing the specific facts that justified the score."""
 
-# Grader LLM
-grader_llm = MistralLLM(
-    api_url=LLM_API_URL,
-    model=LLM_MODEL,
-    api_key=LLM_API_KEY,
-    temperature=0
-).with_structured_output(CorrectnessGrade, method="json_schema", strict=True)
-
 # Evaluator
 def correctness(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
     """Score the answer against the reference output."""
@@ -407,11 +412,6 @@ def correctness(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
 ############################################################################################
 ######################################## Relevance #########################################
 ############################################################################################
-
-# Grade output schema
-class RelevanceGrade(TypedDict):
-    explanation: Annotated[str, ..., "A single paragraph in English justifying the score based on the criteria"]
-    score: Annotated[float, ..., "A number between 0 and 10"]
 
 # Grade prompt
 relevance_instructions = """You are an expert evaluator grading whether an ANSWER directly and efficiently addresses a QUESTION, independent of whether the answer is factually correct. You will be given a QUESTION and an ANSWER.
@@ -435,14 +435,6 @@ Your output MUST be in JSON format with only two keys:
 - "score": a number between 0 and 10 (use intermediate values when the answer falls between two rubric anchors)
 - "explanation": a single paragraph written in English, indicating which parts of the answer support the score."""
 
-# Grader LLM
-relevance_llm = MistralLLM(
-    api_url=LLM_API_URL,
-    model=LLM_MODEL,
-    api_key=LLM_API_KEY,
-    temperature=0
-).with_structured_output(RelevanceGrade, method="json_schema", strict=True)
-
 # Evaluator
 def relevance(inputs: dict, outputs: dict) -> dict:
     """Score whether the answer is relevant to the question."""
@@ -450,16 +442,11 @@ def relevance(inputs: dict, outputs: dict) -> dict:
         f"QUESTION: {inputs['question']}\n"
         f"ANSWER: {outputs['answer']}"
     )
-    return _run_structured_eval(relevance_llm, relevance_instructions, answers)
+    return _run_structured_eval(grader_llm, relevance_instructions, answers)
 
 ############################################################################################
 ######################################## Groundedness ######################################
 ############################################################################################
-
-# Grade output schema
-class GroundedGrade(TypedDict):
-    explanation: Annotated[str, ..., "A single paragraph in English justifying the score based on the criteria"]
-    score: Annotated[float, ..., "A number between 0 and 10"]
 
 # Grade prompt
 grounded_instructions = """You are an expert evaluator checking whether an ANSWER is supported by a given set of FACTS (retrieved documents), independent of whether the ANSWER is correct or relevant to the original question. You will be given FACTS and an ANSWER.
@@ -480,14 +467,6 @@ Your output MUST be in JSON format with only two keys:
 - "score": a number between 0 and 10 (use intermediate values when the answer falls between two rubric anchors)
 - "explanation": a single paragraph written in English, identifying the specific claim(s) that are or are not supported by the FACTS."""
 
-# Grader LLM
-grounded_llm = MistralLLM(
-    api_url=LLM_API_URL,
-    model=LLM_MODEL,
-    api_key=LLM_API_KEY,
-    temperature=0
-).with_structured_output(GroundedGrade, method="json_schema", strict=True)
-
 # Evaluator
 def groundedness(_inputs: dict, outputs: dict) -> dict:
     """Score whether the answer is grounded in the provided documents."""
@@ -500,16 +479,11 @@ def groundedness(_inputs: dict, outputs: dict) -> dict:
         f"FACTS: {doc_string}\n"
         f"ANSWER: {outputs['answer']}"
     )
-    return _run_structured_eval(grounded_llm, grounded_instructions, answers)
+    return _run_structured_eval(grader_llm, grounded_instructions, answers)
 
 ############################################################################################
 #################################### Retrieval Relevance ###################################
 ############################################################################################
-
-# Grade output schema
-class RetrievalRelevanceGrade(TypedDict):
-    explanation: Annotated[str, ..., "A single paragraph in English justifying the score based on the criteria"]
-    score: Annotated[float, ..., "A number between 0 and 10"]
 
 # Grade prompt
 retrieval_relevance_instructions = """You are an expert evaluator judging whether a set of retrieved DOCUMENTS is useful for answering a QUESTION. You will be given a QUESTION and the DOCUMENTS retrieved for it.
@@ -530,14 +504,6 @@ Your output MUST be in JSON format with only two keys:
 - "score": a number between 0 and 10 (use intermediate values when the set falls between two rubric anchors)
 - "explanation": a single paragraph written in English, indicating which documents (by title, if available) were or were not useful."""
 
-# Grader LLM
-retrieval_relevance_llm = MistralLLM(
-    api_url=LLM_API_URL,
-    model=LLM_MODEL,
-    api_key=LLM_API_KEY,
-    temperature=0
-).with_structured_output(RetrievalRelevanceGrade, method="json_schema", strict=True)
-
 # Evaluator
 def retrieval_relevance(inputs: dict, outputs: dict) -> dict:
     """Score whether provided documents are relevant to the question."""
@@ -550,7 +516,7 @@ def retrieval_relevance(inputs: dict, outputs: dict) -> dict:
         f"DOCUMENTS: {doc_string}\n"
         f"QUESTION: {inputs['question']}"
     )
-    return _run_structured_eval(retrieval_relevance_llm, retrieval_relevance_instructions, answers)
+    return _run_structured_eval(grader_llm, retrieval_relevance_instructions, answers)
 
 ############################################################################################
 ###################################### Run on dataset ######################################
@@ -562,10 +528,6 @@ dataset_file = Path(__file__).resolve().parent / "dataset.json"
 def _load_examples():
     with open(dataset_file, "r", encoding="utf-8") as f:
         return json.load(f)
-    
-# Test the Chatbot with dataset
-print("Testing Chatbot...")
-print("=" * 80)
 
 def _sanitize_eval_result(ev):
     """Extract score and explanation from evaluation result, always preserving LLM explanations."""
@@ -586,7 +548,25 @@ EVAL_METRICS = [
     "retrieval_relevance",
 ]
 
+def _print_example_result(display_index: int, result: dict) -> None:
+    print(f"\n{'=' * 80}")
+    print(f"Example {display_index}:")
+    print(f"{'=' * 80}")
+    print(f"\nQuestion: {result['question']}\n")
+    print(f"Expected Answer: {result['expected_answer']}\n")
+    rag_answer_preview = result['rag_answer'][:100] + "..." if len(result['rag_answer']) > 100 else result['rag_answer']
+    print(f"RAG Answer (preview): {rag_answer_preview}\n")
+    print("-" * 80)
+    print("EVALUATION SCORES:")
+    print("-" * 80)
+    for metric, eval_result in result['evaluations'].items():
+        print(f"  {metric.replace('_', ' ').title()}: {eval_result.get('score', 0):.1f}")
+    print("-" * 80)
+
 def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int = None):
+    print("Testing Chatbot...")
+    print("=" * 80)
+
     examples = _load_examples()
     if limit_questions:
         examples = examples[:limit_questions]
@@ -636,38 +616,13 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
             for future in as_completed(eval_futures):
                 result = future.result()
                 results.append(result)
-                i = len(results)
-                print(f"\n{'=' * 80}")
-                print(f"Example {i}:")
-                print(f"{'=' * 80}")
-                print(f"\nQuestion: {result['question']}\n")
-                print(f"Expected Answer: {result['expected_answer']}\n")
-                rag_answer_preview = result['rag_answer'][:100] + "..." if len(result['rag_answer']) > 100 else result['rag_answer']
-                print(f"RAG Answer (preview): {rag_answer_preview}\n")
-                print("-" * 80)
-                print("EVALUATION SCORES:")
-                print("-" * 80)
-                for metric, eval_result in result['evaluations'].items():
-                    print(f"  {metric.replace('_', ' ').title()}: {eval_result.get('score', 0):.1f}")
-                print("-" * 80)
+                _print_example_result(len(results), result)
     else:
         chatbot_results = [fetch_chatbot(i, example) for i, example in enumerate(examples, 1)]
         for idx, example, output in chatbot_results:
             result = evaluate_example(idx, example, output)
             results.append(result)
-            print(f"\n{'=' * 80}")
-            print(f"Example {idx}:")
-            print(f"{'=' * 80}")
-            print(f"\nQuestion: {result['question']}\n")
-            print(f"Expected Answer: {result['expected_answer']}\n")
-            rag_answer_preview = result['rag_answer'][:100] + "..." if len(result['rag_answer']) > 100 else result['rag_answer']
-            print(f"RAG Answer (preview): {rag_answer_preview}\n")
-            print("-" * 80)
-            print("EVALUATION SCORES:")
-            print("-" * 80)
-            for metric, eval_result in result['evaluations'].items():
-                print(f"  {metric.replace('_', ' ').title()}: {eval_result.get('score', 0):.1f}")
-            print("-" * 80)
+            _print_example_result(idx, result)
 
     # In parallel mode, results arrive in completion order rather than dataset
     # order; restore dataset order so the saved file and the printed summary
