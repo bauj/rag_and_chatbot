@@ -7,7 +7,7 @@ import argparse
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from typing_extensions import Annotated, TypedDict
+from typing_extensions import Annotated, TypedDict, get_args
 import requests
 from typing import Any, Optional, Dict
 
@@ -60,6 +60,36 @@ LLM_REQUEST_RETRIES = int(os.getenv("MISTRAL_REQUEST_RETRIES", "2"))
 ################################ Custom Mistral LLM client #################################
 ############################################################################################
 
+# Maps the Python types used in the Annotated[...] grade TypedDicts to JSON Schema types.
+_JSON_TYPE_BY_PY_NAME = {"str": "string", "float": "number", "int": "number", "bool": "boolean"}
+
+def _typed_dict_to_json_schema(schema_cls: type, name: str) -> dict:
+    """Convert a TypedDict of Annotated[type, ..., description] fields into an
+    OpenAI-compatible JSON schema, so the grading LLM is actually constrained to
+    the {score, explanation} shape instead of relying on it to follow free-text
+    instructions."""
+    properties = {}
+    required = []
+    for field_name, annotation in schema_cls.__annotations__.items():
+        args = get_args(annotation)
+        field_type = args[0] if args else annotation
+        description = next((a for a in args[1:] if isinstance(a, str)), None)
+        prop = {"type": _JSON_TYPE_BY_PY_NAME.get(getattr(field_type, "__name__", ""), "string")}
+        if description:
+            prop["description"] = description
+        properties[field_name] = prop
+        required.append(field_name)
+    return {
+        "name": name,
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        },
+    }
+
 # Custom Mistral LLM client
 class MistralLLM:
     def __init__(self, api_url: str, model: str, api_key: str, temperature: float = 0.7):
@@ -68,6 +98,7 @@ class MistralLLM:
         self.api_key = api_key
         self.temperature = temperature
         self.structured_output_enabled = False
+        self.json_schema = None
 
     def invoke(self, messages: list) -> Any:
         """Call Mistral API and return response"""
@@ -82,9 +113,16 @@ class MistralLLM:
             "temperature": self.temperature
         }
 
-        # Add structured output if enabled
+        # Add structured output if enabled. Prefer a real json_schema constraint
+        # (forces the shape of the response) and fall back to the generic
+        # json_object mode, which only guarantees valid JSON, not a given shape.
+        used_json_schema = self.structured_output_enabled and self.json_schema is not None
         if self.structured_output_enabled:
-            payload["response_format"] = {"type": "json_object"}
+            payload["response_format"] = (
+                {"type": "json_schema", "json_schema": self.json_schema}
+                if used_json_schema
+                else {"type": "json_object"}
+            )
 
         for attempt in range(LLM_REQUEST_RETRIES + 1):
             try:
@@ -101,50 +139,67 @@ class MistralLLM:
                     time.sleep(2 ** attempt)  # 1s, 2s, ...
                     continue
                 raise
+
+        # Not every OpenAI-compatible gateway supports strict json_schema
+        # response_format; some reject it outright with a 400. Fall back to the
+        # more widely-supported generic json_object mode before giving up.
+        if response.status_code == 400 and used_json_schema:
+            payload["response_format"] = {"type": "json_object"}
+            response = requests.post(
+                f"{self.api_url}/chat/completions",
+                headers=headers,
+                json=payload,
+                verify=SSL_CERTIF if SSL_CERTIF else True,
+                timeout=LLM_REQUEST_TIMEOUT,
+            )
+
         response.raise_for_status()
-        
+
         result = response.json()
         content = result["choices"][0]["message"]["content"]
-        
+
         # Parse JSON if structured output was requested
         if self.structured_output_enabled:
             try:
                 return json.loads(content)
             except json.JSONDecodeError:
                 return {"content": content}
-        
+
         # Return a simple object with content attribute for compatibility
         class Response:
             def __init__(self, content):
                 self.content = content
-        
+
         return Response(content)
-    
+
     def with_structured_output(self, schema, method="json_schema", strict=True):
-        """Enable structured output and return self for method chaining"""
+        """Enable structured output, constraining responses to `schema`'s shape."""
         self.structured_output_enabled = True
+        self.json_schema = _typed_dict_to_json_schema(schema, schema.__name__)
         return self
 
 def _run_structured_eval(llm: MistralLLM, instructions: str, content: str):
     """Run a structured evaluator LLM and extract the output.
 
     Returns: {score: float, explanation: str}
+
+    A malformed grading response (missing/non-numeric "score") is treated as a
+    pipeline error, not a real 0.0 — it's routed through the same except branch
+    as network failures below, so it's never confused with a genuine low score
+    assigned by the grader.
     """
     try:
         grade = llm.invoke([
             {"role": "system", "content": instructions},
             {"role": "user", "content": content},
         ])
-        if isinstance(grade, dict):
-            score = float(grade.get("score", 0.0))
-            explanation_text = grade.get("explanation", "")
-        else:
-            # Fallback for non-structured responses
-            explanation_text = "Non-structured response ..."
-            score = 0.0
+        if not isinstance(grade, dict) or "score" not in grade:
+            raise ValueError(f"Grading response did not contain a 'score' field: {grade!r}")
+        score = float(grade["score"])
+        explanation_text = grade.get("explanation", "")
         return {"score": score, "explanation": explanation_text}
     except Exception as e:
-        return {"score": 0.0, "explanation": str(e)}
+        return {"score": 0.0, "explanation": f"Grading error (not an actual score of 0): {e}"}
 
 def _build_documents(sources: list) -> list:
     """Convert raw source dicts into document-like objects."""
