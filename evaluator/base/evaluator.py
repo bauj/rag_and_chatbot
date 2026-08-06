@@ -386,7 +386,7 @@ def relevance(inputs: dict, outputs: dict) -> dict:
     """Score whether the answer is relevant to the question."""
     answers = (
         f"QUESTION: {inputs['question']}\n"
-        f"STUDENT ANSWER: {outputs['answer']}"
+        f"ANSWER: {outputs['answer']}"
     )
     return _run_structured_eval(relevance_llm, relevance_instructions, answers)
 
@@ -431,12 +431,12 @@ def groundedness(_inputs: dict, outputs: dict) -> dict:
     """Score whether the answer is grounded in the provided documents."""
     documents = outputs.get("documents") or []
     if not documents:
-        return {"score": 0.0, "explanation": "No documents were provided by the student."}
-    
+        return {"score": 0.0, "explanation": "No documents were provided to check groundedness against."}
+
     doc_string = "\n\n".join(getattr(doc, "page_content", str(doc)) for doc in documents)
     answers = (
         f"FACTS: {doc_string}\n"
-        f"STUDENT ANSWER: {outputs['answer']}"
+        f"ANSWER: {outputs['answer']}"
     )
     return _run_structured_eval(grounded_llm, grounded_instructions, answers)
 
@@ -481,7 +481,7 @@ def retrieval_relevance(inputs: dict, outputs: dict) -> dict:
     """Score whether provided documents are relevant to the question."""
     documents = outputs.get("documents") or []
     if not documents:
-        return {"score": 0.0, "explanation": "No documents were provided by the student."}
+        return {"score": 0.0, "explanation": "No documents were retrieved for this question."}
 
     doc_string = "\n\n".join(getattr(doc, "page_content", str(doc)) for doc in documents)
     answers = (
@@ -606,6 +606,11 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
             for metric, eval_result in result['evaluations'].items():
                 print(f"  {metric.replace('_', ' ').title()}: {eval_result.get('score', 0):.1f}")
             print("-" * 80)
+
+    # In parallel mode, results arrive in completion order rather than dataset
+    # order; restore dataset order so the saved file and the printed summary
+    # are stable and comparable across runs.
+    results.sort(key=lambda r: r["index"])
 
     # Calculate average scores
     summary = None
