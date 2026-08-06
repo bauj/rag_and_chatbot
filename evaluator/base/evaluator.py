@@ -48,6 +48,14 @@ evaluator_options = evaluator_config.get("evaluator_options", {})
 
 AGENTIC_MODE = bool(evaluator_options.get("agentic_mode", False))
 
+# Grading calls go straight to requests.post() with no subprocess involved, so unlike
+# the chatbot subprocess call (bounded by --timeout) a stalled connection here would
+# otherwise hang forever. Bound it, and retry transient connection failures a couple
+# of times before giving up — a dropped connection isn't the same as a bad answer and
+# shouldn't silently show up as a fake 0.0 score.
+LLM_REQUEST_TIMEOUT = float(os.getenv("MISTRAL_REQUEST_TIMEOUT", "120"))
+LLM_REQUEST_RETRIES = int(os.getenv("MISTRAL_REQUEST_RETRIES", "2"))
+
 ############################################################################################
 ################################ Custom Mistral LLM client #################################
 ############################################################################################
@@ -60,30 +68,39 @@ class MistralLLM:
         self.api_key = api_key
         self.temperature = temperature
         self.structured_output_enabled = False
-    
+
     def invoke(self, messages: list) -> Any:
         """Call Mistral API and return response"""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
-        
+
         payload = {
             "model": self.model,
             "messages": messages,
             "temperature": self.temperature
         }
-        
+
         # Add structured output if enabled
         if self.structured_output_enabled:
             payload["response_format"] = {"type": "json_object"}
-        
-        response = requests.post(
-            f"{self.api_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            verify=SSL_CERTIF if SSL_CERTIF else True
-        )
+
+        for attempt in range(LLM_REQUEST_RETRIES + 1):
+            try:
+                response = requests.post(
+                    f"{self.api_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    verify=SSL_CERTIF if SSL_CERTIF else True,
+                    timeout=LLM_REQUEST_TIMEOUT,
+                )
+                break
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                if attempt < LLM_REQUEST_RETRIES:
+                    time.sleep(2 ** attempt)  # 1s, 2s, ...
+                    continue
+                raise
         response.raise_for_status()
         
         result = response.json()
@@ -279,27 +296,33 @@ def run_evaluation(question: str, answer_dict: Dict, reference_answer: str, exec
 
 # Grade output schema
 class CorrectnessGrade(TypedDict):
-    explanation: Annotated[str, ..., "A step-by-step explanation in French justifying the score based on the criteria"]
+    explanation: Annotated[str, ..., "A single paragraph in English justifying the score based on the criteria"]
     score: Annotated[float, ..., "A number between 0 and 10"]
 
 # Grade prompt
-correctness_instructions = """You are a teacher grading a quiz. You will be given a QUESTION, the GROUND TRUTH (correct) ANSWER, and the STUDENT ANSWER.
+correctness_instructions = """You are an expert evaluator grading the factual accuracy of an ANSWER produced by a RAG chatbot, by comparing it against a REFERENCE ANSWER. You will be given a QUESTION, the REFERENCE ANSWER, and the ANSWER TO GRADE.
 
-Your task is to evaluate the student’s answer based on the following criteria:
+Evaluate ONLY factual accuracy relative to the REFERENCE ANSWER:
 
-(1) Grade the student answer based ONLY on its factual accuracy relative to the ground truth answer.
-(2) Ensure that the student answer does not contain any internal contradictions.
-(3) It is acceptable for the student answer to include additional information, as long as it is factually accurate and consistent with the ground truth.
+(1) Grade based solely on factual accuracy — do not penalize differences in wording, structure, tone, or level of detail.
+(2) Flag any internal contradiction within the ANSWER TO GRADE.
+(3) Additional information beyond the REFERENCE ANSWER is acceptable, provided it is factually accurate and does not conflict with the REFERENCE ANSWER.
 
-You must assign a score between 0 and 10 reflecting the factual accuracy of the student’s answer.
+Use this rubric strictly. Pick the anchor whose description best matches the ANSWER TO GRADE; use an intermediate value (e.g. 7, 3) when it falls between two anchors:
 
-A score of 10 means the answer is completely factually correct.
-A score of 0 means the answer is entirely incorrect.
+- 10: Every factual claim matches the REFERENCE ANSWER. No contradictions, no invented facts.
+- 8: All essential facts are correct; at most one minor, non-critical imprecision or omission.
+- 6: The core answer is correct but is missing a fact a user would consider important, or contains one minor inaccuracy.
+- 4: Mixed accuracy — some correct facts are present, but at least one significant claim is wrong or missing, materially changing the answer.
+- 2: Mostly incorrect — only marginal or tangential facts are correct; the main claim is wrong or absent.
+- 0: Entirely incorrect, contradicts the REFERENCE ANSWER, or does not answer the question at all.
+
+Before assigning a score, identify the specific facts in the ANSWER TO GRADE that match or conflict with the REFERENCE ANSWER — your explanation should cite them.
 
 Your output MUST be in JSON format with only two keys:
 
-- "score": a number between 0 and 10
-- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above."""
+- "score": a number between 0 and 10 (use intermediate values when the answer falls between two rubric anchors)
+- "explanation": a single paragraph written in English, citing the specific facts that justified the score."""
 
 # Grader LLM
 grader_llm = MistralLLM(
@@ -314,8 +337,8 @@ def correctness(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
     """Score the answer against the reference output."""
     answers = (
         f"QUESTION: {inputs['question']}\n"
-        f"GROUND TRUTH ANSWER: {reference_outputs['answer']}\n"
-        f"STUDENT ANSWER: {outputs['answer']}"
+        f"REFERENCE ANSWER: {reference_outputs['answer']}\n"
+        f"ANSWER TO GRADE: {outputs['answer']}"
     )
     return _run_structured_eval(grader_llm, correctness_instructions, answers)
 
@@ -325,26 +348,30 @@ def correctness(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
 
 # Grade output schema
 class RelevanceGrade(TypedDict):
-    explanation: Annotated[str, ..., "A step-by-step explanation in French justifying the score based on the criteria"]
+    explanation: Annotated[str, ..., "A single paragraph in English justifying the score based on the criteria"]
     score: Annotated[float, ..., "A number between 0 and 10"]
 
 # Grade prompt
-relevance_instructions = """You are a teacher grading a quiz. You will be given a QUESTION and a STUDENT ANSWER.
+relevance_instructions = """You are an expert evaluator grading whether an ANSWER directly and efficiently addresses a QUESTION, independent of whether the answer is factually correct. You will be given a QUESTION and an ANSWER.
 
-Your task is to evaluate the relevance of the student’s answer based on the following criteria:
+Judge only:
 
-(1) Ensure the STUDENT ANSWER is concise and directly relevant to the QUESTION.
-(2) Ensure the STUDENT ANSWER helps to answer the QUESTION.
+(1) Does the ANSWER address what was actually asked?
+(2) Is it free of irrelevant padding, off-topic content, or an unjustified refusal to answer?
 
-You must assign a score between 0 and 10 reflecting the relevance of the student’s answer:
+Use this rubric strictly. Pick the anchor whose description best matches the ANSWER; use an intermediate value when it falls between two anchors:
 
-A score of 10 means the answer is fully relevant, concise, and directly answers the question.
-A score of 0 means the answer is irrelevant, off-topic, or does not help answer the question.
+- 10: Directly and completely addresses the question; no irrelevant content.
+- 8: Addresses the question well, with only minor irrelevant or redundant content.
+- 6: Partially addresses the question — covers part of what was asked but misses or sidesteps another part, or includes a notable amount of unrelated content.
+- 4: Loosely related — touches the general topic but does not actually answer what was asked.
+- 2: Barely related — connects only tangentially to the topic of the question.
+- 0: Off-topic, non-responsive, or refuses to answer without justification.
 
 Your output MUST be in JSON format with only two keys:
 
-- "score": a number between 0 and 10
-- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above."""
+- "score": a number between 0 and 10 (use intermediate values when the answer falls between two rubric anchors)
+- "explanation": a single paragraph written in English, indicating which parts of the answer support the score."""
 
 # Grader LLM
 relevance_llm = MistralLLM(
@@ -369,26 +396,27 @@ def relevance(inputs: dict, outputs: dict) -> dict:
 
 # Grade output schema
 class GroundedGrade(TypedDict):
-    explanation: Annotated[str, ..., "A step-by-step explanation in French justifying the score based on the criteria"]
+    explanation: Annotated[str, ..., "A single paragraph in English justifying the score based on the criteria"]
     score: Annotated[float, ..., "A number between 0 and 10"]
 
 # Grade prompt
-grounded_instructions = """You are a teacher grading a quiz. You will be given FACTS and a STUDENT ANSWER.
+grounded_instructions = """You are an expert evaluator checking whether an ANSWER is supported by a given set of FACTS (retrieved documents), independent of whether the ANSWER is correct or relevant to the original question. You will be given FACTS and an ANSWER.
 
-Your task is to evaluate whether the student’s answer is grounded in the provided facts based on the following criteria:
+For each claim in the ANSWER, check whether it is stated or directly implied by the FACTS. Do not judge whether the FACTS are sufficient to fully answer the question, or whether the ANSWER is a good answer — only whether every claim in it traces back to the FACTS.
 
-(1) Ensure the STUDENT ANSWER is fully grounded in the FACTS.
-(2) Ensure the STUDENT ANSWER does not contain any “hallucinated” information outside the scope of the FACTS.
+Use this rubric strictly. Pick the anchor whose description best matches the ANSWER; use an intermediate value when it falls between two anchors:
 
-You must assign a score between 0 and 10 reflecting how well the student’s answer is grounded in the facts:
-
-A score of 10 means the answer is entirely based on the provided facts with no hallucinated information.
-A score of 0 means the answer is not grounded in the facts at all or contains significant hallucinated information.
+- 10: Every claim in the ANSWER is directly supported by the FACTS. No invented or extrapolated information.
+- 8: Nearly all claims are supported; at most one minor, low-impact detail is not traceable to the FACTS.
+- 6: Mostly grounded, but contains one claim of moderate importance that is not supported by the FACTS.
+- 4: Mixed — a significant portion of the ANSWER is not supported by the FACTS, alongside some grounded content.
+- 2: Mostly unsupported — only marginal parts of the ANSWER trace back to the FACTS.
+- 0: Not grounded at all, or actively contradicts the FACTS.
 
 Your output MUST be in JSON format with only two keys:
 
-- "score": a number between 0 and 10
-- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above."""
+- "score": a number between 0 and 10 (use intermediate values when the answer falls between two rubric anchors)
+- "explanation": a single paragraph written in English, identifying the specific claim(s) that are or are not supported by the FACTS."""
 
 # Grader LLM
 grounded_llm = MistralLLM(
@@ -418,27 +446,27 @@ def groundedness(_inputs: dict, outputs: dict) -> dict:
 
 # Grade output schema
 class RetrievalRelevanceGrade(TypedDict):
-    explanation: Annotated[str, ..., "A step-by-step explanation in French justifying the score based on the criteria"]
+    explanation: Annotated[str, ..., "A single paragraph in English justifying the score based on the criteria"]
     score: Annotated[float, ..., "A number between 0 and 10"]
 
 # Grade prompt
-retrieval_relevance_instructions = """You are a teacher grading a quiz. You will be given a QUESTION and a set of FACTS (documents) provided by the student.
+retrieval_relevance_instructions = """You are an expert evaluator judging whether a set of retrieved DOCUMENTS is useful for answering a QUESTION. You will be given a QUESTION and the DOCUMENTS retrieved for it.
 
-Your task is to evaluate the relevance of these facts with respect to the question based on the following criteria:
+For each document, judge whether it contains information that would actually help answer the QUESTION — sharing a keyword or general topic with the QUESTION is NOT enough on its own if the document does not provide information useful to answering it. Then judge the set as a whole based on the proportion of documents that are genuinely useful.
 
-(1) Identify any FACTS that are completely unrelated to the QUESTION.
-(2) If the FACTS contain ANY keywords or semantic meaning related to the QUESTION, consider them relevant.
-(3) It is acceptable for the FACTS to include some unrelated information as long as criterion (2) is met.
+Use this rubric strictly. Pick the anchor whose description best matches the DOCUMENTS as a whole; use an intermediate value when it falls between two anchors:
 
-You must assign a score between 0 and 10 reflecting the overall relevance of the provided facts:
-
-A score of 10 means the facts clearly contain relevant keywords or semantic meaning related to the question.
-A score of 0 means the facts are completely unrelated to the question.
+- 10: All (or nearly all) documents directly help answer the question.
+- 8: A clear majority of documents are useful; one or two are tangential or unhelpful.
+- 6: About half the documents are useful; the rest are off-topic or only superficially related.
+- 4: A minority of documents are useful; most only share a topic or keyword with the question without providing information that helps answer it.
+- 2: At most one document is marginally useful; the rest are unrelated.
+- 0: None of the documents help answer the question.
 
 Your output MUST be in JSON format with only two keys:
 
-- "score": a number between 0 and 10
-- "explanation": a single string paragraph written in English, explaining the score clearly and concisely, based on the criteria above."""
+- "score": a number between 0 and 10 (use intermediate values when the set falls between two rubric anchors)
+- "explanation": a single paragraph written in English, indicating which documents (by title, if available) were or were not useful."""
 
 # Grader LLM
 retrieval_relevance_llm = MistralLLM(
