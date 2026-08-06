@@ -52,33 +52,44 @@ You can define your own tags, but here are some examples: `Cpp`, `Py`, `Methodol
 
 Copy `dataset.example.json` to create your dataset.
 
-The results are saved in `evaluation_results.json`. The file contains the scores for each question, along with a brief explanation of each grade, in the following format:
+The results are saved in `evaluation_results.json`. The file starts with a `summary` object (the same averages printed to the terminal as "EVALUATION SUMMARY - AVERAGE SCORES"), followed by `results`: the scores for each question along with a brief explanation of each grade, in the following format:
 
 ```json
-[
-  {
-    "question": "Question 1?",
-    "expected_answer": "Expected Answer 1.",
-    "rag_answer": "Chatbot Answer 1.",
-    "request_time": 24.65836753399344,
-    "evaluations": {
-      "correctness": {
-        "score": 5.0,
-        "explanation": "Explanation of the correctness score."
-      },
-      "relevance": {
-        "score": 8.0,
-        "explanation": "Explanation of the relevance score."
-      },
-      "groundedness": {
-        "score": 2.0,
-        "explanation": "Explanation of the groundedness score."
-      },
-      "retrieval_relevance": {
-        "score": 10.0,
-        "explanation": "Explanation of the retrieval relevance score."
+{
+  "summary": {
+    "total_examples": 1,
+    "correctness": 5.0,
+    "relevance": 8.0,
+    "groundedness": 2.0,
+    "retrieval_relevance": 10.0,
+    "overall_average": 6.25,
+    "average_request_time_seconds": 24.65836753399344
+  },
+  "results": [
+    {
+      "question": "Question 1?",
+      "expected_answer": "Expected Answer 1.",
+      "rag_answer": "Chatbot Answer 1.",
+      "request_time": 24.65836753399344,
+      "evaluations": {
+        "correctness": {
+          "score": 5.0,
+          "explanation": "Explanation of the correctness score."
+        },
+        "relevance": {
+          "score": 8.0,
+          "explanation": "Explanation of the relevance score."
+        },
+        "groundedness": {
+          "score": 2.0,
+          "explanation": "Explanation of the groundedness score."
+        },
+        "retrieval_relevance": {
+          "score": 10.0,
+          "explanation": "Explanation of the retrieval relevance score."
+        }
       }
     }
-  }
-]
+  ]
+}
 ```

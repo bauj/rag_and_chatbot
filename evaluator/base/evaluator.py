@@ -607,34 +607,46 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
                 print(f"  {metric.replace('_', ' ').title()}: {eval_result.get('score', 0):.1f}")
             print("-" * 80)
 
-    # Save results
-    results_file = "evaluation_results.json"
-    with open(results_file, "w", encoding="utf-8") as rf:
-        json.dump(results, rf, ensure_ascii=False, indent=2)
-
-    print(f"\nEvaluation complete. Results saved to {results_file}")
-
-    # Calculate and display average scores
-    print("\n" + "=" * 80)
-    print("EVALUATION SUMMARY - AVERAGE SCORES")
-    print("=" * 80)
-
+    # Calculate average scores
+    summary = None
     if results:
         avg_correctness = sum(r["evaluations"]["correctness"].get("score", 0.0) for r in results) / len(results)
         avg_relevance = sum(r["evaluations"]["relevance"].get("score", 0.0) for r in results) / len(results)
         avg_groundedness = sum(r["evaluations"]["groundedness"].get("score", 0.0) for r in results) / len(results)
         avg_retrieval_relevance = sum(r["evaluations"]["retrieval_relevance"].get("score", 0.0) for r in results) / len(results)
         avg_request_time = sum(r.get("request_time", 0.0) for r in results) / len(results)
-
-        print(f"Total examples evaluated: {len(results)}\n")
-        print(f"Correctness:         {avg_correctness:.1f}/10")
-        print(f"Relevance:           {avg_relevance:.1f}/10")
-        print(f"Groundedness:        {avg_groundedness:.1f}/10")
-        print(f"Retrieval Relevance: {avg_retrieval_relevance:.1f}/10")
-        print(f"Average Chatbot Request Time: {avg_request_time:.3f} seconds")
-
         avg_overall = (avg_correctness + avg_relevance + avg_groundedness + avg_retrieval_relevance) / 4
-        print(f"\nOverall Average:     {avg_overall:.1f}/10")
+
+        summary = {
+            "total_examples": len(results),
+            "correctness": avg_correctness,
+            "relevance": avg_relevance,
+            "groundedness": avg_groundedness,
+            "retrieval_relevance": avg_retrieval_relevance,
+            "overall_average": avg_overall,
+            "average_request_time_seconds": avg_request_time,
+        }
+
+    # Save results, with the summary first so it's readable at the top of the file
+    results_file = "evaluation_results.json"
+    with open(results_file, "w", encoding="utf-8") as rf:
+        json.dump({"summary": summary, "results": results}, rf, ensure_ascii=False, indent=2)
+
+    print(f"\nEvaluation complete. Results saved to {results_file}")
+
+    # Display average scores
+    print("\n" + "=" * 80)
+    print("EVALUATION SUMMARY - AVERAGE SCORES")
+    print("=" * 80)
+
+    if summary:
+        print(f"Total examples evaluated: {summary['total_examples']}\n")
+        print(f"Correctness:         {summary['correctness']:.1f}/10")
+        print(f"Relevance:           {summary['relevance']:.1f}/10")
+        print(f"Groundedness:        {summary['groundedness']:.1f}/10")
+        print(f"Retrieval Relevance: {summary['retrieval_relevance']:.1f}/10")
+        print(f"Average Chatbot Request Time: {summary['average_request_time_seconds']:.3f} seconds")
+        print(f"\nOverall Average:     {summary['overall_average']:.1f}/10")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate chatbot responses")
