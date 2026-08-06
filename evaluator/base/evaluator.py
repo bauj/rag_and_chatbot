@@ -44,11 +44,31 @@ SSL_CERTIF = os.getenv("SSL_CERTIF", llm_config.get("ssl_cert_file"))
 
 CHATBOT_DIR = os.getenv("CHATBOT_DIR", evaluator_config.get("chatbot_path"))
 
+def _validate_config() -> None:
+    """Fail fast with an actionable message if required config is missing,
+    instead of running the whole dataset and quietly producing all-0.0 scores
+    (e.g. because config.json failed to parse and was silently replaced with {})."""
+    missing = [
+        name for name, value in [
+            ("llm.base_url (or MISTRAL_API_URL)", LLM_API_URL),
+            ("llm.model (or MISTRAL_MODEL)", LLM_MODEL),
+            ("llm.api_key (or MISTRAL_API_KEY)", LLM_API_KEY),
+            ("chatbot_path (or CHATBOT_DIR)", CHATBOT_DIR),
+        ]
+        if not value
+    ]
+    if missing:
+        raise RuntimeError(
+            "Missing required evaluator configuration: " + ", ".join(missing) + ". "
+            "Check evaluator/base/config.json (copy it from config.example.json if it "
+            "doesn't exist yet) or set the corresponding environment variables."
+        )
+
 evaluator_options = evaluator_config.get("evaluator_options", {})
 
 AGENTIC_MODE = bool(evaluator_options.get("agentic_mode", False))
 
-# Grading calls go straight to requests.post() with no subprocess involved, so unlike
+# Grading calls go straight over HTTP with no subprocess involved, so unlike
 # the chatbot subprocess call (bounded by --timeout) a stalled connection here would
 # otherwise hang forever. Bound it, and retry transient connection failures a couple
 # of times before giving up — a dropped connection isn't the same as a bad answer and
@@ -99,6 +119,10 @@ class MistralLLM:
         self.temperature = temperature
         self.structured_output_enabled = False
         self.json_schema = None
+        # Reused across calls (incl. concurrently, from the ThreadPoolExecutor in
+        # main()) so requests pool and reuse TCP/TLS connections instead of
+        # paying a fresh handshake for every single grading call.
+        self.session = requests.Session()
 
     def _post(self, payload: dict, headers: dict) -> requests.Response:
         """POST to the chat completions endpoint, retrying transient failures
@@ -108,7 +132,7 @@ class MistralLLM:
         attempt = 0
         while True:
             try:
-                response = requests.post(
+                response = self.session.post(
                     f"{self.api_url}/chat/completions",
                     headers=headers,
                     json=payload,
@@ -179,7 +203,7 @@ class MistralLLM:
 
         return Response(content)
 
-    def with_structured_output(self, schema, method="json_schema", strict=True):
+    def with_structured_output(self, schema):
         """Enable structured output, constraining responses to `schema`'s shape."""
         self.structured_output_enabled = True
         self.json_schema = _typed_dict_to_json_schema(schema, schema.__name__)
@@ -368,7 +392,7 @@ grader_llm = MistralLLM(
     model=LLM_MODEL,
     api_key=LLM_API_KEY,
     temperature=0
-).with_structured_output(Grade, method="json_schema", strict=True)
+).with_structured_output(Grade)
 
 ############################################################################################
 ####################################### Correctness ########################################
@@ -564,6 +588,8 @@ def _print_example_result(display_index: int, result: dict) -> None:
     print("-" * 80)
 
 def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int = None):
+    _validate_config()
+
     print("Testing Chatbot...")
     print("=" * 80)
 
