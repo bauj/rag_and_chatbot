@@ -1,13 +1,20 @@
 {
   "modes": ["rag", "agentic"],
+  "_comment_hyperparams": "Every combination of values below is run (a full cross-product), so each extra value multiplies the total number of runs. Prefer varying one or two dimensions at a time over turning every list into [a, b] at once.",
   "rag_hyperparams": {
     "k": [3, 5],
     "temperature": [0.3, 0.7],
     "reranker_enabled": [true],
     "top_n": [5, 10],
-    "deep_dive": [false]
+    "deep_dive": [false],
+    "hyde_enabled": [false],
+    "bm25_enabled": [true, false],
+    "title_boost_enabled": [true]
   },
   "agentic_hyperparams": {
-    "temperature": [0.3, 0.7]
+    "temperature": [0.3, 0.7],
+    "max_pages_per_round": [3, 5],
+    "max_pages_round2": [2],
+    "max_chars_per_page": [8000]
   }
 }

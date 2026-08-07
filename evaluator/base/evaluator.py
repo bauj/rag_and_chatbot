@@ -258,9 +258,12 @@ def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
                    config: Optional[Dict[str, Any]] = None) -> dict:
     """Call chatbot.py and return parsed answer/documents.
 
-    `config` carries hyperparameter overrides (k, temperature, reranker_enabled,
-    top_n, deep_dive for rag mode; temperature for agentic mode) and is translated
-    into the matching chatbot.py CLI flags.
+    `config` carries hyperparameter overrides and is translated into the
+    matching chatbot.py CLI flags:
+    - rag mode: k, temperature, reranker_enabled, top_n, deep_dive,
+      hyde_enabled, bm25_enabled, title_boost_enabled
+    - agentic mode: temperature, max_pages_per_round, max_pages_round2,
+      max_chars_per_page
     """
     start_time = time.perf_counter()
     cmd = [sys.executable, "chatbot.py", "--question", question, "--json-output"]
@@ -278,6 +281,18 @@ def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
             cmd.append("--no-rerank")
         if config.get("deep_dive"):
             cmd.append("--deep-dive")
+        if config.get("hyde_enabled") is False:
+            cmd.append("--no-hyde")
+        if config.get("bm25_enabled") is False:
+            cmd.append("--no-bm25")
+        if config.get("title_boost_enabled") is False:
+            cmd.append("--no-title-boost")
+        if config.get("max_pages_per_round") is not None:
+            cmd.extend(["--max-pages-per-round", str(config["max_pages_per_round"])])
+        if config.get("max_pages_round2") is not None:
+            cmd.extend(["--max-pages-round2", str(config["max_pages_round2"])])
+        if config.get("max_chars_per_page") is not None:
+            cmd.extend(["--max-chars-per-page", str(config["max_chars_per_page"])])
 
     try:
         result = subprocess.run(
