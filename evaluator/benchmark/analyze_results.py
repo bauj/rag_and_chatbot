@@ -505,7 +505,7 @@ class BenchmarkAnalyzer:
         
         # Collect data by metric and configuration
         config_data = {}
-        all_configs, _, config_labels_full = self._get_config_labels()
+        all_configs, config_labels_short, _ = self._get_config_labels()
 
         if not all_configs:
             return
@@ -514,8 +514,8 @@ class BenchmarkAnalyzer:
             mode = run["mode"]
             config = self._format_config(run["configuration"])
             config_label = f"{mode.upper()}\n{config}"
-            short_label = [k for k, v in config_labels_full.items() if v == config_label][0]
-            
+            short_label = config_labels_short[config_label]
+
             for q_data in run["questions"]:
                 for metric in metrics:
                     if metric not in config_data:
@@ -556,13 +556,13 @@ class BenchmarkAnalyzer:
 
         # Collect data by label, config, and metric
         label_config_data = {}
-        all_configs, _, config_labels_full = self._get_config_labels()
+        all_configs, config_labels_short, _ = self._get_config_labels()
 
         for run in self.data["results"]:
             mode = run["mode"]
             config = self._format_config(run["configuration"])
             config_label = f"{mode.upper()}\n{config}"
-            short_label = [k for k, v in config_labels_full.items() if v == config_label][0]
+            short_label = config_labels_short[config_label]
 
             for q_data in run["questions"]:
                 labels = get_labels(q_data)
@@ -691,13 +691,13 @@ class BenchmarkAnalyzer:
     def _graph_response_time_by_config(self, output_path: Path):
         """Generate bar chart of response time by configuration"""
         config_times = {}
-        all_configs, _, config_labels_full = self._get_config_labels()
-        
+        all_configs, config_labels_short, _ = self._get_config_labels()
+
         for run in self.data["results"]:
             mode = run["mode"]
             config = self._format_config(run["configuration"])
             config_label = f"{mode.upper()}\n{config}"
-            short_label = [k for k, v in config_labels_full.items() if v == config_label][0]
+            short_label = config_labels_short[config_label]
             avg_time = run.get("average_request_time", 0)
             config_times[short_label] = avg_time
         
@@ -728,14 +728,14 @@ class BenchmarkAnalyzer:
         """Generate bar chart of response time by question, nuanced by configuration"""
         # Group times by question and configuration
         question_config_times = {}
-        all_configs, _, config_labels_full = self._get_config_labels()
-        
+        all_configs, config_labels_short, _ = self._get_config_labels()
+
         for run in self.data["results"]:
             mode = run["mode"]
             config = self._format_config(run["configuration"])
             config_label = f"{mode.upper()}\n{config}"
-            short_label = [k for k, v in config_labels_full.items() if v == config_label][0]
-            
+            short_label = config_labels_short[config_label]
+
             for q_data in run["questions"]:
                 q_id = q_data["question_id"]
                 request_time = q_data.get("request_time", 0)
@@ -778,14 +778,14 @@ class BenchmarkAnalyzer:
         import numpy as np
         
         config_metrics = {}
-        all_configs, _, _ = self._get_config_labels()
-        
+        all_configs, config_labels_short, _ = self._get_config_labels()
+
         for run in self.data["results"]:
             mode = run["mode"]
             config = self._format_config(run["configuration"])
             config_label = f"{mode.upper()}\n{config}"
-            short_label = [k for k, v in self._get_config_labels()[2].items() if v == config_label][0]
-            
+            short_label = config_labels_short[config_label]
+
             if short_label not in config_metrics:
                 config_metrics[short_label] = {}
             
@@ -821,14 +821,14 @@ class BenchmarkAnalyzer:
     def _graph_quality_vs_time(self, output_path: Path):
         """Generate scatter plot of quality (overall score) vs response time"""
         config_data = {}
-        all_configs, _, _ = self._get_config_labels()
-        
+        all_configs, config_labels_short, _ = self._get_config_labels()
+
         for run in self.data["results"]:
             mode = run["mode"]
             config = self._format_config(run["configuration"])
             config_label = f"{mode.upper()}\n{config}"
-            short_label = [k for k, v in self._get_config_labels()[2].items() if v == config_label][0]
-            
+            short_label = config_labels_short[config_label]
+
             avg_scores = run.get("average_scores", {})
             overall_score = sum(avg_scores.values()) / len(avg_scores) if avg_scores else 0
             avg_time = run.get("average_request_time", 0)
