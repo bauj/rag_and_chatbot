@@ -99,6 +99,12 @@ python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type 
 
 # Deep dive mode (RAG mode only)
 python chatbot.py --question "Explain the full workflow" --deep-dive
+
+# Retrieval pipeline toggles (RAG mode only)
+python chatbot.py --question "How do I create a mesh?" --no-bm25 --no-title-boost
+
+# Page-reading budget (Agentic mode only)
+python chatbot.py --mode agentic --question "Explain the full workflow" --max-pages-per-round 5 --max-chars-per-page 12000
 ```
 
 Commands in interactive mode:

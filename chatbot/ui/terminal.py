@@ -412,7 +412,14 @@ class TerminalUI:
                            question: str,
                            module: Optional[str] = None,
                            doc_type: Optional[str] = None,
-                           deep_dive: bool = False):
+                           deep_dive: bool = False,
+                           k: Optional[int] = None,
+                           temperature: Optional[float] = None,
+                           reranker_enabled: bool = True,
+                           top_n: Optional[int] = None,
+                           hyde_enabled: Optional[bool] = None,
+                           bm25_enabled: Optional[bool] = None,
+                           title_boost_enabled: Optional[bool] = None):
         """
         Run single question and exit
 
@@ -421,7 +428,21 @@ class TerminalUI:
             module: Optional module filter
             doc_type: Optional doc type filter
             deep_dive: Use deep dive mode
+            k: Override number of chunks to retrieve
+            temperature: Override LLM temperature
+            reranker_enabled: Whether to apply reranking
+            top_n: Override number of docs kept after reranking
+            hyde_enabled: Runtime toggle for HyDE (None = whatever was configured)
+            bm25_enabled: Runtime toggle for BM25 hybrid retrieval (None = whatever was configured)
+            title_boost_enabled: Runtime toggle for the title/identifier RRF channel
+                (None = whatever was configured)
         """
         print(f"Question: {question}\n")
-        result = self.chatbot.ask(question, module, doc_type, deep_dive)
+        result = self.chatbot.ask(
+            question, module, doc_type, deep_dive,
+            k=k, temperature=temperature,
+            reranker_enabled=reranker_enabled, top_n=top_n,
+            hyde_enabled=hyde_enabled, bm25_enabled=bm25_enabled,
+            title_boost_enabled=title_boost_enabled,
+        )
         self._print_answer(result)

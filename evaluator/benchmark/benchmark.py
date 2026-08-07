@@ -10,13 +10,46 @@ import os
 import argparse
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 from itertools import product
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
-BENCHMARK_CONFIG_FILE = Path(__file__).resolve().parent / "benchmark_config.json"
-BENCHMARK_CONFIG_EXAMPLE_FILE = Path(__file__).resolve().parent / "benchmark_config.example.json"
+SCRIPT_DIR = Path(__file__).resolve().parent
+BENCHMARK_CONFIG_FILE = SCRIPT_DIR / "benchmark_config.json"
+BENCHMARK_CONFIG_EXAMPLE_FILE = SCRIPT_DIR / "benchmark_config.example.json"
+# Anchored to the script's own directory rather than the current working
+# directory, so results always land next to benchmark.py regardless of where
+# `python benchmark.py` (or `python evaluator/benchmark/benchmark.py`) is run from.
+BENCHMARK_RESULTS_DIR = SCRIPT_DIR / "benchmark_results"
+
+_SUPPORTED_MODES = {"rag", "agentic"}
+
+def _validate_benchmark_config(config_data: Dict[str, Any]) -> None:
+    """Fail fast with a clear message if benchmark_config.json is missing keys
+    that the rest of this module indexes directly (config_data["modes"], etc.),
+    instead of a bare KeyError deep inside run_benchmark()."""
+    missing = [
+        key for key in ("modes", "rag_hyperparams", "agentic_hyperparams")
+        if key not in config_data
+    ]
+    if missing:
+        raise ValueError(
+            f"Benchmark config is missing required key(s): {', '.join(missing)}. "
+            f"See {BENCHMARK_CONFIG_EXAMPLE_FILE} for the expected structure."
+        )
+
+    unknown_modes = [m for m in config_data["modes"] if m not in _SUPPORTED_MODES]
+    if unknown_modes:
+        raise ValueError(
+            f"Unsupported mode(s) in benchmark config: {unknown_modes}. "
+            f"Supported modes are: {sorted(_SUPPORTED_MODES)}."
+        )
+
+    if "temperature" not in config_data["agentic_hyperparams"]:
+        raise ValueError(
+            "benchmark config's 'agentic_hyperparams' must include a 'temperature' list."
+        )
 
 def load_benchmark_config() -> Dict[str, Any]:
     """Load benchmark parameters from JSON configuration."""
@@ -29,16 +62,20 @@ def load_benchmark_config() -> Dict[str, Any]:
 
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            config_data = json.load(f)
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"Benchmark config file is invalid JSON: {config_path}: {exc}"
         ) from exc
 
+    _validate_benchmark_config(config_data)
+    return config_data
+
 # Import from evaluator base package
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from evaluator.base.evaluator import (
     _call_chatbot,
+    _validate_config,
     run_evaluation,
     _load_examples,
     EVAL_METRICS,
@@ -73,11 +110,13 @@ def run_benchmark(
 ):
     """Run full benchmark with all configurations"""
 
+    _validate_config()
+
     config_data = load_benchmark_config()
     modes = config_data["modes"]
 
     # Create output directory
-    output_path = Path("benchmark_results")
+    output_path = BENCHMARK_RESULTS_DIR
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Timestamp for results
@@ -94,7 +133,7 @@ def run_benchmark(
         "results": []
     }
 
-    if limit_questions:
+    if limit_questions is not None:
         dataset = dataset[:limit_questions]
 
     rag_configs = generate_rag_configs(config_data["rag_hyperparams"])
@@ -136,14 +175,18 @@ def run_benchmark(
         question_id: int,
         example: Dict[str, Any],
         mode: str,
-        executor: Optional[ThreadPoolExecutor] = None,
+        config: Dict[str, Any],
         timeout_seconds: int = None,
     ) -> Dict[str, Any]:
         question = example["inputs"]["question"]
         reference_answer = example["outputs"]["answer"]
 
-        answer_dict = _call_chatbot(question, mode, timeout_seconds)
-        evaluations = run_evaluation(question, answer_dict, reference_answer, executor=executor)
+        answer_dict = _call_chatbot(question, mode, timeout_seconds, config=config)
+        # Metrics run sequentially here on purpose: this function itself runs inside a
+        # worker thread of the per-question pool below. Submitting more work to that
+        # same bounded pool from within one of its own workers can deadlock once all
+        # workers are occupied waiting on sub-tasks that have no free thread to run on.
+        evaluations = run_evaluation(question, answer_dict, reference_answer)
         request_time = answer_dict.get("request_time", 0.0)
 
         with progress_lock:
@@ -179,7 +222,7 @@ def run_benchmark(
             if max_workers > 1:
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = {
-                        executor.submit(_run_question, q_idx, example, mode, executor, timeout_seconds): q_idx
+                        executor.submit(_run_question, q_idx, example, mode, config, timeout_seconds): q_idx
                         for q_idx, example in enumerate(dataset, 1)
                     }
 
@@ -190,7 +233,7 @@ def run_benchmark(
                     questions.sort(key=lambda x: x["question_id"])
             else:
                 questions = [
-                    _run_question(q_idx, example, mode, None, timeout_seconds)
+                    _run_question(q_idx, example, mode, config, timeout_seconds)
                     for q_idx, example in enumerate(dataset, 1)
                 ]
 
@@ -247,7 +290,7 @@ def print_benchmark_summary(results: Dict):
         overall = sum(avg_scores.values()) / len(avg_scores) if avg_scores else 0
         print(f"  Overall:             {overall:.1f}/10\n")
 
-def compare_results(results_dir: str = "benchmark_results"):
+def compare_results(results_dir: str = str(BENCHMARK_RESULTS_DIR)):
     """Compare multiple benchmark runs"""
     results_path = Path(results_dir)
     
@@ -285,6 +328,7 @@ def compare_results(results_dir: str = "benchmark_results"):
             avg_scores = run["average_scores"]
             
             config_str = ", ".join([f"{k}={v}" for k, v in config.items()]) if config else "default"
+            config_str = config_str[:37] + "..." if len(config_str) > 40 else config_str
             print(f"  {mode.upper():8} | {config_str:40} | ", end="")
             
             overall = sum(avg_scores.values()) / len(avg_scores) if avg_scores else 0
@@ -301,7 +345,7 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", action="store_true",
                         help="Verbose output")
     parser.add_argument("--workers", type=int, default=1,
-                        help="Number of worker threads for parallel execution (chatbot + evaluation share the same pool; use -1 for all CPUs)")
+                        help="Number of worker threads for parallel execution, one per question (use -1 for all CPUs)")
     parser.add_argument("--timeout", type=int, default=None,
                         help="Timeout in seconds for each chatbot request (default: no timeout)")
 

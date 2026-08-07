@@ -1,9 +1,10 @@
 {
   "project_name": "my_project",
   "_comment_project_name": "No spaces — used as ChromaDB collection name. Use underscores.",
-  "chatbot_path": "your_chatbot_dir_path_here", // Default: "../../chatbot"
-  
-  "llm": 
+  "chatbot_path": "your_chatbot_dir_path_here",
+  "_comment_chatbot_path": "Default: '../../chatbot'",
+
+  "llm":
   {  
     "base_url": "your_base_url_here",
     "_comment_base_url": "Full base URL for OpenAI-compatible API (include /v1 if needed). Examples: 'http://localhost:8080/v1' for LiteLLM, 'http://localhost:11434/v1' for Ollama",

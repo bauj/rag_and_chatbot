@@ -38,17 +38,27 @@ Example structure:
 
 ```json
 {
+  "modes": ["rag", "agentic"],
   "rag_hyperparams": {
     "k": [3, 5, 10],
     "temperature": [0.3, 0.7],
     "reranker_enabled": [true, false],
-    "top_n": [5, 10]
+    "top_n": [5, 10],
+    "deep_dive": [false],
+    "hyde_enabled": [false],
+    "bm25_enabled": [true, false],
+    "title_boost_enabled": [true]
   },
   "agentic_hyperparams": {
-    "temperature": [0.7]
+    "temperature": [0.7],
+    "max_pages_per_round": [3, 5],
+    "max_pages_round2": [2],
+    "max_chars_per_page": [8000]
   }
 }
 ```
+
+Every combination of the values above is run (a full cross-product), so each extra value in a list multiplies the total run count — prefer varying one or two dimensions at a time. `hyde_enabled`, `bm25_enabled` and `title_boost_enabled` are RAG retrieval-pipeline toggles (see `chatbot/config.json`'s comments for what each does); `max_pages_per_round`, `max_pages_round2` and `max_chars_per_page` are the agentic mode's page-reading budget.
 
 ## Scripts
 
@@ -71,12 +81,14 @@ This JSON file contains, for each configuration, all questions along with their 
 {
   "metadata": {
     "timestamp": "YYYYMMDD_HHMMSS",
-    "modes": [
-      "rag",
-      "agentic"
-    ],
+    "benchmark_config": {
+      "modes": ["rag", "agentic"],
+      "rag_hyperparams": { "k": [3, 5], "temperature": [0.3, 0.7] },
+      "agentic_hyperparams": { "temperature": [0.3, 0.7] }
+    },
     "total_questions": 13,
-    "workers": 5
+    "workers": 5,
+    "timeout_seconds": null
   },
   "results": [
     {
@@ -92,6 +104,7 @@ This JSON file contains, for each configuration, all questions along with their 
         {
           "question_id": 1,
           "question": "Question 1?",
+          "tags": ["Type", "Module"],
           "reference_answer": "Expected Answer 1.",
           "generated_answer": "Chatbot Answer 1.",
           "evaluations": {
@@ -111,25 +124,40 @@ This JSON file contains, for each configuration, all questions along with their 
               "score": 10.0,
               "explanation": "Explanation of the retrieval relevance score."
             }
-          }
+          },
+          "request_time": 24.658
         }
-      ]
+      ],
+      "average_scores": {
+        "correctness": 5.0,
+        "relevance": 8.0,
+        "groundedness": 2.0,
+        "retrieval_relevance": 10.0
+      },
+      "average_request_time": 24.658
     }
   ]
 }
 ```
 
+`metadata.benchmark_config` is the full content of `benchmark_config.json` used for that run — kept alongside the results so a given `benchmark_*.json` file is self-describing (which modes and hyperparameter grid produced it) without needing to cross-reference a separate config file.
+
 ## Analysis Graphs
 
 Use `--graphs` to generate visualizations:
 
-- **Quality vs time**: Scatter plot revealing the trade-off between overall response quality and execution speed across different tested configurations
-- **Metric distribution**: Box plots showing the score dispersion for each evaluation metric (correctness, relevance, groundedness, retrieval) across configurations
-- **Performance heatmap**: Colored matrix providing a visual overview of average scores achieved by each configuration across all evaluated metrics
-- **Scores by question config**: Grouped bar chart comparing the overall performance of each configuration on the first 15 benchmark questions
-- **Scores by tag config**: Box plots organized by question categories (tags) to identify strengths and weaknesses of configurations according to question types
-- **Response time by config**: Bar chart displaying the average response times for each tested configuration
-- **Response time by question config**: Grouped bar chart detailing response time variations according to questions and configurations
+- **Quality vs time** (`01`): Scatter plot revealing the trade-off between overall response quality and execution speed across different tested configurations
+- **Metric distribution** (`02`): Box plots showing the score dispersion for each evaluation metric (correctness, relevance, groundedness, retrieval) across configurations
+- **Performance heatmap** (`03`): Colored matrix providing a visual overview of average scores achieved by each configuration across all evaluated metrics
+- **Scores by question config** (`04`): Grouped bar chart comparing the overall performance of each configuration on the first 15 benchmark questions, each bar labeled with its exact score
+- **Scores by type config** (`05`): Box plots organized by question type tag (`Cpp`, `Py`, `Methodology`, `wrong`) to identify strengths and weaknesses of configurations according to the kind of question asked
+- **Scores by module config** (`06`): Box plots organized by Uranie module tag (e.g. `Sampler`, `Sensitivity`, `DataServer`) to identify strengths and weaknesses of configurations according to question topic
+- **Response time by config** (`07`): Bar chart displaying the average response times for each tested configuration
+- **Response time by question config** (`08`): Grouped bar chart detailing response time variations according to questions and configurations, each bar labeled with its exact time
+- **Scores by difficulty config** (`09`): Box plots organized by difficulty tag (`easy`/`medium`/`hard`) to see how each configuration holds up as questions get harder
+- **Scores by language config** (`10`): Box plots organized by language tag (`Fr`/`En`) to check for language-dependent performance gaps
+
+Difficulty and language tags are recognized by fixed values (`easy`/`medium`/`hard`, `Fr`/`En`). Every question in `dataset.json` (see `evaluator/base/README.md`) also carries exactly two more tags, always in the order `[Type, Module]` (e.g. `["Py", "Sampler"]`) — these are read positionally, not from a fixed value list, so any new type or module tag is picked up automatically as long as this ordering convention is kept.
 
 Graphs are saved in the `graphs/` folder.
 

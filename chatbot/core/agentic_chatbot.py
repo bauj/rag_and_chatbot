@@ -64,7 +64,7 @@ class AgenticChatbot:
 
         self.llm = self._init_llm()
 
-    def _init_llm(self) -> ChatOpenAI:
+    def _init_llm(self, temperature: Optional[float] = None) -> ChatOpenAI:
         llm_cfg = self.config.llm
         if llm_cfg.ssl_cert_file:
             import os
@@ -84,7 +84,7 @@ class AgenticChatbot:
                 model=llm_cfg.model,
                 base_url=llm_cfg.base_url,
                 api_key=llm_cfg.api_key,
-                temperature=self.config.temperature,
+                temperature=temperature if temperature is not None else self.config.temperature,
                 max_completion_tokens=None,
                 streaming=False,
                 model_kwargs={"max_tokens": self.config.max_tokens},
@@ -162,7 +162,8 @@ class AgenticChatbot:
             parts.append(f"--- {header} ---\n{e.get('content', '')}")
         return "\n\n".join(parts)
 
-    def _answer_from_context(self, question: str, context: str, missing_info: Optional[str] = None) -> str:
+    def _answer_from_context(self, question: str, context: str, missing_info: Optional[str] = None,
+                              llm: Optional[ChatOpenAI] = None) -> str:
         """
         Ask the LLM to answer the question from the given context.
         If missing_info is provided (Round 2), include it to focus the answer.
@@ -179,7 +180,7 @@ class AgenticChatbot:
             user_parts.append(f"\n\nNote: a previous search identified this gap: {missing_info}")
         user_content = "".join(user_parts)
 
-        response = self.llm.invoke([
+        response = (llm or self.llm).invoke([
             SystemMessage(content=system),
             HumanMessage(content=user_content),
         ])
@@ -209,6 +210,7 @@ class AgenticChatbot:
             max_pages_per_round: Optional[int] = None,
             max_pages_round2: Optional[int] = None,
             max_tokens: Optional[int] = None,
+            temperature: Optional[float] = None,
             **kwargs) -> Dict[str, Any]:
         """
         Answer a question by searching the page index and reading HTML files.
@@ -218,6 +220,7 @@ class AgenticChatbot:
             max_pages_per_round: Override config value at runtime.
             max_pages_round2: Override config value at runtime.
             max_tokens: Override LLM max_tokens at runtime (not yet wired; reserved).
+            temperature: Override LLM temperature at runtime.
             **kwargs: Accepted for interface compatibility; ignored.
 
         Returns:
@@ -227,6 +230,7 @@ class AgenticChatbot:
         _max_chars = max_chars_per_page if max_chars_per_page is not None else cfg.max_chars_per_page
         _max_pages_r1 = max_pages_per_round if max_pages_per_round is not None else cfg.max_pages_per_round
         _max_pages_r2 = max_pages_round2 if max_pages_round2 is not None else cfg.max_pages_round2
+        llm = self._init_llm(temperature=temperature) if temperature is not None else self.llm
 
         def _error_response(err):
             return {
@@ -250,7 +254,7 @@ class AgenticChatbot:
         read_filepaths = {e['filepath'] for e in read_entries}
 
         try:
-            response = self._answer_from_context(question, context)
+            response = self._answer_from_context(question, context, llm=llm)
         except Exception as e:
             return _error_response(str(e))
 
@@ -268,7 +272,7 @@ class AgenticChatbot:
                 read_entries.extend(r2_read)
                 context2 = self._build_context(read_entries)
                 try:
-                    response = self._answer_from_context(question, context2, missing_info=missing_info)
+                    response = self._answer_from_context(question, context2, missing_info=missing_info, llm=llm)
                 except Exception as e:
                     return _error_response(str(e))
                 rounds_used = 2

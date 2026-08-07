@@ -2,16 +2,16 @@
   {
     "inputs": {"question": "Question 1?"},
     "outputs": {"answer": "Expected Answer 1."},
-    "tags": ["Type", "Module"] // Define your own tags. EXAMPLES : Type (Methodology, Code, etc.), Module (Sampler, Optimizer, etc.)
+    "tags": ["Type", "Module"]
   },
   {
     "inputs": {"question": "Question 2?"},
     "outputs": {"answer": "Expected Answer 2."},
-    "tags": ["Type", "Module"] // Define your own tags. EXAMPLES : Type (Methodology, Code, etc.), Module (Sampler, Optimizer, etc.)
+    "tags": ["Type", "Module"]
   },
   {
     "inputs": {"question": "Question 3?"},
     "outputs": {"answer": "Expected Answer 3."},
-    "tags": ["Type", "Module"] // Define your own tags. EXAMPLES : Type (Methodology, Code, etc.), Module (Sampler, Optimizer, etc.)
+    "tags": ["Type", "Module"]
   }
 ]

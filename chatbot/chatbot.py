@@ -112,6 +112,63 @@ Examples:
         action='store_true',
         help='Use deep dive mode (terminal single-question mode)'
     )
+    parser.add_argument(
+        '--k',
+        type=int,
+        help='Override number of chunks to retrieve (rag mode only, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--top-n',
+        type=int,
+        dest='top_n',
+        help='Override number of docs kept after reranking (rag mode only, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--no-rerank',
+        action='store_true',
+        help='Disable reranking for this query (rag mode only, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--no-hyde',
+        action='store_true',
+        help='Disable HyDE for this query, even if enabled in config (rag mode only, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--no-bm25',
+        action='store_true',
+        help='Disable BM25 hybrid retrieval for this query, even if enabled in config '
+             '(rag mode only, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--no-title-boost',
+        action='store_true',
+        help='Disable the title/identifier RRF channel for this query, even if enabled in config '
+             '(rag mode only, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--temperature',
+        type=float,
+        help='Override LLM temperature (terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--max-pages-per-round',
+        type=int,
+        dest='max_pages_per_round',
+        help='Override number of pages read in round 1 (agentic mode only, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--max-pages-round2',
+        type=int,
+        dest='max_pages_round2',
+        help='Override number of pages read in round 2, if a second round is triggered '
+             '(agentic mode only, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--max-chars-per-page',
+        type=int,
+        dest='max_chars_per_page',
+        help='Override number of characters read per page (agentic mode only, terminal single-question mode)'
+    )
 
     parser.add_argument(
         '--mode',
@@ -141,6 +198,13 @@ Examples:
             parser.error("--json-output cannot be combined with --web")
         if not args.question:
             parser.error("--json-output requires --question")
+
+    if args.mode == 'rag' and (
+        args.max_pages_per_round is not None or args.max_pages_round2 is not None
+        or args.max_chars_per_page is not None
+    ):
+        print("Warning: --max-pages-per-round, --max-pages-round2 and --max-chars-per-page are not "
+              "supported in rag mode and will be ignored.", file=sys.stderr)
 
     # In JSON mode stdout must contain the JSON document and nothing else, so
     # point sys.stdout at stderr for the whole run. Every existing print() —
@@ -204,6 +268,16 @@ Examples:
             if args.deep_dive:
                 print(f"Warning: --deep-dive is not supported in {args.mode} mode and will be ignored.",
                       file=sys.stderr)
+            if (args.k is not None or args.top_n is not None or args.no_rerank
+                    or args.no_hyde or args.no_bm25 or args.no_title_boost):
+                print("Warning: --k, --top-n, --no-rerank, --no-hyde, --no-bm25 and --no-title-boost are not "
+                      "supported in agentic mode and will be ignored.", file=sys.stderr)
+        if args.mode == 'agentic-smol' and (
+            args.max_pages_per_round is not None or args.max_pages_round2 is not None
+            or args.max_chars_per_page is not None
+        ):
+            print("Warning: --max-pages-per-round, --max-pages-round2 and --max-chars-per-page are not "
+                  "supported in agentic-smol mode and will be ignored.", file=sys.stderr)
         from core import AgenticChatbot
         print("Loading agentic chatbot (page index)...")
         agentic_chatbot = AgenticChatbot(config)
@@ -242,7 +316,13 @@ Examples:
 
         if args.question:
             if args.mode == 'agentic':
-                result = agentic_chatbot.ask(args.question)
+                result = agentic_chatbot.ask(
+                    args.question,
+                    temperature=args.temperature,
+                    max_pages_per_round=args.max_pages_per_round,
+                    max_pages_round2=args.max_pages_round2,
+                    max_chars_per_page=args.max_chars_per_page,
+                )
             elif args.mode == 'agentic-smol':
                 result = agentic_smol_chatbot.ask(args.question)
             elif args.json_output:
@@ -252,6 +332,13 @@ Examples:
                     module=args.module,
                     doc_type=args.doc_type,
                     deep_dive=args.deep_dive,
+                    k=args.k,
+                    temperature=args.temperature,
+                    reranker_enabled=not args.no_rerank,
+                    top_n=args.top_n,
+                    hyde_enabled=not args.no_hyde,
+                    bm25_enabled=not args.no_bm25,
+                    title_boost_enabled=not args.no_title_boost,
                 )
             else:
                 # Single question mode
@@ -259,7 +346,14 @@ Examples:
                     args.question,
                     module=args.module,
                     doc_type=args.doc_type,
-                    deep_dive=args.deep_dive
+                    deep_dive=args.deep_dive,
+                    k=args.k,
+                    temperature=args.temperature,
+                    reranker_enabled=not args.no_rerank,
+                    top_n=args.top_n,
+                    hyde_enabled=not args.no_hyde,
+                    bm25_enabled=not args.no_bm25,
+                    title_boost_enabled=not args.no_title_boost,
                 )
                 result = None
 

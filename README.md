@@ -516,23 +516,31 @@ cd evaluator/benchmark
 cp benchmark_config.example.json benchmark_config.json
 ```
 
-Edit `benchmark_config.json` to define which hyperparameters to test:
+Edit `benchmark_config.json` to define which modes and hyperparameters to test — every combination of the values below is run (a full cross-product), so each extra value multiplies the total run count:
 
 ```json
 {
+  "modes": ["rag", "agentic"],
   "rag_hyperparams": {
     "k": [3, 5, 10],
     "temperature": [0.3, 0.7],
     "reranker_enabled": [true, false],
-    "top_n": [5, 10]
+    "top_n": [5, 10],
+    "deep_dive": [false],
+    "hyde_enabled": [false],
+    "bm25_enabled": [true, false],
+    "title_boost_enabled": [true]
   },
   "agentic_hyperparams": {
-    "temperature": [0.7]
+    "temperature": [0.7],
+    "max_pages_per_round": [3, 5],
+    "max_pages_round2": [2],
+    "max_chars_per_page": [8000]
   }
 }
 ```
 
-For example, this generates **16 RAG configurations** (all combinations) and **1 Agentic configuration**, testing each against all questions.
+`hyde_enabled`, `bm25_enabled` and `title_boost_enabled` are RAG retrieval-pipeline toggles (see `chatbot/config.json`'s comments for what each does); `max_pages_per_round`, `max_pages_round2` and `max_chars_per_page` are the agentic mode's page-reading budget. With the values above, this generates **48 RAG configurations** and **2 Agentic configurations** (all combinations), each tested against every question — prefer varying one or two dimensions at a time to keep run counts manageable.
 
 ### Step 5: Run Benchmarks
 
@@ -540,21 +548,19 @@ For example, this generates **16 RAG configurations** (all combinations) and **1
 cd evaluator/benchmark
 
 # Validate setup
-python3 run_benchmark.py --help
+python3 benchmark.py --help
 
-# Quick test (2 questions, all modes)
-python3 run_benchmark.py --limit 2
+# Quick test (2 questions)
+python3 benchmark.py --limit 2
 
-# Full test (all questions, ~30 min/config)
-python3 run_benchmark.py
-
-# Test specific modes only
-python3 run_benchmark.py --modes rag
-python3 run_benchmark.py --modes agentic
+# Full test (all questions)
+python3 benchmark.py
 
 # Compare with previous results
-python3 run_benchmark.py --compare
+python3 benchmark.py --compare
 ```
+
+Which modes run is controlled by `benchmark_config.json`'s `"modes"` key (above), not a CLI flag.
 
 ### Benchmark Results Format
 
@@ -563,21 +569,25 @@ Benchmark results are saved to `benchmark_results/benchmark_YYYYMMDD_HHMMSS.json
 ```json
 {
   "metadata": {
-    "timestamp": "2026-04-07T12:00:00",
+    "timestamp": "20260407_120000",
+    "benchmark_config": { "modes": ["rag", "agentic"], "rag_hyperparams": {...}, "agentic_hyperparams": {...} },
     "total_questions": 13,
-    "modes": ["rag", "agentic"]
+    "workers": 1,
+    "timeout_seconds": null
   },
   "results": [
     {
       "mode": "rag",
       "configuration": {"k": 5, "temperature": 0.3, "reranker_enabled": true, "top_n": 10},
       "average_scores": {"correctness": 7.2, "relevance": 7.5, ...},
+      "average_request_time": 24.658,
       "questions": [
         {
           "question_id": 1,
           "question": "How do I create a mesh?",
-          "tags": ["code", "tutorial"],
-          "evaluations": {"correctness": {"score": 8.0}, ...}
+          "tags": ["Py", "Sampler", "easy", "En"],
+          "evaluations": {"correctness": {"score": 8.0}, ...},
+          "request_time": 24.658
         }
       ]
     }
