@@ -1,9 +1,9 @@
 """
-Agentic documentation chatbot — answers questions by directly reading HTML pages.
+Agentic documentation chatbot — smolagents CodeAgent.
 
-Uses a fixed 2-round pipeline:
-  Round 1: search page index → LLM picks pages → read+parse → LLM answers
-  Round 2 (if NEED_MORE_INFO): refined search → read more pages → LLM answers again
+A CodeAgent decides for itself how many search/read cycles to run over a
+page index, bounded by config.agentic.max_steps. Requires config.agentic
+and the smolagents package.
 
 Returns the same {answer, sources, filters, error} dict as DocumentationChatbot.ask().
 """
@@ -11,14 +11,19 @@ Returns the same {answer, sources, filters, error} dict as DocumentationChatbot.
 import json
 import re
 import sys
-import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
-
 from .config import ChatbotConfig
+
+# Matches code the model wrote instead of prose when forced to answer at max_steps
+# (smolagents' default code_block_tags is literally "<code>"/"</code>") — see
+# _handle_max_steps_reached in smolagents: the forced-synthesis prompt asks for a
+# plain-language answer, but the model has just spent the whole transcript writing
+# code and often keeps doing so.
+_LEAKED_CODE_PATTERN = re.compile(
+    r"<code>|```|Calling tools:|search_pages\(|read_page\(", re.IGNORECASE
+)
 
 # html_parser lives in extraction/ which conftest adds to sys.path in tests.
 # At runtime (chatbot/chatbot.py), extraction/ may not be on sys.path, so we
@@ -32,10 +37,9 @@ from html_parser import parse_page, search_pages  # noqa: E402
 
 class AgenticChatbot:
     """
-    Answers questions by searching a page index and reading HTML files on-the-fly.
+    Answers questions using a smolagents CodeAgent with search_pages/read_page tools.
 
-    Alternative to DocumentationChatbot — no ChromaDB required at query time.
-    Requires config.agentic to be set.
+    Requires config.agentic to be set and the smolagents package to be installed.
     """
 
     def __init__(self, config: ChatbotConfig):
@@ -44,10 +48,22 @@ class AgenticChatbot:
                 "AgenticChatbot requires config.agentic to be set. "
                 "Add an 'agentic' block to your config.json."
             )
+
+        try:
+            from smolagents import Tool, CodeAgent, OpenAIServerModel
+        except ImportError as e:
+            raise ImportError(
+                "smolagents is required for agentic mode.\n"
+                "Install it: pip install smolagents"
+            ) from e
+
         self.config = config
         self._agentic_cfg = config.agentic
+        self._CodeAgent = CodeAgent
+        self._OpenAIServerModel = OpenAIServerModel
+        self._SearchPagesToolCls, self._ReadPageToolCls = _build_tool_classes(Tool)
+        self._prompt_templates = _build_prompt_templates()
 
-        # Load and validate page index
         index_path = Path(self._agentic_cfg.page_index_path)
         if not index_path.is_absolute():
             index_path = Path(__file__).parent.parent / self._agentic_cfg.page_index_path
@@ -62,238 +78,221 @@ class AgenticChatbot:
         except json.JSONDecodeError as e:
             raise ValueError(f"Page index is not valid JSON: {e}")
 
-        self.llm = self._init_llm()
+        self._entry_by_filepath = {e['filepath']: e for e in self._page_index}
 
-    def _init_llm(self, temperature: Optional[float] = None) -> ChatOpenAI:
+    def _build_model_kwargs(self, temperature: Optional[float], max_tokens: Optional[int]) -> dict:
+        """
+        Assemble the extra kwargs OpenAIServerModel forwards to the underlying
+        completion call, plus SSL cert wiring for internal/self-signed endpoints
+        (same pattern the old fixed-script AgenticChatbot used via httpx.Client).
+        """
         llm_cfg = self.config.llm
+        kwargs: Dict[str, Any] = {
+            "temperature": temperature if temperature is not None else self.config.temperature,
+            "max_tokens": max_tokens if max_tokens is not None else self.config.max_tokens,
+        }
         if llm_cfg.ssl_cert_file:
-            import os
+            import httpx
             cert_path = Path(llm_cfg.ssl_cert_file).expanduser().resolve()
             if not cert_path.exists():
                 raise FileNotFoundError(f"SSL certificate file not found: {cert_path}")
-            os.environ['SSL_CERT_FILE'] = str(cert_path)
-            os.environ['REQUESTS_CA_BUNDLE'] = str(cert_path)
-
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r"Parameters \{'max_tokens'\} should be specified explicitly",
-                category=UserWarning,
-            )
-            return ChatOpenAI(
-                model=llm_cfg.model,
-                base_url=llm_cfg.base_url,
-                api_key=llm_cfg.api_key,
-                temperature=temperature if temperature is not None else self.config.temperature,
-                max_completion_tokens=None,
-                streaming=False,
-                model_kwargs={"max_tokens": self.config.max_tokens},
-            )
-
-    def _select_pages(self, candidates: List[dict], question: str, max_pages: int) -> List[dict]:
-        """
-        Ask the LLM to pick the most relevant pages from candidates.
-        Returns selected entries, falling back to first max_pages if LLM output is malformed.
-        """
-        if not candidates:
-            return []
-
-        candidate_list = "\n".join(
-            f"- {e['filename']} ({e['title']}, {e['module']}/{e['doc_category']})"
-            for e in candidates
-        )
-        prompt = (
-            f"Given the question: {question!r}\n\n"
-            f"Select the most relevant documentation pages (up to {max_pages}) from this list:\n"
-            f"{candidate_list}\n\n"
-            f"Respond with a JSON array of filenames only, e.g. "
-            f'["classModelAPI__Feature.html"]. '
-            f"Return only the JSON array, no explanation."
-        )
-
-        try:
-            response = self.llm.invoke([HumanMessage(content=prompt)])
-            raw = response.content.strip()
-            # Extract JSON array (LLM may wrap it in markdown code fences)
-            match = re.search(r'\[.*?\]', raw, re.DOTALL)
-            if not match:
-                raise ValueError("No JSON array found")
-            selected_names = json.loads(match.group())
-            if not isinstance(selected_names, list):
-                raise ValueError("Not a list")
-        except Exception:
-            # Fallback: use first max_pages candidates
-            return candidates[:max_pages]
-
-        # Map names back to index entries (validate they exist in candidates)
-        name_to_entry = {e['filename']: e for e in candidates}
-        result = []
-        for name in selected_names:
-            if name in name_to_entry and len(result) < max_pages:
-                result.append(name_to_entry[name])
-        if not result:
-            return candidates[:max_pages]
-        return result
-
-    def _read_pages(self, entries: List[dict], max_chars: Optional[int] = None) -> List[dict]:
-        """
-        Read and parse each page. Returns entries enriched with 'content' key.
-        Skips pages that can't be read (FileNotFoundError) with a warning.
-        """
-        limit = max_chars if max_chars is not None else self._agentic_cfg.max_chars_per_page
-        result = []
-        for entry in entries:
-            try:
-                content = parse_page(
-                    entry['filepath'],
-                    entry['doc_category'],
-                    max_chars=limit,
-                )
-                result.append({**entry, 'content': content})
-            except FileNotFoundError:
-                print(f"Warning: page not found, skipping: {entry['filepath']}", file=sys.stderr)
-        return result
-
-    def _build_context(self, read_entries: List[dict]) -> str:
-        """Format read pages into a context string for the LLM."""
-        parts = []
-        for e in read_entries:
-            header = f"[{e['module']}/{e['doc_category']}] {e['title']}"
-            parts.append(f"--- {header} ---\n{e.get('content', '')}")
-        return "\n\n".join(parts)
-
-    def _answer_from_context(self, question: str, context: str, missing_info: Optional[str] = None,
-                              llm: Optional[ChatOpenAI] = None) -> str:
-        """
-        Ask the LLM to answer the question from the given context.
-        If missing_info is provided (Round 2), include it to focus the answer.
-        Instructs the LLM to append NEED_MORE_INFO marker if pages are insufficient.
-        """
-        system = (
-            f"You are an expert assistant for {self.config.project_name} documentation. "
-            "Answer the user's question strictly based on the documentation provided. "
-            "If the documentation is insufficient to answer the question, append on its own "
-            "line at the very end of your response: NEED_MORE_INFO: <brief description of what is missing>"
-        )
-        user_parts = [f"Documentation:\n{context}\n\nQuestion: {question}"]
-        if missing_info:
-            user_parts.append(f"\n\nNote: a previous search identified this gap: {missing_info}")
-        user_content = "".join(user_parts)
-
-        response = (llm or self.llm).invoke([
-            SystemMessage(content=system),
-            HumanMessage(content=user_content),
-        ])
-        return response.content
-
-    @staticmethod
-    def _extract_need_more_info(response: str) -> Optional[str]:
-        """
-        Check if the response ends with NEED_MORE_INFO marker.
-        Returns the description after the colon, or None if not present.
-        """
-        last_line = response.rstrip().split("\n")[-1]
-        if last_line.startswith("NEED_MORE_INFO:"):
-            return last_line[len("NEED_MORE_INFO:"):].strip()
-        return None
-
-    @staticmethod
-    def _strip_marker(response: str) -> str:
-        """Remove the NEED_MORE_INFO line from the end of a response."""
-        lines = response.rstrip().split("\n")
-        if lines and lines[-1].startswith("NEED_MORE_INFO:"):
-            lines = lines[:-1]
-        return "\n".join(lines).rstrip()
+            kwargs["client_kwargs"] = {"http_client": httpx.Client(verify=str(cert_path))}
+        return kwargs
 
     def ask(self, question: str,
-            max_chars_per_page: Optional[int] = None,
-            max_pages_per_round: Optional[int] = None,
-            max_pages_round2: Optional[int] = None,
+            max_steps: Optional[int] = None,
             max_tokens: Optional[int] = None,
             temperature: Optional[float] = None,
             **kwargs) -> Dict[str, Any]:
         """
-        Answer a question by searching the page index and reading HTML files.
+        Answer a question by letting a CodeAgent search the page index and read pages.
 
         Args:
-            max_chars_per_page: Override config value at runtime.
-            max_pages_per_round: Override config value at runtime.
-            max_pages_round2: Override config value at runtime.
-            max_tokens: Override LLM max_tokens at runtime (not yet wired; reserved).
-            temperature: Override LLM temperature at runtime.
+            max_steps: Override config value at runtime.
+            max_tokens: Override config.max_tokens at runtime.
+            temperature: Override config.temperature at runtime.
             **kwargs: Accepted for interface compatibility; ignored.
 
         Returns:
             {answer, sources, filters, error}
         """
         cfg = self._agentic_cfg
-        _max_chars = max_chars_per_page if max_chars_per_page is not None else cfg.max_chars_per_page
-        _max_pages_r1 = max_pages_per_round if max_pages_per_round is not None else cfg.max_pages_per_round
-        _max_pages_r2 = max_pages_round2 if max_pages_round2 is not None else cfg.max_pages_round2
-        llm = self._init_llm(temperature=temperature) if temperature is not None else self.llm
+        _max_steps = max_steps if max_steps is not None else cfg.max_steps
 
-        def _error_response(err):
+        read_entries: List[dict] = []
+        search_tool = self._SearchPagesToolCls(self._page_index)
+        read_tool = self._ReadPageToolCls(self._entry_by_filepath, cfg.max_chars_per_page, read_entries)
+
+        model = self._OpenAIServerModel(
+            model_id=self.config.llm.model,
+            api_base=self.config.llm.base_url,
+            api_key=self.config.llm.api_key,
+            **self._build_model_kwargs(temperature, max_tokens),
+        )
+
+        agent = self._CodeAgent(
+            tools=[search_tool, read_tool],
+            model=model,
+            max_steps=_max_steps,
+            additional_authorized_imports=[],
+            prompt_templates=self._prompt_templates,
+        )
+
+        task = (
+            f"You are an expert assistant for {self.config.project_name} documentation. "
+            "Use the search_pages tool to find candidate documentation pages, then the "
+            "read_page tool to read their content. You MUST call read_page at least once "
+            "before answering — never answer from prior knowledge alone. Answer the "
+            "question strictly based on what you read.\n\n"
+            f"Question: {question}"
+        )
+
+        try:
+            raw_answer = agent.run(task)
+        except Exception as e:
             return {
                 "answer": None,
                 "sources": [],
-                "filters": {"mode": "agentic", "rounds_used": 0},
-                "error": err,
+                "filters": {"mode": "agentic", "steps_used": 0, "grounded": False},
+                "error": str(e),
             }
 
-        # --- Round 1 ---
-        candidates = search_pages(self._page_index, question)
-        if not candidates:
-            # Fall back to all pages when token matching yields no results
-            candidates = [e for e in self._page_index]
-        if not candidates:
-            return _error_response("No relevant pages found for query.")
+        answer = str(raw_answer)
 
-        selected = self._select_pages(candidates, question, _max_pages_r1)
-        read_entries = self._read_pages(selected, max_chars=_max_chars)
-        context = self._build_context(read_entries)
-        read_filepaths = {e['filepath'] for e in read_entries}
+        seen = set()
+        sources = []
+        for entry in read_entries:
+            if entry["filepath"] in seen:
+                continue
+            seen.add(entry["filepath"])
+            sources.append({
+                "filepath": entry["filepath"],
+                "filename": entry["filename"],
+                "title": entry["title"],
+                "module": entry["module"],
+                "doc_category": entry["doc_category"],
+            })
 
-        try:
-            response = self._answer_from_context(question, context, llm=llm)
-        except Exception as e:
-            return _error_response(str(e))
+        steps_used = len(agent.memory.steps) if hasattr(agent, "memory") else None
 
-        missing_info = self._extract_need_more_info(response)
-
-        # --- Round 2 (if needed) ---
-        rounds_used = 1
-        if missing_info:
-            r2_candidates = search_pages(
-                self._page_index, missing_info, exclude_filepaths=read_filepaths
-            )
-            if r2_candidates:
-                r2_selected = self._select_pages(r2_candidates, missing_info, _max_pages_r2)
-                r2_read = self._read_pages(r2_selected, max_chars=_max_chars)
-                read_entries.extend(r2_read)
-                context2 = self._build_context(read_entries)
-                try:
-                    response = self._answer_from_context(question, context2, missing_info=missing_info, llm=llm)
-                except Exception as e:
-                    return _error_response(str(e))
-                rounds_used = 2
-
-        answer = self._strip_marker(response)
-
-        sources = [
-            {
-                "filepath": e["filepath"],
-                "filename": e["filename"],
-                "title": e["title"],
-                "module": e["module"],
-                "doc_category": e["doc_category"],
-                "content": e.get("content", ""),
-            }
-            for e in read_entries
-        ]
+        degraded = bool(_LEAKED_CODE_PATTERN.search(answer))
+        if degraded:
+            answer = _fallback_answer(sources)
 
         return {
             "answer": answer,
             "sources": sources,
-            "filters": {"mode": "agentic", "rounds_used": rounds_used},
+            "filters": {
+                "mode": "agentic",
+                "steps_used": steps_used,
+                "grounded": bool(read_entries),
+                "degraded_answer": degraded,
+            },
             "error": None,
         }
+
+
+def _fallback_answer(sources: List[dict]) -> str:
+    """Honest stand-in when the model returned leaked code instead of prose."""
+    if not sources:
+        return (
+            "I ran out of steps before reading any relevant documentation page "
+            "and could not produce an answer. Try rephrasing the question."
+        )
+    titles = ", ".join(dict.fromkeys(s["title"] for s in sources))
+    return (
+        "I read the following page(s) but ran out of steps before synthesizing a "
+        f"complete answer: {titles}. Try rephrasing the question or increasing "
+        "agentic.max_steps."
+    )
+
+
+def _build_prompt_templates() -> dict:
+    """
+    smolagents' default forced-final-answer prompt ("provide an answer instead")
+    is weak against a transcript that is 100% code — the model often keeps writing
+    <code> blocks / tool calls instead of switching to prose. Strengthen just the
+    final_answer section; everything else stays the CodeAgent default.
+    """
+    import importlib.resources
+    import yaml
+
+    templates = yaml.safe_load(
+        importlib.resources.files("smolagents.prompts").joinpath("code_agent.yaml").read_text()
+    )
+    templates["final_answer"]["pre_messages"] = (
+        "An agent tried to answer a user query but it got stuck and failed to do so. "
+        "You are tasked with providing an answer instead, based on its memory below. "
+        "Respond with plain natural-language prose ONLY — do not write Python code, "
+        "do not use <code> tags, do not call any tool. If the memory below does not "
+        "contain enough information to answer, say so plainly instead of guessing."
+    )
+    templates["final_answer"]["post_messages"] = (
+        "Based on the above, provide a plain-language answer (no code, no tool calls) "
+        "to the following user task:\n{{task}}"
+    )
+    return templates
+
+
+def _build_tool_classes(Tool):
+    """
+    Build the SearchPagesTool/ReadPageTool classes, deferred until `Tool` is
+    known to be importable — keeps this module importable even when smolagents
+    isn't installed (the ImportError guard lives in __init__, not at module load).
+    """
+
+    class SearchPagesTool(Tool):
+        name = "search_pages"
+        description = (
+            "Search the documentation page index for pages matching a query. "
+            "Returns candidate pages with their filepath, title, module, and doc_category."
+        )
+        inputs = {"query": {"type": "string", "description": "Search terms describing what to look for."}}
+        output_type = "string"
+
+        def __init__(self, page_index: List[dict]):
+            super().__init__()
+            self._page_index = page_index
+
+        def forward(self, query: str) -> str:
+            candidates = search_pages(self._page_index, query)
+            if not candidates:
+                return "No matching pages found."
+            return "\n".join(
+                f"- {e['filepath']} | {e['title']} | {e['module']}/{e['doc_category']}"
+                for e in candidates
+            )
+
+    class ReadPageTool(Tool):
+        name = "read_page"
+        description = (
+            "Read and return the text content of a documentation page. The filepath "
+            "must be one returned by search_pages — other filepaths are rejected."
+        )
+        inputs = {
+            "filepath": {"type": "string", "description": "Exact filepath as returned by search_pages."},
+            "doc_category": {"type": "string", "description": "The page's doc_category (dev or user), as returned by search_pages."},
+        }
+        output_type = "string"
+
+        def __init__(self, entry_by_filepath: Dict[str, dict], max_chars: int, read_entries: List[dict]):
+            super().__init__()
+            self._entry_by_filepath = entry_by_filepath
+            self._max_chars = max_chars
+            self._read_entries = read_entries
+
+        def forward(self, filepath: str, doc_category: str) -> str:
+            entry = self._entry_by_filepath.get(filepath)
+            if entry is None:
+                return (
+                    f"Error: {filepath!r} is not a known documentation page. "
+                    "Only use filepaths returned by search_pages."
+                )
+            try:
+                content = parse_page(filepath, doc_category, max_chars=self._max_chars)
+            except FileNotFoundError:
+                return f"Error: page file not found on disk: {filepath}"
+            self._read_entries.append(entry)
+            return content
+
+    return SearchPagesTool, ReadPageTool
