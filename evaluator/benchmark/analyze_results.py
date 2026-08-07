@@ -351,15 +351,29 @@ class BenchmarkAnalyzer:
 
     @classmethod
     def _classify_tags(cls, tags: List[str]) -> Dict[str, List[str]]:
-        """Split a normalized tag list into topic / difficulty / language buckets."""
-        buckets = {"topic": [], "difficulty": [], "language": []}
+        """Split a normalized tag list into type / module / difficulty / language
+        buckets. Difficulty and language are recognized by fixed tag values;
+        every question in dataset.json carries exactly two remaining ("topic")
+        tags, always ordered [Type, Module] (e.g. ["Py", "Sampler"]) — a
+        convention verified across the full dataset, so those two are read
+        positionally rather than from a hardcoded value set."""
+        buckets = {"type": [], "module": [], "difficulty": [], "language": []}
+        topic_tags = []
         for tag in tags:
             if tag in cls.DIFFICULTY_TAGS:
                 buckets["difficulty"].append(tag)
             elif tag in cls.LANGUAGE_TAGS:
                 buckets["language"].append(tag)
             else:
-                buckets["topic"].append(tag)
+                topic_tags.append(tag)
+
+        if topic_tags:
+            buckets["type"].append(topic_tags[0])
+        if len(topic_tags) > 1:
+            # Only the [Type, Module] convention is expected; any further
+            # topic tags (not seen in the current dataset) still surface
+            # somewhere rather than being silently dropped.
+            buckets["module"].extend(topic_tags[1:])
         return buckets
 
     def _get_config_labels(self):
@@ -441,8 +455,11 @@ class BenchmarkAnalyzer:
         print("  Generating: Scores by Question and Config...")
         self._graph_scores_by_question_and_config(output_path)
         
-        print("  Generating: Scores by Tag and Config...")
-        self._graph_scores_by_tag(output_path)
+        print("  Generating: Scores by Type and Config...")
+        self._graph_scores_by_type(output_path)
+
+        print("  Generating: Scores by Module and Config...")
+        self._graph_scores_by_module(output_path)
 
         print("  Generating: Response Time by Config...")
         self._graph_response_time_by_config(output_path)
@@ -493,9 +510,14 @@ class BenchmarkAnalyzer:
             config_label = config_labels_full[short_label]
             scores = [question_config_scores[q_id].get(config_label, 0) for q_id in q_ids]
             offset = width * (config_idx - len(all_configs)/2 + 0.5)
-            ax.bar([xi + offset for xi in x], scores, width, label=short_label, 
-                   color=colors[config_idx], alpha=0.8, edgecolor='black', linewidth=0.5)
-        
+            bars = ax.bar([xi + offset for xi in x], scores, width, label=short_label,
+                          color=colors[config_idx], alpha=0.8, edgecolor='black', linewidth=0.5)
+            # Label every bar with its value: a 0-height bar is otherwise
+            # indistinguishable from a question with no data for that config.
+            for bar, score in zip(bars, scores):
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f'{score:.1f}',
+                        ha='center', va='bottom', fontsize=6)
+
         ax.set_xlabel('Question ID')
         ax.set_ylabel('Overall Score')
         ax.set_title('Overall Score by Question and Configuration')
@@ -503,8 +525,8 @@ class BenchmarkAnalyzer:
         ax.set_xticklabels([f'Q{q_id}' for q_id in q_ids])
         ax.legend(loc='upper right', fontsize=9)
         ax.grid(True, alpha=0.3, axis='y')
-        ax.set_ylim(0, 10)
-        
+        ax.set_ylim(0, 10.8)
+
         self._save_graph(fig, output_path, "04_scores_by_question_config.png")
     
     def _graph_metric_distributions(self, output_path: Path):
@@ -542,7 +564,9 @@ class BenchmarkAnalyzer:
             # Prepare data for box plot
             data_to_plot = [config_data.get(metric, {}).get(config, []) for config in all_configs]
             
-            bp = axes[i].boxplot(data_to_plot, tick_labels=all_configs, patch_artist=True)
+            # `labels` (not `tick_labels`, added only in matplotlib 3.9) matches
+            # the matplotlib==3.8.4 pinned in requirements.txt.
+            bp = axes[i].boxplot(data_to_plot, labels=all_configs, patch_artist=True)
             
             # Color the boxes
             for patch, color in zip(bp['boxes'], colors):
@@ -623,7 +647,7 @@ class BenchmarkAnalyzer:
                     box_colors.append('white')
 
             # Create box plot
-            bp = ax.boxplot(box_data, tick_labels=box_labels, patch_artist=True, widths=0.6,
+            bp = ax.boxplot(box_data, labels=box_labels, patch_artist=True, widths=0.6,
                            positions=range(len(box_data)))
 
             # Color the boxes
@@ -669,14 +693,23 @@ class BenchmarkAnalyzer:
 
         self._save_graph(fig, output_path, filename)
 
-    def _graph_scores_by_tag(self, output_path: Path):
-        """Scores broken down by topic tag (e.g. Sampler, Sensitivity) and configuration."""
-        def topic_labels(q_data):
+    def _graph_scores_by_type(self, output_path: Path):
+        """Scores broken down by question type tag (Cpp, Py, Methodology, wrong) and configuration."""
+        def type_labels(q_data):
             tags = self._normalize_tags(q_data.get("tags", []))
-            topics = self._classify_tags(tags)["topic"]
-            return topics or ["untagged"]
+            types = self._classify_tags(tags)["type"]
+            return types or ["unspecified"]
 
-        self._graph_scores_by_dimension(output_path, topic_labels, "Topic", "05_scores_by_tag_config.png")
+        self._graph_scores_by_dimension(output_path, type_labels, "Type", "05_scores_by_type_config.png")
+
+    def _graph_scores_by_module(self, output_path: Path):
+        """Scores broken down by Uranie module tag (e.g. Sampler, Sensitivity, DataServer) and configuration."""
+        def module_labels(q_data):
+            tags = self._normalize_tags(q_data.get("tags", []))
+            modules = self._classify_tags(tags)["module"]
+            return modules or ["unspecified"]
+
+        self._graph_scores_by_dimension(output_path, module_labels, "Module", "06_scores_by_module_config.png")
 
     def _graph_scores_by_difficulty(self, output_path: Path):
         """Scores broken down by difficulty tag (easy/medium/hard) and configuration."""
@@ -685,7 +718,7 @@ class BenchmarkAnalyzer:
             difficulties = self._classify_tags(tags)["difficulty"]
             return difficulties or ["unspecified"]
 
-        self._graph_scores_by_dimension(output_path, difficulty_labels, "Difficulty", "08_scores_by_difficulty_config.png")
+        self._graph_scores_by_dimension(output_path, difficulty_labels, "Difficulty", "09_scores_by_difficulty_config.png")
 
     def _graph_scores_by_language(self, output_path: Path):
         """Scores broken down by language tag (Fr/En) and configuration."""
@@ -694,7 +727,7 @@ class BenchmarkAnalyzer:
             languages = self._classify_tags(tags)["language"]
             return languages or ["unspecified"]
 
-        self._graph_scores_by_dimension(output_path, language_labels, "Language", "09_scores_by_language_config.png")
+        self._graph_scores_by_dimension(output_path, language_labels, "Language", "10_scores_by_language_config.png")
     
     def _graph_response_time_by_config(self, output_path: Path):
         """Generate bar chart of response time by configuration"""
@@ -730,7 +763,7 @@ class BenchmarkAnalyzer:
             ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(), 
                    f'{time:.4f}s', ha='center', va='bottom', fontsize=9)
         
-        self._save_graph(fig, output_path, "06_response_time_by_config.png")
+        self._save_graph(fig, output_path, "07_response_time_by_config.png")
     
     def _graph_response_time_by_question(self, output_path: Path):
         """Generate bar chart of response time by question, nuanced by configuration"""
@@ -764,13 +797,18 @@ class BenchmarkAnalyzer:
         colors = self._get_colors(len(all_configs))
         
         fig, ax = plt.subplots(figsize=(14, 6))
-        
+
         # Plot bars for each configuration
+        all_times_flat = []
         for i, config in enumerate(all_configs):
             times = [question_config_times[q_id].get(config, 0) for q_id in q_ids]
+            all_times_flat.extend(times)
             offset = width * (i - len(all_configs)/2 + 0.5)
-            ax.bar([xi + offset for xi in x], times, width, label=config, color=colors[i], alpha=0.8, edgecolor='black', linewidth=0.5)
-        
+            bars = ax.bar([xi + offset for xi in x], times, width, label=config, color=colors[i], alpha=0.8, edgecolor='black', linewidth=0.5)
+            for bar, time in zip(bars, times):
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f'{time:.1f}',
+                        ha='center', va='bottom', fontsize=6)
+
         ax.set_xlabel('Question ID')
         ax.set_ylabel('Response Time (seconds)')
         ax.set_title('Response Time by Question and Configuration')
@@ -778,13 +816,18 @@ class BenchmarkAnalyzer:
         ax.set_xticklabels([f'Q{q_id}' for q_id in q_ids])
         ax.legend(loc='upper left', fontsize=9)
         ax.grid(True, alpha=0.3, axis='y')
-        
-        self._save_graph(fig, output_path, "07_response_time_by_question_config.png")
+        if all_times_flat:
+            ax.set_ylim(0, max(all_times_flat) * 1.15)
+
+        self._save_graph(fig, output_path, "08_response_time_by_question_config.png")
     
     def _graph_performance_heatmap(self, output_path: Path):
-        """Generate heatmap of average scores by config and metric"""
+        """Generate heatmap of each config's deviation from the per-metric average.
+        The absolute score is already visible in the metric distribution graph (02);
+        this one is about which configs stand out, so the color and the annotated
+        value both encode the gap to the mean rather than the raw score."""
         import numpy as np
-        
+
         config_metrics = {}
         all_configs, config_labels_short, _ = self._get_config_labels()
 
@@ -796,34 +839,40 @@ class BenchmarkAnalyzer:
 
             if short_label not in config_metrics:
                 config_metrics[short_label] = {}
-            
+
             # Get average scores for each metric
             avg_scores = run.get("average_scores", {})
             for metric, score in avg_scores.items():
                 config_metrics[short_label][metric] = score
-        
+
         if not config_metrics:
             return
-        
-        # Prepare data matrix
+
+        # Prepare data matrix, then convert each column to its deviation from
+        # that metric's mean across all configs.
         metrics = ["correctness", "relevance", "groundedness", "retrieval_relevance"]
         data = np.array([[config_metrics[config].get(metric, 0) for metric in metrics] for config in all_configs])
-        
+        deviation = data - data.mean(axis=0, keepdims=True)
+
         fig, ax = plt.subplots(figsize=(10, 6))
-        im = ax.imshow(data, cmap='RdYlGn', aspect='auto', vmin=0, vmax=10)
-        
+        # Symmetric around 0 so "above average" and "below average" get comparable
+        # color intensity; floored so a single config (deviation always 0) doesn't
+        # collapse the color scale to a zero-width range.
+        max_abs_deviation = max(np.abs(deviation).max(), 0.1)
+        im = ax.imshow(deviation, cmap='RdYlGn', aspect='auto', vmin=-max_abs_deviation, vmax=max_abs_deviation)
+
         ax.set_xticks(range(len(metrics)))
         ax.set_yticks(range(len(all_configs)))
         ax.set_xticklabels([m.replace('_', ' ').title() for m in metrics])
         ax.set_yticklabels(all_configs)
-        
+
         # Add text annotations
         for i in range(len(all_configs)):
             for j in range(len(metrics)):
-                text = ax.text(j, i, f'{data[i, j]:.1f}', ha="center", va="center", color="black", fontweight='bold')
-        
-        ax.set_title('Performance Heatmap: Scores by Configuration and Metric', fontweight='bold')
-        plt.colorbar(im, ax=ax, label='Score')
+                text = ax.text(j, i, f'{deviation[i, j]:+.1f}', ha="center", va="center", color="black", fontweight='bold')
+
+        ax.set_title('Performance Heatmap: Deviation from Average by Configuration and Metric', fontweight='bold')
+        plt.colorbar(im, ax=ax, label='Deviation from average score')
         self._save_graph(fig, output_path, "03_performance_heatmap.png")
 
     def _graph_quality_vs_time(self, output_path: Path):

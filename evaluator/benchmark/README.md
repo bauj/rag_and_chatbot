@@ -136,17 +136,18 @@ This JSON file contains, for each configuration, all questions along with their 
 
 Use `--graphs` to generate visualizations:
 
-- **Quality vs time**: Scatter plot revealing the trade-off between overall response quality and execution speed across different tested configurations
-- **Metric distribution**: Box plots showing the score dispersion for each evaluation metric (correctness, relevance, groundedness, retrieval) across configurations
-- **Performance heatmap**: Colored matrix providing a visual overview of average scores achieved by each configuration across all evaluated metrics
-- **Scores by question config**: Grouped bar chart comparing the overall performance of each configuration on the first 15 benchmark questions
-- **Scores by tag config**: Box plots organized by topic tag (e.g. `Sampler`, `Sensitivity`) to identify strengths and weaknesses of configurations according to question topic
-- **Response time by config**: Bar chart displaying the average response times for each tested configuration
-- **Response time by question config**: Grouped bar chart detailing response time variations according to questions and configurations
-- **Scores by difficulty config**: Box plots organized by difficulty tag (`easy`/`medium`/`hard`) to see how each configuration holds up as questions get harder
-- **Scores by language config**: Box plots organized by language tag (`Fr`/`En`) to check for language-dependent performance gaps
+- **Quality vs time** (`01`): Scatter plot revealing the trade-off between overall response quality and execution speed across different tested configurations
+- **Metric distribution** (`02`): Box plots showing the score dispersion for each evaluation metric (correctness, relevance, groundedness, retrieval) across configurations
+- **Performance heatmap** (`03`): Colored matrix providing a visual overview of average scores achieved by each configuration across all evaluated metrics
+- **Scores by question config** (`04`): Grouped bar chart comparing the overall performance of each configuration on the first 15 benchmark questions, each bar labeled with its exact score
+- **Scores by type config** (`05`): Box plots organized by question type tag (`Cpp`, `Py`, `Methodology`, `wrong`) to identify strengths and weaknesses of configurations according to the kind of question asked
+- **Scores by module config** (`06`): Box plots organized by Uranie module tag (e.g. `Sampler`, `Sensitivity`, `DataServer`) to identify strengths and weaknesses of configurations according to question topic
+- **Response time by config** (`07`): Bar chart displaying the average response times for each tested configuration
+- **Response time by question config** (`08`): Grouped bar chart detailing response time variations according to questions and configurations, each bar labeled with its exact time
+- **Scores by difficulty config** (`09`): Box plots organized by difficulty tag (`easy`/`medium`/`hard`) to see how each configuration holds up as questions get harder
+- **Scores by language config** (`10`): Box plots organized by language tag (`Fr`/`En`) to check for language-dependent performance gaps
 
-Topic, difficulty, and language tags are recognized automatically from `dataset.json`'s `tags` field (see `evaluator/base/README.md`); any tag not matching `easy`/`medium`/`hard` or `Fr`/`En` is treated as a topic tag.
+Difficulty and language tags are recognized by fixed values (`easy`/`medium`/`hard`, `Fr`/`En`). Every question in `dataset.json` (see `evaluator/base/README.md`) also carries exactly two more tags, always in the order `[Type, Module]` (e.g. `["Py", "Sampler"]`) — these are read positionally, not from a fixed value list, so any new type or module tag is picked up automatically as long as this ordering convention is kept.
 
 Graphs are saved in the `graphs/` folder.
 
