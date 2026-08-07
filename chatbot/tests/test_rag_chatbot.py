@@ -386,12 +386,12 @@ def test_config_default_style_is_not_a_preset():
 
 
 def test_format_answer_warns_when_not_grounded():
-    """grounded=False (agentic-smol answered without reading a page) must be visible."""
+    """grounded=False (agentic answered without reading a page) must be visible."""
     from ui.web import WebUI
     ui = WebUI(MagicMock())
     out = ui._format_answer_markdown({
         "answer": "some answer", "sources": [],
-        "filters": {"mode": "agentic-smol", "steps_used": 2, "grounded": False},
+        "filters": {"mode": "agentic", "steps_used": 2, "grounded": False},
         "error": None,
     })
     assert "Warning" in out
@@ -403,7 +403,7 @@ def test_format_answer_no_warning_when_grounded():
     ui = WebUI(MagicMock())
     out = ui._format_answer_markdown({
         "answer": "some answer", "sources": [],
-        "filters": {"mode": "agentic-smol", "steps_used": 2, "grounded": True},
+        "filters": {"mode": "agentic", "steps_used": 2, "grounded": True},
         "error": None,
     })
     assert "Warning" not in out
@@ -497,7 +497,7 @@ def test_emit_json_falls_back_to_content_for_agentic_sources():
     from chatbot import _emit_json
     buf = io.StringIO()
     _emit_json({
-        "answer": "a", "error": None, "filters": {"mode": "agentic-smol", "grounded": True},
+        "answer": "a", "error": None, "filters": {"mode": "agentic", "grounded": True},
         "sources": [{"title": "T", "module": "M", "doc_category": "dev"}],
     }, buf)
     src = json.loads(buf.getvalue())["sources"][0]
