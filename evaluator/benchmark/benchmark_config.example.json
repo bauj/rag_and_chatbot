@@ -13,8 +13,7 @@
   },
   "agentic_hyperparams": {
     "temperature": [0.3, 0.7],
-    "max_pages_per_round": [3, 5],
-    "max_pages_round2": [2],
+    "max_steps": [4, 6, 8],
     "max_chars_per_page": [8000]
   }
 }

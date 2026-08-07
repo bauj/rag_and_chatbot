@@ -51,14 +51,13 @@ Example structure:
   },
   "agentic_hyperparams": {
     "temperature": [0.7],
-    "max_pages_per_round": [3, 5],
-    "max_pages_round2": [2],
+    "max_steps": [4, 6, 8],
     "max_chars_per_page": [8000]
   }
 }
 ```
 
-Every combination of the values above is run (a full cross-product), so each extra value in a list multiplies the total run count — prefer varying one or two dimensions at a time. `hyde_enabled`, `bm25_enabled` and `title_boost_enabled` are RAG retrieval-pipeline toggles (see `chatbot/config.json`'s comments for what each does); `max_pages_per_round`, `max_pages_round2` and `max_chars_per_page` are the agentic mode's page-reading budget.
+Every combination of the values above is run (a full cross-product), so each extra value in a list multiplies the total run count — prefer varying one or two dimensions at a time. `hyde_enabled`, `bm25_enabled` and `title_boost_enabled` are RAG retrieval-pipeline toggles (see `chatbot/config.json`'s comments for what each does); `max_steps` is the agentic mode's CodeAgent step budget, and `max_chars_per_page` is how much of each page it reads.
 
 ## Scripts
 
