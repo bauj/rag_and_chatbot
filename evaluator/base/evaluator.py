@@ -594,7 +594,7 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
     print("=" * 80)
 
     examples = _load_examples()
-    if limit_questions:
+    if limit_questions is not None:
         examples = examples[:limit_questions]
     results = []
 

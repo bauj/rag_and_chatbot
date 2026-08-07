@@ -5,11 +5,8 @@ Generates detailed comparison tables and insights
 """
 
 import json
-import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
-from datetime import datetime
-import statistics
 
 try:
     import matplotlib.pyplot as plt
@@ -921,7 +918,12 @@ def main():
         for i, rf in enumerate(result_files, 1):
             print(f"{i}. {rf.name}")
         
-        choice = input("\nSelect a file to analyze (number): ").strip()
+        try:
+            choice = input("\nSelect a file to analyze (number): ").strip()
+        except EOFError:
+            print("\nNo input available (non-interactive session). Pass a results "
+                  "file, or --latest, as an argument instead.")
+            return
         try:
             choice_idx = int(choice) - 1
             if 0 <= choice_idx < len(result_files):
