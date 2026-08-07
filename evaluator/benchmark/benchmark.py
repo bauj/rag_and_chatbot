@@ -15,8 +15,13 @@ from itertools import product
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
-BENCHMARK_CONFIG_FILE = Path(__file__).resolve().parent / "benchmark_config.json"
-BENCHMARK_CONFIG_EXAMPLE_FILE = Path(__file__).resolve().parent / "benchmark_config.example.json"
+SCRIPT_DIR = Path(__file__).resolve().parent
+BENCHMARK_CONFIG_FILE = SCRIPT_DIR / "benchmark_config.json"
+BENCHMARK_CONFIG_EXAMPLE_FILE = SCRIPT_DIR / "benchmark_config.example.json"
+# Anchored to the script's own directory rather than the current working
+# directory, so results always land next to benchmark.py regardless of where
+# `python benchmark.py` (or `python evaluator/benchmark/benchmark.py`) is run from.
+BENCHMARK_RESULTS_DIR = SCRIPT_DIR / "benchmark_results"
 
 _SUPPORTED_MODES = {"rag", "agentic"}
 
@@ -111,7 +116,7 @@ def run_benchmark(
     modes = config_data["modes"]
 
     # Create output directory
-    output_path = Path("benchmark_results")
+    output_path = BENCHMARK_RESULTS_DIR
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Timestamp for results
@@ -285,7 +290,7 @@ def print_benchmark_summary(results: Dict):
         overall = sum(avg_scores.values()) / len(avg_scores) if avg_scores else 0
         print(f"  Overall:             {overall:.1f}/10\n")
 
-def compare_results(results_dir: str = "benchmark_results"):
+def compare_results(results_dir: str = str(BENCHMARK_RESULTS_DIR)):
     """Compare multiple benchmark runs"""
     results_path = Path(results_dir)
     

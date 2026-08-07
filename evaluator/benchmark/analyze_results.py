@@ -17,6 +17,13 @@ try:
 except ImportError:
     HAS_MATPLOTLIB = False
 
+# Anchored to the script's own directory rather than the current working
+# directory, so results/graphs are found and written next to benchmark.py
+# regardless of where this script is run from.
+SCRIPT_DIR = Path(__file__).resolve().parent
+BENCHMARK_RESULTS_DIR = SCRIPT_DIR / "benchmark_results"
+GRAPHS_DIR = SCRIPT_DIR / "graphs"
+
 class BenchmarkAnalyzer:
     """Analyze and compare benchmark results"""
 
@@ -409,7 +416,7 @@ class BenchmarkAnalyzer:
         print("ANALYSIS COMPLETE")
         print(f"{'='*100}\n")
     
-    def generate_graphs(self, output_dir: str = "graphs"):
+    def generate_graphs(self, output_dir: str = str(GRAPHS_DIR)):
         """Generate various analysis graphs"""
         if not HAS_MATPLOTLIB:
             print("Matplotlib not available. Install with: pip install matplotlib")
@@ -876,7 +883,7 @@ def main():
     args = parser.parse_args()
     
     # Find results files
-    results_dir = Path("benchmark_results")
+    results_dir = BENCHMARK_RESULTS_DIR
     if not results_dir.exists():
         print("No benchmark_results directory found")
         return
