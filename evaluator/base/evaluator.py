@@ -1,3 +1,4 @@
+import re
 import subprocess
 import sys
 import json
@@ -194,7 +195,19 @@ class MistralLLM:
             try:
                 return json.loads(content)
             except json.JSONDecodeError:
-                return {"content": content}
+                pass
+            # Some gateways accept response_format=json_schema with HTTP 200
+            # but still reply with the JSON wrapped in a markdown code fence
+            # instead of raw JSON. Strip ```json ... ``` / ``` ... ``` before
+            # giving up, so a cosmetic wrapper doesn't get misread as a
+            # missing "score" (a pipeline failure, not a real 0.0 grade).
+            fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", content, re.DOTALL)
+            if fenced:
+                try:
+                    return json.loads(fenced.group(1))
+                except json.JSONDecodeError:
+                    pass
+            return {"content": content}
 
         # Return a simple object with content attribute for compatibility
         class Response:
