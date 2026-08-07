@@ -470,8 +470,11 @@ class BenchmarkAnalyzer:
                 overall_score = sum(scores) / len(scores) if scores else 0
                 question_config_scores[q_id][config_label] = overall_score
         
+        if not question_config_scores or not all_configs:
+            return
+
         q_ids = sorted(question_config_scores.keys())[:15]  # Limit to first 15 questions for readability
-        
+
         # Prepare plot
         fig, ax = plt.subplots(figsize=(16, 7))
         x = range(len(q_ids))
@@ -503,7 +506,10 @@ class BenchmarkAnalyzer:
         # Collect data by metric and configuration
         config_data = {}
         all_configs, _, config_labels_full = self._get_config_labels()
-        
+
+        if not all_configs:
+            return
+
         for run in self.data["results"]:
             mode = run["mode"]
             config = self._format_config(run["configuration"])
@@ -526,7 +532,7 @@ class BenchmarkAnalyzer:
         
         for i, metric in enumerate(metrics):
             # Prepare data for box plot
-            data_to_plot = [config_data[metric].get(config, []) for config in all_configs]
+            data_to_plot = [config_data.get(metric, {}).get(config, []) for config in all_configs]
             
             bp = axes[i].boxplot(data_to_plot, tick_labels=all_configs, patch_artist=True)
             

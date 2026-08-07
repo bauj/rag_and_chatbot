@@ -39,6 +39,7 @@ def load_benchmark_config() -> Dict[str, Any]:
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from evaluator.base.evaluator import (
     _call_chatbot,
+    _validate_config,
     run_evaluation,
     _load_examples,
     EVAL_METRICS,
@@ -73,6 +74,8 @@ def run_benchmark(
 ):
     """Run full benchmark with all configurations"""
 
+    _validate_config()
+
     config_data = load_benchmark_config()
     modes = config_data["modes"]
 
@@ -94,7 +97,7 @@ def run_benchmark(
         "results": []
     }
 
-    if limit_questions:
+    if limit_questions is not None:
         dataset = dataset[:limit_questions]
 
     rag_configs = generate_rag_configs(config_data["rag_hyperparams"])

@@ -71,12 +71,14 @@ This JSON file contains, for each configuration, all questions along with their 
 {
   "metadata": {
     "timestamp": "YYYYMMDD_HHMMSS",
-    "modes": [
-      "rag",
-      "agentic"
-    ],
+    "benchmark_config": {
+      "modes": ["rag", "agentic"],
+      "rag_hyperparams": { "k": [3, 5], "temperature": [0.3, 0.7] },
+      "agentic_hyperparams": { "temperature": [0.3, 0.7] }
+    },
     "total_questions": 13,
-    "workers": 5
+    "workers": 5,
+    "timeout_seconds": null
   },
   "results": [
     {
@@ -92,6 +94,7 @@ This JSON file contains, for each configuration, all questions along with their 
         {
           "question_id": 1,
           "question": "Question 1?",
+          "tags": ["Type", "Module"],
           "reference_answer": "Expected Answer 1.",
           "generated_answer": "Chatbot Answer 1.",
           "evaluations": {
@@ -111,13 +114,23 @@ This JSON file contains, for each configuration, all questions along with their 
               "score": 10.0,
               "explanation": "Explanation of the retrieval relevance score."
             }
-          }
+          },
+          "request_time": 24.658
         }
-      ]
+      ],
+      "average_scores": {
+        "correctness": 5.0,
+        "relevance": 8.0,
+        "groundedness": 2.0,
+        "retrieval_relevance": 10.0
+      },
+      "average_request_time": 24.658
     }
   ]
 }
 ```
+
+`metadata.benchmark_config` is the full content of `benchmark_config.json` used for that run — kept alongside the results so a given `benchmark_*.json` file is self-describing (which modes and hyperparameter grid produced it) without needing to cross-reference a separate config file.
 
 ## Analysis Graphs
 
