@@ -389,8 +389,12 @@ class BenchmarkAnalyzer:
         return sorted(list(set(all_configs))), config_labels_short, config_labels_full
     
     def _get_colors(self, n_colors):
-        """Get color palette for n_colors items"""
-        return plt.cm.Set3(range(n_colors))
+        """Get a color palette for n_colors items. Set3 (qualitative, 12 distinct
+        colors) is used when it fits; beyond that, colors are sampled evenly from
+        a continuous colormap so configurations don't silently share a color."""
+        if n_colors <= 12:
+            return plt.cm.Set3(range(n_colors))
+        return plt.cm.nipy_spectral([i / max(n_colors - 1, 1) for i in range(n_colors)])
     
     def _save_graph(self, fig, output_path, filename):
         """Save graph with consistent settings"""

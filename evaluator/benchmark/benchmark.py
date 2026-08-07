@@ -328,6 +328,7 @@ def compare_results(results_dir: str = str(BENCHMARK_RESULTS_DIR)):
             avg_scores = run["average_scores"]
             
             config_str = ", ".join([f"{k}={v}" for k, v in config.items()]) if config else "default"
+            config_str = config_str[:37] + "..." if len(config_str) > 40 else config_str
             print(f"  {mode.upper():8} | {config_str:40} | ", end="")
             
             overall = sum(avg_scores.values()) / len(avg_scores) if avg_scores else 0
