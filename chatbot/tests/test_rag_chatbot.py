@@ -569,7 +569,7 @@ def test_handle_message_routes_to_agentic(tmp_path):
     agentic.ask.return_value = {
         "answer": "agentic answer",
         "sources": [],
-        "filters": {"mode": "agentic", "rounds_used": 1},
+        "filters": {"mode": "agentic", "steps_used": 3},
         "error": None,
     }
     ui = WebUI(rag, agentic_chatbot=agentic)
@@ -580,13 +580,11 @@ def test_handle_message_routes_to_agentic(tmp_path):
         response_style="Precise (Recommended)", deep_dive=False,
         search_depth=40, reranker_enabled=True, top_n=15, hyde_enabled=False,
         bm25_enabled=False, answer_length=2000,
-        max_chars_per_page=8000, max_pages_per_round=3, max_pages_round2=2,
+        max_chars_per_page=8000, max_steps=6,
     )
     agentic.ask.assert_called_once_with(
         "question",
-        max_chars_per_page=8000,
-        max_pages_per_round=3,
-        max_pages_round2=2,
+        max_steps=6,
         max_tokens=2000,
     )
     rag.ask.assert_not_called()
@@ -606,7 +604,7 @@ def test_handle_message_forwards_bm25_toggle():
         response_style="Precise (Recommended)", deep_dive=False,
         search_depth=40, reranker_enabled=True, top_n=15, hyde_enabled=True,
         bm25_enabled=True, answer_length=2000,
-        max_chars_per_page=8000, max_pages_per_round=3, max_pages_round2=2,
+        max_chars_per_page=8000, max_steps=6,
     )
     assert rag.ask.call_args.kwargs["bm25_enabled"] is True
 
@@ -625,7 +623,7 @@ def test_handle_message_config_default_style_sends_no_temperature():
         response_style=ChatbotConfig.CONFIG_DEFAULT_STYLE, deep_dive=False,
         search_depth=40, reranker_enabled=True, top_n=15, hyde_enabled=False,
         bm25_enabled=False, answer_length=2000,
-        max_chars_per_page=8000, max_pages_per_round=3, max_pages_round2=2,
+        max_chars_per_page=8000, max_steps=6,
     )
     assert rag.ask.call_args.kwargs["temperature"] is None
 

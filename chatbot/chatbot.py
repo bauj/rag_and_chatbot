@@ -151,17 +151,10 @@ Examples:
         help='Override LLM temperature (terminal single-question mode)'
     )
     parser.add_argument(
-        '--max-pages-per-round',
+        '--max-steps',
         type=int,
-        dest='max_pages_per_round',
-        help='Override number of pages read in round 1 (agentic mode only, terminal single-question mode)'
-    )
-    parser.add_argument(
-        '--max-pages-round2',
-        type=int,
-        dest='max_pages_round2',
-        help='Override number of pages read in round 2, if a second round is triggered '
-             '(agentic mode only, terminal single-question mode)'
+        dest='max_steps',
+        help='Override the CodeAgent step budget (agentic mode only, terminal single-question mode)'
     )
     parser.add_argument(
         '--max-chars-per-page',
@@ -172,10 +165,10 @@ Examples:
 
     parser.add_argument(
         '--mode',
-        choices=['rag', 'agentic', 'agentic-smol'],
+        choices=['rag', 'agentic'],
         default='rag',
-        help='Chatbot mode: rag (default), agentic (reads HTML pages directly), '
-             'or agentic-smol (smolagents CodeAgent, real multi-hop browsing)'
+        help='Chatbot mode: rag (default) or agentic (smolagents CodeAgent, '
+             'multi-hop page browsing)'
     )
 
     # Web options
@@ -199,11 +192,8 @@ Examples:
         if not args.question:
             parser.error("--json-output requires --question")
 
-    if args.mode == 'rag' and (
-        args.max_pages_per_round is not None or args.max_pages_round2 is not None
-        or args.max_chars_per_page is not None
-    ):
-        print("Warning: --max-pages-per-round, --max-pages-round2 and --max-chars-per-page are not "
+    if args.mode == 'rag' and (args.max_steps is not None or args.max_chars_per_page is not None):
+        print("Warning: --max-steps and --max-chars-per-page are not "
               "supported in rag mode and will be ignored.", file=sys.stderr)
 
     # In JSON mode stdout must contain the JSON document and nothing else, so
@@ -256,75 +246,51 @@ Examples:
 
     # Initialize agentic chatbot if requested
     agentic_chatbot = None
-    if args.mode in ('agentic', 'agentic-smol') or config.agentic is not None:
+    if args.mode == 'agentic' or config.agentic is not None:
         if config.agentic is None:
             print(f"\nError: --mode {args.mode} requires an 'agentic' block in config.json")
             sys.exit(1)
-        # Warn about ignored flags in agentic modes
-        if args.mode in ('agentic', 'agentic-smol'):
+        # Warn about ignored flags in agentic mode
+        if args.mode == 'agentic':
             if args.module or args.doc_type:
-                print(f"Warning: --module and --type are not supported in {args.mode} mode and will be ignored.",
+                print("Warning: --module and --type are not supported in agentic mode and will be ignored.",
                       file=sys.stderr)
             if args.deep_dive:
-                print(f"Warning: --deep-dive is not supported in {args.mode} mode and will be ignored.",
+                print("Warning: --deep-dive is not supported in agentic mode and will be ignored.",
                       file=sys.stderr)
             if (args.k is not None or args.top_n is not None or args.no_rerank
                     or args.no_hyde or args.no_bm25 or args.no_title_boost):
                 print("Warning: --k, --top-n, --no-rerank, --no-hyde, --no-bm25 and --no-title-boost are not "
                       "supported in agentic mode and will be ignored.", file=sys.stderr)
-        if args.mode == 'agentic-smol' and (
-            args.max_pages_per_round is not None or args.max_pages_round2 is not None
-            or args.max_chars_per_page is not None
-        ):
-            print("Warning: --max-pages-per-round, --max-pages-round2 and --max-chars-per-page are not "
-                  "supported in agentic-smol mode and will be ignored.", file=sys.stderr)
-        from core import AgenticChatbot
-        print("Loading agentic chatbot (page index)...")
-        agentic_chatbot = AgenticChatbot(config)
-        print("Agentic chatbot ready.")
-
-    # Initialize smolagents agentic chatbot if enabled (opt-in, requires config.agentic too)
-    agentic_smol_chatbot = None
-    if config.agentic is not None and config.smol_enabled:
         try:
-            from core import AgenticSmolChatbot
-            print("Loading agentic-smol chatbot (smolagents)...")
-            agentic_smol_chatbot = AgenticSmolChatbot(config)
-            print("Agentic-smol chatbot ready.")
+            from core import AgenticChatbot
+            print("Loading agentic chatbot (smolagents)...")
+            agentic_chatbot = AgenticChatbot(config)
+            print("Agentic chatbot ready.")
         except ImportError as e:
-            if args.mode == 'agentic-smol':
-                print(f"\nError: --mode agentic-smol requires the smolagents package. {e}")
+            if args.mode == 'agentic':
+                print(f"\nError: --mode agentic requires the smolagents package. {e}")
                 sys.exit(1)
-            print(f"Warning: agentic-smol mode unavailable ({e}). Continuing without it.", file=sys.stderr)
-    elif args.mode == 'agentic-smol':
-        if config.agentic is None:
-            print("\nError: --mode agentic-smol requires an 'agentic' block in config.json")
-        else:
-            print("\nError: --mode agentic-smol requires smol_enabled: true in config.json")
-        sys.exit(1)
+            print(f"Warning: agentic mode unavailable ({e}). Continuing without it.", file=sys.stderr)
 
     # Route to appropriate interface
     if args.web:
         from ui import WebUI
         # Web interface
-        web_ui = WebUI(chatbot, agentic_chatbot=agentic_chatbot, agentic_smol_chatbot=agentic_smol_chatbot)
+        web_ui = WebUI(chatbot, agentic_chatbot=agentic_chatbot)
         web_ui.launch(share=args.share, port=args.port)
     else:
         from ui import TerminalUI
         # Terminal interface
-        terminal_ui = TerminalUI(chatbot, agentic_chatbot=agentic_chatbot, agentic_smol_chatbot=agentic_smol_chatbot)
+        terminal_ui = TerminalUI(chatbot, agentic_chatbot=agentic_chatbot)
 
         if args.question:
             if args.mode == 'agentic':
                 result = agentic_chatbot.ask(
                     args.question,
                     temperature=args.temperature,
-                    max_pages_per_round=args.max_pages_per_round,
-                    max_pages_round2=args.max_pages_round2,
-                    max_chars_per_page=args.max_chars_per_page,
+                    max_steps=args.max_steps,
                 )
-            elif args.mode == 'agentic-smol':
-                result = agentic_smol_chatbot.ask(args.question)
             elif args.json_output:
                 # run_single_question() only prints, so ask directly to get the dict.
                 result = chatbot.ask(
