@@ -18,6 +18,34 @@ import threading
 BENCHMARK_CONFIG_FILE = Path(__file__).resolve().parent / "benchmark_config.json"
 BENCHMARK_CONFIG_EXAMPLE_FILE = Path(__file__).resolve().parent / "benchmark_config.example.json"
 
+_SUPPORTED_MODES = {"rag", "agentic"}
+
+def _validate_benchmark_config(config_data: Dict[str, Any]) -> None:
+    """Fail fast with a clear message if benchmark_config.json is missing keys
+    that the rest of this module indexes directly (config_data["modes"], etc.),
+    instead of a bare KeyError deep inside run_benchmark()."""
+    missing = [
+        key for key in ("modes", "rag_hyperparams", "agentic_hyperparams")
+        if key not in config_data
+    ]
+    if missing:
+        raise ValueError(
+            f"Benchmark config is missing required key(s): {', '.join(missing)}. "
+            f"See {BENCHMARK_CONFIG_EXAMPLE_FILE} for the expected structure."
+        )
+
+    unknown_modes = [m for m in config_data["modes"] if m not in _SUPPORTED_MODES]
+    if unknown_modes:
+        raise ValueError(
+            f"Unsupported mode(s) in benchmark config: {unknown_modes}. "
+            f"Supported modes are: {sorted(_SUPPORTED_MODES)}."
+        )
+
+    if "temperature" not in config_data["agentic_hyperparams"]:
+        raise ValueError(
+            "benchmark config's 'agentic_hyperparams' must include a 'temperature' list."
+        )
+
 def load_benchmark_config() -> Dict[str, Any]:
     """Load benchmark parameters from JSON configuration."""
     config_path = BENCHMARK_CONFIG_FILE
@@ -29,11 +57,14 @@ def load_benchmark_config() -> Dict[str, Any]:
 
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            config_data = json.load(f)
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"Benchmark config file is invalid JSON: {config_path}: {exc}"
         ) from exc
+
+    _validate_benchmark_config(config_data)
+    return config_data
 
 # Import from evaluator base package
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
