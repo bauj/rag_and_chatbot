@@ -197,6 +197,39 @@ def test_ask_builds_sources_and_grounded_true_when_pages_read(tmp_path, monkeypa
     assert result["filters"]["steps_used"] == 4
 
 
+def test_ask_sources_carry_the_parsed_page_content(tmp_path, monkeypatch):
+    """
+    #114: the evaluator's groundedness/retrieval_relevance grading reads
+    source["content"] to build the FACTS block. Without it every agentic
+    answer looks ungrounded regardless of how good the retrieval was.
+    """
+    bot = _make_bot(tmp_path)
+    known_filepath = bot._page_index[0]["filepath"]
+    monkeypatch.setattr(
+        "core.agentic_chatbot.parse_page",
+        lambda filepath, doc_category, max_chars=8000: "The actual page text the agent read.",
+    )
+
+    captured_tools = {}
+
+    def run_fn(task):
+        for tool in captured_tools["tools"]:
+            if tool.name == "read_page":
+                tool.forward(known_filepath, "dev")
+        return "The final answer."
+
+    def fake_code_agent(tools, model, max_steps, **kwargs):
+        captured_tools["tools"] = tools
+        return _FakeAgent(run_fn=run_fn, steps=4)
+
+    bot._CodeAgent = fake_code_agent
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
+
+    assert result["sources"][0]["content"] == "The actual page text the agent read."
+
+
 def test_ask_grounded_false_and_empty_sources_when_no_pages_read(tmp_path):
     bot = _make_bot(tmp_path)
     bot._CodeAgent = MagicMock(return_value=_FakeAgent(run_fn=lambda task: "Answer with no reads."))

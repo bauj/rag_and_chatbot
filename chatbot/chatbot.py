@@ -34,8 +34,8 @@ def _emit_json(result, stream):
                 "doc_category": s.get("doc_category"),
                 "doc_type": s.get("doc_type"),
                 "url": s.get("url"),
-                # Prefer the untruncated chunk; fall back to the preview for the
-                # agentic modes, whose sources carry no chunk text at all.
+                # rag mode's untruncated chunk lives in full_content; agentic
+                # mode's parsed page text is already in content.
                 "content": s.get("full_content") or s.get("content"),
             }
             for s in result.get("sources", [])

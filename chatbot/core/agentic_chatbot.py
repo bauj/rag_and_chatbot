@@ -171,6 +171,7 @@ class AgenticChatbot:
                 "title": entry["title"],
                 "module": entry["module"],
                 "doc_category": entry["doc_category"],
+                "content": entry.get("content", ""),
             })
 
         steps_used = len(agent.memory.steps) if hasattr(agent, "memory") else None
@@ -292,7 +293,7 @@ def _build_tool_classes(Tool):
                 content = parse_page(filepath, doc_category, max_chars=self._max_chars)
             except FileNotFoundError:
                 return f"Error: page file not found on disk: {filepath}"
-            self._read_entries.append(entry)
+            self._read_entries.append({**entry, "content": content})
             return content
 
     return SearchPagesTool, ReadPageTool
