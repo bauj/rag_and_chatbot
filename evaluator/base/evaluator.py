@@ -2,6 +2,7 @@ import subprocess
 import sys
 import json
 import os
+import signal
 import time
 import argparse
 from pathlib import Path
@@ -254,6 +255,22 @@ def _build_documents(sources: list) -> list:
         documents.append(doc)
     return documents
 
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kill proc and any descendants it may have spawned, not just its own PID.
+
+    proc is started with start_new_session=True (its own process group), so
+    killing that whole group reaches anything it forked off — unlike proc.kill(),
+    which only signals proc itself and would leave descendants as orphans still
+    holding memory/CPU (or a lock on the shared Chroma persist_directory).
+    """
+    try:
+        if os.name == "posix":
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        pass  # already exited on its own
+
 def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
                    config: Optional[Dict[str, Any]] = None) -> dict:
     """Call chatbot.py and return parsed answer/documents.
@@ -295,23 +312,38 @@ def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
             cmd.extend(["--max-chars-per-page", str(config["max_chars_per_page"])])
 
     try:
-        result = subprocess.run(
+        # Popen (rather than subprocess.run) so a timeout can be handled with
+        # _kill_process_tree below: run()'s own timeout handling only kills the
+        # immediate chatbot.py PID, which would leave any processes it spawned
+        # (e.g. from agentic-smol's CodeAgent executing arbitrary generated code)
+        # still running — burning memory/CPU and potentially still holding a lock
+        # on the shared Chroma persist_directory, which could then stall other
+        # chatbot calls too.
+        proc = subprocess.Popen(
             cmd,
             cwd=CHATBOT_DIR,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_seconds,
-            check=False,
+            start_new_session=True,
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_seconds)
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc)
+            proc.communicate()  # drain pipes / reap the now-dead process
+            raise
+
         elapsed = time.perf_counter() - start_time
-        if result.returncode != 0:
+        if returncode != 0:
             return {
-                "answer": f"Error calling chatbot: {result.stderr}",
+                "answer": f"Error calling chatbot: {stderr}",
                 "documents": [],
                 "request_time": elapsed,
             }
 
-        stdout = result.stdout.strip()
+        stdout = stdout.strip()
         json_start = stdout.find('{')
         if json_start < 0:
             raise ValueError("No JSON found in chatbot output")

@@ -27,6 +27,7 @@ import time
 import random
 import argparse
 import statistics
+import warnings
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,6 +41,16 @@ except ImportError as exc:
         "'pip install -r requirements.txt' (or 'pip install optuna') in the "
         "project's virtual environment."
     ) from exc
+
+# TPESampler(multivariate=True, group=True) below is a deliberate, informed choice
+# (it's Optuna's documented pattern for a conditional/branching search space — see
+# _suggest_trial_config) rather than an accidental one, so silence just these two
+# known ExperimentalWarnings instead of leaving them to clutter every run's output.
+warnings.filterwarnings(
+    "ignore",
+    category=optuna.exceptions.ExperimentalWarning,
+    message=r"Argument ``(multivariate|group)``",
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 OPTIMIZER_CONFIG_FILE = SCRIPT_DIR / "optimizer_config.json"
@@ -300,25 +311,40 @@ def objective(
 
     print(f"\n[Trial {trial.number}] starting: mode={mode} params={params}")
     start = time.perf_counter()
-    _, per_metric_avg, avg_request_time = evaluate_config_on_dataset(
-        params,
-        dataset,
-        mode,
-        chatbot_timeout,
-        workers,
-        trial=trial if pruning_enabled else None,
-        min_questions_before_report=pruning_cfg.get("min_questions_before_pruning", 20),
-        interval_questions=pruning_cfg.get("interval_questions", 5),
-    )
-    elapsed = time.perf_counter() - start
-
+    try:
+        _, per_metric_avg, avg_request_time = evaluate_config_on_dataset(
+            params,
+            dataset,
+            mode,
+            chatbot_timeout,
+            workers,
+            trial=trial if pruning_enabled else None,
+            min_questions_before_report=pruning_cfg.get("min_questions_before_pruning", 20),
+            interval_questions=pruning_cfg.get("interval_questions", 5),
+        )
+    finally:
+        # Recorded even on optuna.TrialPruned (raised from inside the call above)
+        # so pruned trials also report how long they ran for, not just completed ones.
+        trial.set_user_attr("elapsed_seconds", time.perf_counter() - start)
     overall = sum(per_metric_avg.values()) / len(per_metric_avg)
     trial.set_user_attr("mode", mode)
     trial.set_user_attr("per_metric_avg", per_metric_avg)
     trial.set_user_attr("avg_request_time", avg_request_time)
-    trial.set_user_attr("elapsed_seconds", elapsed)
     trial.set_user_attr("n_questions", len(dataset))
     return overall
+
+
+def _format_duration(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "?"
+    seconds = round(seconds)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
 
 
 def _make_trial_callback(config_data: Dict[str, Any]):
@@ -327,21 +353,22 @@ def _make_trial_callback(config_data: Dict[str, Any]):
     keys plus 'mode' itself — see _suggest_trial_config)."""
 
     def _callback(study: "optuna.Study", trial: "optuna.trial.FrozenTrial") -> None:
+        elapsed = _format_duration(trial.user_attrs.get("elapsed_seconds"))
         if trial.state == optuna.trial.TrialState.COMPLETE:
             mode, params = _params_from_trial(trial, config_data)
             is_best = study.best_trial.number == trial.number
             marker = " *NEW BEST*" if is_best else ""
-            print(f"[Trial {trial.number}] COMPLETE value={trial.value:.3f}{marker} mode={mode} params={params}")
+            print(f"[Trial {trial.number}] COMPLETE in {elapsed} value={trial.value:.3f}{marker} mode={mode} params={params}")
         elif trial.state == optuna.trial.TrialState.PRUNED:
             mode, params = _params_from_trial(trial, config_data)
             last_step = max(trial.intermediate_values) if trial.intermediate_values else None
             partial = trial.intermediate_values.get(last_step, float("nan")) if last_step is not None else float("nan")
             print(
-                f"[Trial {trial.number}] PRUNED at question {last_step} "
+                f"[Trial {trial.number}] PRUNED in {elapsed} at question {last_step} "
                 f"(running average was {partial:.3f}) mode={mode} params={params}"
             )
         elif trial.state == optuna.trial.TrialState.FAIL:
-            print(f"[Trial {trial.number}] FAILED params={trial.params}")
+            print(f"[Trial {trial.number}] FAILED in {elapsed} params={trial.params}")
 
     return _callback
 
@@ -367,11 +394,12 @@ def run_final_validation(
         per_metric_runs = []
         for r in range(repeats):
             print(f"  Repeat {r + 1}/{repeats}...")
+            repeat_start = time.perf_counter()
             _, per_metric_avg, _ = evaluate_config_on_dataset(params, dataset, mode, chatbot_timeout, workers)
             overall = sum(per_metric_avg.values()) / len(per_metric_avg)
             run_values.append(overall)
             per_metric_runs.append(per_metric_avg)
-            print(f"    -> {overall:.3f}")
+            print(f"    -> {overall:.3f} (in {_format_duration(time.perf_counter() - repeat_start)})")
 
         mean_v = statistics.mean(run_values)
         std_v = statistics.stdev(run_values) if len(run_values) > 1 else 0.0
