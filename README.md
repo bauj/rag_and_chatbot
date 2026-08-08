@@ -11,7 +11,7 @@ A chatbot for any project with HTML documentation (Sphinx, Doxygen). Point it at
 **Key Features:**
 - Works with any HTML documentation (Sphinx, Doxygen, or custom)
 - Multi-module support — query across multiple doc sets simultaneously
-- Three chatbot modes: **RAG** (vector retrieval + reranking), **Agentic** (fixed-round page-browsing pipeline), and **Agentic-smol** (smolagents `CodeAgent`, real multi-hop browsing — opt-in, experimental)
+- Two chatbot modes: **RAG** (vector retrieval + reranking) and **Agentic** (smolagents `CodeAgent`, multi-hop page browsing)
 - Token-aware chunking (prevents embedding truncation)
 - Cross-encoder reranking (`BAAI/bge-reranker-v2-m3`) for better result ranking
 - Optional BM25 keyword hybrid retrieval (opt-in, fused with vector search via Reciprocal Rank Fusion)
@@ -32,13 +32,12 @@ rag_and_chatbot/
 │   ├── config.example.json
 │   └── README.md
 │
-├── chatbot/                 # Chatbot (RAG, Agentic, and Agentic-smol modes)
+├── chatbot/                 # Chatbot (RAG and Agentic modes)
 │   ├── core/
 │   │   ├── config.py        # Configuration (ChatbotConfig, AgenticConfig, ...)
 │   │   ├── rag_chatbot.py   # RAG mode (DocumentationChatbot) — BM25 + HyDE live here too
 │   │   ├── bm25_index.py    # BM25 keyword index + Reciprocal Rank Fusion
-│   │   ├── agentic_chatbot.py       # Agentic mode (AgenticChatbot) — fixed 1-2 round script
-│   │   └── agentic_smol_chatbot.py  # Agentic-smol mode (AgenticSmolChatbot) — smolagents CodeAgent
+│   │   └── agentic_chatbot.py       # Agentic mode (AgenticChatbot) — smolagents CodeAgent
 │   ├── ui/
 │   │   ├── terminal.py      # CLI interface
 │   │   └── web.py           # Gradio web UI
@@ -121,11 +120,8 @@ cp config.example.json config.json
 # Interactive terminal (RAG mode, default)
 python chatbot.py
 
-# Agentic mode (reads HTML pages directly, no vector retrieval)
+# Agentic mode (smolagents CodeAgent, multi-hop page browsing, see Configuration)
 python chatbot.py --mode agentic
-
-# Agentic-smol mode (smolagents CodeAgent, real multi-hop browsing — opt-in, see Configuration)
-python chatbot.py --mode agentic-smol
 
 # Web interface (Gradio) — all configured modes available via UI toggle
 python chatbot.py --web
@@ -212,14 +208,11 @@ python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type 
   "agentic": {
     "page_index_path": "../extraction/my_project_docs_extracted/page_index.json",
     "max_chars_per_page": 8000,
-    "max_pages_per_round": 3,
-    "max_pages_round2": 2,
     "max_steps": 6
   },
 
   "bm25_enabled": false,
-  "hyde_enabled": false,
-  "smol_enabled": false
+  "hyde_enabled": false
 }
 ```
 
@@ -234,9 +227,7 @@ python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type 
 
 **Reranker:** set to `null` or remove the block to disable reranking (faster, lower quality).
 
-**Agentic mode:** set `agentic` to `null` or remove the block to disable. When enabled, the web UI and `--mode agentic` CLI flag become available. Requires `page_index.json` produced by the extractor.
-
-**Agentic-smol mode:** requires both the `agentic` block (same page index, reused) **and** `smol_enabled: true`. Uses [smolagents](https://github.com/huggingface/smolagents)' `CodeAgent` instead of the classic fixed 1-2 round script, so the LLM decides how many search/read cycles to run, bounded by `agentic.max_steps` (default `6`). Opt-in and experimental — not yet measured against classic Agentic mode. Requires the `smolagents` package (`pip install smolagents`, included in `requirements.txt`).
+**Agentic mode:** set `agentic` to `null` or remove the block to disable. When enabled, the web UI and `--mode agentic` CLI flag become available. Requires `page_index.json` produced by the extractor, and the `smolagents` package (`pip install smolagents`, included in `requirements.txt`). Uses [smolagents](https://github.com/huggingface/smolagents)' `CodeAgent`: the LLM decides for itself how many search/read cycles to run, bounded by `agentic.max_steps` (default `6`).
 
 **BM25 hybrid retrieval:** set `bm25_enabled: true` to fuse keyword search (BM25) with vector search via Reciprocal Rank Fusion, in RAG mode's standard (non-deep-dive) path. Requires `{project_name}_docs.jsonl` next to `chromadb_path` (produced by extraction). Opt-in — not yet measured, off by default.
 
@@ -271,7 +262,7 @@ Filter: score >= 0.3
 
 ### Chatbot Pipeline
 
-Three modes are available and can be selected per-question from the web UI or via `--mode` in the CLI (Agentic-smol requires `smol_enabled: true`).
+Two modes are available and can be selected per-question from the web UI or via `--mode` in the CLI.
 
 **RAG mode (default):**
 ```
@@ -288,28 +279,6 @@ LLM answer generation
 
 **Agentic mode:**
 ```
-Keyword search on page index → candidate pages
-        ↓
-LLM selects most relevant pages (up to max_pages_per_round)
-by reading each candidate's title, module, and doc_category
-        ↓
-Selected HTML pages read + parsed (Round 1)
-        ↓
-LLM answers — appends NEED_MORE_INFO:<gap> if insufficient
-        ↓ (only if NEED_MORE_INFO)
-Keyword search using the identified gap → new candidates
-        ↓
-LLM selects more pages (up to max_pages_round2)
-        ↓
-All pages read + parsed (Round 2)
-        ↓
-LLM final answer
-```
-
-Agentic mode requires no ChromaDB at query time — it reads the original HTML files directly via the `page_index.json` catalogue produced during extraction.
-
-**Agentic-smol mode** (opt-in, `smol_enabled: true`):
-```
 CodeAgent (smolagents) given two tools: search_pages, read_page
         ↓
 Agent decides for itself how many search → read cycles to run,
@@ -318,7 +287,8 @@ e.g. can follow a cross-reference found mid-read
         ↓
 LLM final answer
 ```
-Same page index as classic Agentic mode, no ChromaDB required. `read_page` only accepts filepaths present in the page index (rejects anything else) — the LLM cannot read arbitrary files off disk. Ships as a separate mode, not a replacement for classic Agentic — not yet measured against it.
+
+Agentic mode requires no ChromaDB at query time — it reads the original HTML files directly via the `page_index.json` catalogue produced during extraction. `read_page` only accepts filepaths present in the page index (rejects anything else) — the LLM cannot read arbitrary files off disk.
 
 **Response Styles:**
 
@@ -337,22 +307,20 @@ Same page index as classic Agentic mode, no ChromaDB required. `read_page` only 
 
 ```
 Commands in interactive mode:
-  mode:rag           - Switch to RAG mode (vector retrieval)
-  mode:agentic       - Switch to Agentic mode (reads HTML pages directly)
-  mode:agentic-smol  - Switch to Agentic-smol mode (smolagents, multi-hop browsing)
-  module:MODULE_A    - Filter by module (RAG only)
-  type:dev           - Filter developer docs only (RAG only)
-  type:user          - Filter user docs only (RAG only)
-  deep               - Toggle Deep Dive mode (RAG only)
-  reranker           - Toggle cross-encoder reranker on/off (RAG only)
-  topn:<n>           - Set top-N docs kept after rerank (RAG only)
-  hyde               - Toggle HyDE on/off (RAG only)
-  agentic:chars:<n>  - Set max chars read per page (classic Agentic only)
-  agentic:pages1:<n> - Set pages read in round 1 (classic Agentic only)
-  agentic:pages2:<n> - Set pages read in round 2 (classic Agentic only)
-  clear              - Clear all filters
-  stats              - Show database statistics (RAG only)
-  exit               - Exit
+  mode:rag             - Switch to RAG mode (vector retrieval)
+  mode:agentic         - Switch to Agentic mode (smolagents, multi-hop browsing)
+  module:MODULE_A      - Filter by module (RAG only)
+  type:dev             - Filter developer docs only (RAG only)
+  type:user            - Filter user docs only (RAG only)
+  deep                 - Toggle Deep Dive mode (RAG only)
+  reranker             - Toggle cross-encoder reranker on/off (RAG only)
+  topn:<n>             - Set top-N docs kept after rerank (RAG only)
+  hyde                 - Toggle HyDE on/off (RAG only)
+  agentic:chars:<n>    - Set max chars read per page (Agentic only)
+  agentic:maxsteps:<n> - Set the CodeAgent step budget (Agentic only)
+  clear                - Clear all filters
+  stats                - Show database statistics (RAG only)
+  exit                 - Exit
 ```
 
 ### Python API
@@ -360,7 +328,7 @@ Commands in interactive mode:
 Run from inside the `chatbot/` directory:
 
 ```python
-from core import ChatbotConfig, DocumentationChatbot, AgenticChatbot, AgenticSmolChatbot
+from core import ChatbotConfig, DocumentationChatbot, AgenticChatbot
 
 config = ChatbotConfig.load("config.json")
 
@@ -398,22 +366,15 @@ print(f"Modules: {stats['available_modules']}")
 # --- Agentic mode (requires config.agentic to be set) ---
 agentic = AgenticChatbot(config)
 
-result = agentic.ask("How do I create a mesh?")
-print(result['answer'])
-print(result['filters']['rounds_used'])  # 1 or 2
-for source in result['sources']:
-    print(f"  - {source['title']} ({source['module']}/{source['doc_category']})")
-
-# --- Agentic-smol mode (requires config.agentic AND config.smol_enabled to be set) ---
-agentic_smol = AgenticSmolChatbot(config)
-
-result = agentic_smol.ask("How do I create a mesh?", max_steps=8)  # override config.agentic.max_steps
+result = agentic.ask("How do I create a mesh?", max_steps=8)  # override config.agentic.max_steps
 print(result['answer'])
 print(result['filters']['steps_used'])
 print(result['filters']['grounded'])  # False if the agent answered without reading any page
+for source in result['sources']:
+    print(f"  - {source['title']} ({source['module']}/{source['doc_category']})")
 ```
 
-All three `.ask()` methods return the same dict shape: `{answer, sources, filters, error}`.
+Both `.ask()` methods return the same dict shape: `{answer, sources, filters, error}`.
 
 ## Evaluation & Benchmarking
 
@@ -533,14 +494,13 @@ Edit `benchmark_config.json` to define which modes and hyperparameters to test �
   },
   "agentic_hyperparams": {
     "temperature": [0.7],
-    "max_pages_per_round": [3, 5],
-    "max_pages_round2": [2],
+    "max_steps": [4, 6, 8],
     "max_chars_per_page": [8000]
   }
 }
 ```
 
-`hyde_enabled`, `bm25_enabled` and `title_boost_enabled` are RAG retrieval-pipeline toggles (see `chatbot/config.json`'s comments for what each does); `max_pages_per_round`, `max_pages_round2` and `max_chars_per_page` are the agentic mode's page-reading budget. With the values above, this generates **48 RAG configurations** and **2 Agentic configurations** (all combinations), each tested against every question — prefer varying one or two dimensions at a time to keep run counts manageable.
+`hyde_enabled`, `bm25_enabled` and `title_boost_enabled` are RAG retrieval-pipeline toggles (see `chatbot/config.json`'s comments for what each does); `max_steps` is the agentic mode's CodeAgent step budget, and `max_chars_per_page` is how much of each page it reads. With the values above, this generates **48 RAG configurations** and **3 Agentic configurations** (all combinations), each tested against every question — prefer varying one or two dimensions at a time to keep run counts manageable.
 
 ### Step 5: Run Benchmarks
 
@@ -686,7 +646,7 @@ The chatbot detects available modules automatically from the database at startup
 - `sentence-transformers` — embeddings and reranking
 - `langchain` — RAG framework
 - `rank_bm25` — BM25 keyword retrieval (optional, only used if `bm25_enabled: true`)
-- `smolagents` — Agentic-smol mode (optional, only used if `smol_enabled: true`)
+- `smolagents` — Agentic mode (required if `agentic` block is configured)
 - `gradio` — web interface
 - `transformers` — token-aware chunking (recommended)
 
@@ -694,16 +654,16 @@ Any OpenAI-compatible LLM endpoint (OpenAI, Mistral, Ollama, local models).
 
 See [requirements.txt](requirements.txt) for exact versions.
 
-## RAG vs Agentic vs Agentic-smol — When to Use Which
+## RAG vs Agentic — When to Use Which
 
-| | RAG (no reranker) | RAG (+ reranker) | Agentic | Agentic-smol |
-|---|---|---|---|---|
-| **Retrieval** | Vector similarity search | Vector search + cross-encoder (+ optional BM25/HyDE) | Keyword search + LLM page selection | Keyword search, agent-directed |
-| **Context** | Chunks (sub-page fragments) | Chunks, re-scored and expanded | Full pages (up to `max_chars_per_page`) | Full pages, read across as many hops as the agent decides |
-| **LLM calls** | 1 (+1 if HyDE enabled) | 1 (+1 if HyDE enabled) | 2–4 (selection + answer, ×2 rounds, fixed) | Variable, bounded by `max_steps` (default 6) |
-| **Local inference** | Embeddings only | Embeddings + reranker (slow) | None beyond the LLM | None beyond the LLM |
-| **Latency** | Fast | Can be slower than Agentic | Moderate | Variable, less predictable than classic Agentic |
-| **Maturity** | Established | Established | Established | Experimental, opt-in, not yet measured against classic Agentic |
+| | RAG (no reranker) | RAG (+ reranker) | Agentic |
+|---|---|---|---|
+| **Retrieval** | Vector similarity search | Vector search + cross-encoder (+ optional BM25/HyDE) | Keyword search, agent-directed |
+| **Context** | Chunks (sub-page fragments) | Chunks, re-scored and expanded | Full pages, read across as many hops as the agent decides |
+| **LLM calls** | 1 (+1 if HyDE enabled) | 1 (+1 if HyDE enabled) | Variable, bounded by `max_steps` (default 6) |
+| **Local inference** | Embeddings only | Embeddings + reranker (slow) | None beyond the LLM |
+| **Latency** | Fast | Can be slower than Agentic | Variable, less predictable than RAG |
+| **Maturity** | Established | Established | Established |
 
 **Prefer RAG when:**
 - Your questions target specific facts buried inside long pages (chunk-level retrieval wins)
@@ -711,12 +671,8 @@ See [requirements.txt](requirements.txt) for exact versions.
 - You don't need the reranker and want the lowest latency
 
 **Prefer Agentic when:**
-- Your questions need the full context of a page (not just a chunk)
+- Your questions need real multi-hop browsing (e.g. read a class page, follow a cross-referenced method)
 - You want more transparent sourcing — the LLM explicitly chooses which pages to read
 - You don't want to maintain a ChromaDB (lighter setup for quick experiments)
 - RAG retrieval returns irrelevant chunks (e.g. poor embedding alignment with your docs)
-- You want a predictable, bounded cost shape (fixed ≤4 LLM calls)
-
-**Consider Agentic-smol when:**
-- Your questions need real multi-hop browsing (e.g. read a class page, follow a cross-referenced method) — structurally impossible in classic Agentic mode's fixed round count
-- You're comfortable with less predictable latency/cost and an experimental, unmeasured mode
+- You're comfortable with less predictable latency/cost than RAG's fixed shape

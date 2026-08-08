@@ -16,16 +16,14 @@ except ImportError:
 class TerminalUI:
     """Interactive terminal interface for documentation chatbot"""
 
-    def __init__(self, chatbot: DocumentationChatbot, agentic_chatbot=None, agentic_smol_chatbot=None):
+    def __init__(self, chatbot: DocumentationChatbot, agentic_chatbot=None):
         self.chatbot = chatbot
         self.agentic_chatbot = agentic_chatbot
-        self.agentic_smol_chatbot = agentic_smol_chatbot
 
     def _print_header(self):
         """Print welcome header"""
         project = self.chatbot.config.project_name
         has_agentic = self.agentic_chatbot is not None
-        has_agentic_smol = self.agentic_smol_chatbot is not None
         has_reranker = self.chatbot.reranker is not None
         has_hyde = self.chatbot.hyde_llm is not None
         has_bm25 = self.chatbot.bm25_index is not None
@@ -49,9 +47,7 @@ class TerminalUI:
         print("\nCommands:")
         if has_agentic:
             print("  mode:rag          - Switch to RAG mode (vector retrieval)")
-            print("  mode:agentic      - Switch to Agentic mode (reads HTML pages directly)")
-        if has_agentic_smol:
-            print("  mode:agentic-smol - Switch to Agentic-smol mode (smolagents, multi-hop browsing)")
+            print("  mode:agentic      - Switch to Agentic mode (smolagents, multi-hop browsing)")
         for mod in self.chatbot.available_modules:
             print(f"  module:{mod:<12} - Filter by {mod} (RAG only)")
         print("  type:dev          - Filter developer docs only (RAG only)")
@@ -66,9 +62,8 @@ class TerminalUI:
         if has_bm25:
             print("  bm25              - Toggle BM25 hybrid retrieval on/off (RAG only)")
         if has_agentic:
-            print("  agentic:chars:<n>  - Set max chars read per page (classic Agentic only)")
-            print("  agentic:pages1:<n> - Set pages read in round 1 (classic Agentic only)")
-            print("  agentic:pages2:<n> - Set pages read in round 2 (classic Agentic only)")
+            print("  agentic:chars:<n>    - Set max chars read per page (Agentic only)")
+            print("  agentic:maxsteps:<n> - Set the CodeAgent step budget (Agentic only)")
         print("  clear             - Clear all filters")
         print("  stats             - Show statistics (RAG only)")
         print("  exit/quit         - Exit\n")
@@ -120,7 +115,7 @@ class TerminalUI:
             if filters.get('steps_used') is not None:
                 print(f"Agent steps used: {filters['steps_used']}")
 
-        # agentic-smol reports grounded=False when it answered without reading any page,
+        # Agentic reports grounded=False when it answered without reading any page,
         # i.e. from the model's own knowledge rather than the documentation.
         if filters.get('grounded') is False:
             print("\n⚠️  Warning: answer produced without reading any documentation page — "
@@ -190,8 +185,7 @@ class TerminalUI:
         title_boost_active = self.chatbot.config.title_boost_enabled and self.chatbot.bm25_index is not None
         top_n_override = None
         agentic_chars_override = None
-        agentic_pages1_override = None
-        agentic_pages2_override = None
+        agentic_maxsteps_override = None
 
         while True:
             try:
@@ -199,8 +193,6 @@ class TerminalUI:
                 prompt_parts = ["You"]
                 if current_mode == "agentic":
                     prompt_parts.append("[AGENTIC]")
-                elif current_mode == "agentic-smol":
-                    prompt_parts.append("[AGENTIC-SMOL]")
                 else:
                     if current_module:
                         prompt_parts.append(f"[{current_module}]")
@@ -240,17 +232,11 @@ class TerminalUI:
                         else:
                             current_mode = "agentic"
                             print("OK: Switched to Agentic mode\n")
-                    elif requested == 'agentic-smol':
-                        if self.agentic_smol_chatbot is None:
-                            print("Warning: Agentic-smol mode is not configured (set smol_enabled: true in config.json)\n")
-                        else:
-                            current_mode = "agentic-smol"
-                            print("OK: Switched to Agentic-smol mode\n")
                     elif requested == 'rag':
                         current_mode = "rag"
                         print("OK: Switched to RAG mode\n")
                     else:
-                        print("Warning: Unknown mode (use: rag, agentic, or agentic-smol)\n")
+                        print("Warning: Unknown mode (use: rag or agentic)\n")
                     continue
 
                 # Handle reranker toggle (RAG only)
@@ -302,25 +288,20 @@ class TerminalUI:
                     if self.agentic_chatbot is None:
                         print("Warning: Agentic mode is not configured (add 'agentic' block to config.json)\n")
                         continue
-                    if current_mode == "agentic-smol":
-                        print("Warning: agentic:* params apply to classic Agentic mode only, not agentic-smol\n")
-                        continue
                     parts = user_input.split(':')
-                    if len(parts) == 3 and parts[1].lower() in ('chars', 'pages1', 'pages2'):
+                    if len(parts) == 3 and parts[1].lower() in ('chars', 'maxsteps'):
                         param, raw = parts[1].lower(), parts[2].strip()
                         if raw.isdigit() and int(raw) > 0:
                             value = int(raw)
                             if param == 'chars':
                                 agentic_chars_override = value
-                            elif param == 'pages1':
-                                agentic_pages1_override = value
                             else:
-                                agentic_pages2_override = value
+                                agentic_maxsteps_override = value
                             print(f"OK: agentic:{param} set to {value}\n")
                         else:
                             print(f"Warning: agentic:{param} must be a positive integer\n")
                     else:
-                        print("Warning: Unknown agentic setting (use: agentic:chars:<n>, agentic:pages1:<n>, agentic:pages2:<n>)\n")
+                        print("Warning: Unknown agentic setting (use: agentic:chars:<n>, agentic:maxsteps:<n>)\n")
                     continue
 
                 # RAG-only commands
@@ -383,12 +364,8 @@ class TerminalUI:
                 if current_mode == "agentic" and self.agentic_chatbot is not None:
                     result = self.agentic_chatbot.ask(
                         user_input,
-                        max_chars_per_page=agentic_chars_override,
-                        max_pages_per_round=agentic_pages1_override,
-                        max_pages_round2=agentic_pages2_override,
+                        max_steps=agentic_maxsteps_override,
                     )
-                elif current_mode == "agentic-smol" and self.agentic_smol_chatbot is not None:
-                    result = self.agentic_smol_chatbot.ask(user_input)
                 else:
                     result = self.chatbot.ask(
                         user_input,

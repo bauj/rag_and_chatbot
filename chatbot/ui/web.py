@@ -18,18 +18,16 @@ except ImportError:
 class WebUI:
     """Gradio web interface for documentation chatbot"""
 
-    def __init__(self, chatbot: DocumentationChatbot, agentic_chatbot=None, agentic_smol_chatbot=None):
+    def __init__(self, chatbot: DocumentationChatbot, agentic_chatbot=None):
         """
         Initialize web UI
 
         Args:
             chatbot: DocumentationChatbot instance
-            agentic_chatbot: Optional AgenticChatbot instance
-            agentic_smol_chatbot: Optional AgenticSmolChatbot instance
+            agentic_chatbot: Optional AgenticChatbot instance (smolagents-backed)
         """
         self.chatbot = chatbot
         self.agentic_chatbot = agentic_chatbot
-        self.agentic_smol_chatbot = agentic_smol_chatbot
 
     def _format_answer_markdown(self, result: dict) -> str:
         """
@@ -48,7 +46,7 @@ class WebUI:
         sources = result.get("sources", [])
         filters = result.get("filters", {})
 
-        # Surface a groundedness warning before anything else — agentic-smol reports
+        # Surface a groundedness warning before anything else — Agentic reports
         # grounded=False when the agent answered without ever reading a page, i.e.
         # straight from the model's parametric knowledge rather than the docs.
         if filters.get("grounded") is False:
@@ -125,26 +123,16 @@ class WebUI:
         answer_length: int,
         # Agentic params
         max_chars_per_page: int,
-        max_pages_per_round: int,
-        max_pages_round2: int,
+        max_steps: int,
     ) -> str:
         """Handle incoming chat message."""
         if mode == "Agentic" and self.agentic_chatbot is not None:
             try:
                 result = self.agentic_chatbot.ask(
                     message,
-                    max_chars_per_page=max_chars_per_page,
-                    max_pages_per_round=max_pages_per_round,
-                    max_pages_round2=max_pages_round2,
+                    max_steps=max_steps,
                     max_tokens=answer_length,
                 )
-                return self._format_answer_markdown(result)
-            except Exception as e:
-                return f"**Error:** {str(e)}"
-
-        if mode == "Agentic (smolagents)" and self.agentic_smol_chatbot is not None:
-            try:
-                result = self.agentic_smol_chatbot.ask(message, max_tokens=answer_length)
                 return self._format_answer_markdown(result)
             except Exception as e:
                 return f"**Error:** {str(e)}"
@@ -197,13 +185,10 @@ class WebUI:
 
         # Build interface
         has_agentic = self.agentic_chatbot is not None
-        has_agentic_smol = self.agentic_smol_chatbot is not None
         has_reranker = self.chatbot.reranker is not None
         has_hyde = self.chatbot.hyde_llm is not None
         has_bm25 = self.chatbot.bm25_index is not None
-        agentic_cfg = self.agentic_chatbot._agentic_cfg if has_agentic else (
-            self.agentic_smol_chatbot._agentic_cfg if has_agentic_smol else None
-        )
+        agentic_cfg = self.agentic_chatbot._agentic_cfg if has_agentic else None
 
         with gr.Blocks(title=f"{project} Documentation Chatbot") as demo:
             with gr.Row():
@@ -219,15 +204,13 @@ class WebUI:
                     mode_choices = ["RAG"]
                     if has_agentic:
                         mode_choices.append("Agentic")
-                    if has_agentic_smol:
-                        mode_choices.append("Agentic (smolagents)")
                     mode_radio = gr.Radio(
                         choices=mode_choices,
                         value="RAG",
                         label="Mode",
-                        info="RAG: vector retrieval · Agentic: reads HTML pages directly · "
-                             "Agentic (smolagents): multi-hop page browsing, experimental",
-                        visible=has_agentic or has_agentic_smol,
+                        info="RAG: vector retrieval · Agentic: smolagents CodeAgent, "
+                             "multi-hop page browsing",
+                        visible=has_agentic,
                     )
 
                     # ── RAG params ────────────────────────────────────────────────
@@ -360,6 +343,10 @@ class WebUI:
 
                         gr.Markdown("---")
                         gr.Markdown("### Agentic params")
+                        gr.Markdown(
+                            "A smolagents CodeAgent decides for itself how many search/read "
+                            "cycles to run, up to the step budget below."
+                        )
                         max_chars_per_page = gr.Slider(
                             minimum=1000,
                             maximum=20000,
@@ -368,46 +355,14 @@ class WebUI:
                             label="Max chars per page",
                             info="Characters read per HTML page. More = richer context, higher token cost.",
                         )
-                        max_pages_per_round = gr.Slider(
+                        max_steps = gr.Slider(
                             minimum=1,
-                            maximum=10,
-                            value=agentic_cfg.max_pages_per_round if agentic_cfg else 3,
+                            maximum=20,
+                            value=agentic_cfg.max_steps if agentic_cfg else 6,
                             step=1,
-                            label="Pages per round 1",
-                            info="Pages selected and read in the first retrieval round.",
-                        )
-                        max_pages_round2 = gr.Slider(
-                            minimum=1,
-                            maximum=10,
-                            value=agentic_cfg.max_pages_round2 if agentic_cfg else 2,
-                            step=1,
-                            label="Pages per round 2",
-                            info="Additional pages read if NEED_MORE_INFO is triggered.",
-                        )
-
-                    # ── Agentic-smol params ───────────────────────────────────────
-                    with gr.Column(visible=False) as agentic_smol_col:
-                        gr.Markdown("### Page index")
-                        gr.Textbox(
-                            value=agentic_cfg.page_index_path if agentic_cfg else "",
-                            label="page_index.json",
-                            interactive=False,
-                            info="Configured in config.json → agentic.page_index_path",
-                        )
-
-                        gr.Markdown("---")
-                        gr.Markdown("### Agentic-smol")
-                        gr.Markdown(
-                            "Experimental: a smolagents CodeAgent decides for itself how many "
-                            "search/read cycles to run (up to the configured step budget), instead "
-                            "of a fixed 1-2 round script. Not yet measured against classic Agentic "
-                            "mode — treat answers as unverified."
-                        )
-                        gr.Textbox(
-                            value=str(agentic_cfg.max_steps) if agentic_cfg else "",
                             label="Max steps",
-                            interactive=False,
-                            info="Configured in config.json → agentic.max_steps (not runtime-tunable yet).",
+                            info="CodeAgent step budget — how many search/read cycles it may run "
+                                 "before being forced to answer.",
                         )
 
                     # ── Shared ────────────────────────────────────────────────────
@@ -437,8 +392,7 @@ class WebUI:
                             bm25_enabled,
                             answer_length,
                             max_chars_per_page,
-                            max_pages_per_round,
-                            max_pages_round2,
+                            max_steps,
                         ],
                         examples=examples,
                         title=None,
@@ -447,18 +401,17 @@ class WebUI:
                     )
 
             # ── Event handlers ────────────────────────────────────────────────────
-            if has_agentic or has_agentic_smol:
+            if has_agentic:
                 def _on_mode_change(mode):
                     return (
                         gr.update(visible=mode == "RAG"),
                         gr.update(visible=mode == "Agentic"),
-                        gr.update(visible=mode == "Agentic (smolagents)"),
                     )
 
                 mode_radio.change(
                     fn=_on_mode_change,
                     inputs=[mode_radio],
-                    outputs=[rag_col, agentic_col, agentic_smol_col],
+                    outputs=[rag_col, agentic_col],
                 )
 
             if has_reranker:

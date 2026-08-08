@@ -1,9 +1,8 @@
 # tests/test_agentic_chatbot.py
 import json
 import sys
-import warnings
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 import pytest
 
 from core.config import ChatbotConfig, AgenticConfig
@@ -15,7 +14,6 @@ from core.agentic_chatbot import AgenticChatbot
 # ---------------------------------------------------------------------------
 
 def _make_config(tmp_path, index_entries=None):
-    """Build a ChatbotConfig with a real page_index.json on disk."""
     if index_entries is None:
         index_entries = [
             {
@@ -42,23 +40,37 @@ def _make_config(tmp_path, index_entries=None):
         agentic=AgenticConfig(
             page_index_path=str(index_path),
             max_chars_per_page=8000,
-            max_pages_per_round=3,
-            max_pages_round2=2,
+            max_steps=6,
         ),
     )
 
 
 def _make_bot(tmp_path, index_entries=None):
-    """Construct AgenticChatbot with mocked LLM."""
     config = _make_config(tmp_path, index_entries)
-    with patch("core.agentic_chatbot.ChatOpenAI"):
-        bot = AgenticChatbot(config)
-    return bot
+    return AgenticChatbot(config)
+
+
+class _FakeAgent:
+    """Stand-in for smolagents.CodeAgent, driven by a run_fn(task) -> answer."""
+
+    def __init__(self, run_fn, steps=3):
+        self._run_fn = run_fn
+        self.memory = MagicMock()
+        self.memory.steps = [MagicMock() for _ in range(steps)]
+
+    def run(self, task):
+        return self._run_fn(task)
 
 
 # ---------------------------------------------------------------------------
 # Construction
 # ---------------------------------------------------------------------------
+
+def test_no_agentic_config_raises_at_construction(tmp_path):
+    config = ChatbotConfig(project_name="test", chromadb_path=str(tmp_path))
+    with pytest.raises(ValueError):
+        AgenticChatbot(config)
+
 
 def test_missing_page_index_raises_at_construction(tmp_path):
     config = ChatbotConfig(
@@ -67,194 +79,381 @@ def test_missing_page_index_raises_at_construction(tmp_path):
         agentic=AgenticConfig(page_index_path=str(tmp_path / "missing.json")),
     )
     with pytest.raises(FileNotFoundError):
-        with patch("core.agentic_chatbot.ChatOpenAI"):
-            AgenticChatbot(config)
+        AgenticChatbot(config)
 
 
-def test_no_agentic_config_raises_at_construction(tmp_path):
-    config = ChatbotConfig(project_name="test", chromadb_path=str(tmp_path))
-    with pytest.raises(ValueError):
-        with patch("core.agentic_chatbot.ChatOpenAI"):
-            AgenticChatbot(config)
+def test_missing_smolagents_raises_importerror(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "smolagents", None)
+    config = _make_config(tmp_path)
+    with pytest.raises(ImportError):
+        AgenticChatbot(config)
 
 
 # ---------------------------------------------------------------------------
-# Round 1 — answer found without needing Round 2
+# Tools
 # ---------------------------------------------------------------------------
 
-def test_answers_in_round1(tmp_path):
+def test_search_pages_tool_forward_returns_candidates(tmp_path):
     bot = _make_bot(tmp_path)
-
-    # Mock page read
-    with patch("core.agentic_chatbot.parse_page", return_value="All methods: execute, data"):
-        # LLM page selection returns valid filename
-        bot.llm.invoke = MagicMock(side_effect=[
-            MagicMock(content='["classModelAPI__Feature.html"]'),   # page selection
-            MagicMock(content="The methods are execute() and data()."),  # answer (no marker)
-        ])
-        result = bot.ask("What are the methods of ModelAPI_Feature?")
-
-    assert result["error"] is None
-    assert "execute" in result["answer"]
-    assert result["filters"]["mode"] == "agentic"
-    assert result["filters"]["rounds_used"] == 1
-    assert len(result["sources"]) == 1
+    tool = bot._SearchPagesToolCls(bot._page_index)
+    result = tool.forward("ModelAPI_Feature")
+    assert "classModelAPI__Feature.html" in result
 
 
-# ---------------------------------------------------------------------------
-# Round 2 — NEED_MORE_INFO triggers refinement
-# ---------------------------------------------------------------------------
-
-def test_triggers_round2_on_need_more_info(tmp_path):
+def test_read_page_tool_rejects_unknown_filepath(tmp_path):
     bot = _make_bot(tmp_path)
-
-    with patch("core.agentic_chatbot.parse_page", return_value="Some text"):
-        bot.llm.invoke = MagicMock(side_effect=[
-            MagicMock(content='["classModelAPI__Feature.html"]'),   # round 1 page selection
-            MagicMock(content="Partial answer.\nNEED_MORE_INFO: missing object methods"),  # round 1 answer
-            MagicMock(content='["classModelAPI__Object.html"]'),    # round 2 page selection
-            MagicMock(content="Full answer with all methods."),     # round 2 answer
-        ])
-        result = bot.ask("List all methods")
-
-    assert result["filters"]["rounds_used"] == 2
-    assert result["error"] is None
-    assert "NEED_MORE_INFO" not in result["answer"]
+    read_entries = []
+    tool = bot._ReadPageToolCls(bot._entry_by_filepath, 8000, read_entries)
+    result = tool.forward("/etc/passwd", "dev")
+    assert "not a known documentation page" in result.lower() or "error" in result.lower()
+    assert read_entries == []
 
 
-def test_need_more_info_description_passed_to_round2(tmp_path):
+def test_read_page_tool_records_entry_and_returns_content(tmp_path, monkeypatch):
     bot = _make_bot(tmp_path)
-    captured_prompts = []
+    read_entries = []
+    tool = bot._ReadPageToolCls(bot._entry_by_filepath, 8000, read_entries)
 
-    def capture_invoke(prompt):
-        captured_prompts.append(str(prompt))
-        responses = [
-            MagicMock(content='["classModelAPI__Feature.html"]'),
-            MagicMock(content="Partial.\nNEED_MORE_INFO: object lifecycle methods"),
-            MagicMock(content='["classModelAPI__Object.html"]'),
-            MagicMock(content="Complete answer."),
-        ]
-        return responses[len(captured_prompts) - 1]
+    known_filepath = bot._page_index[0]["filepath"]
+    monkeypatch.setattr(
+        "core.agentic_chatbot.parse_page",
+        lambda filepath, doc_category, max_chars=8000: "The parsed content.",
+    )
+    result = tool.forward(known_filepath, "dev")
 
-    with patch("core.agentic_chatbot.parse_page", return_value="text"):
-        bot.llm.invoke = MagicMock(side_effect=capture_invoke)
-        bot.ask("List methods")
-
-    # The round 2 prompt (3rd call) should contain the NEED_MORE_INFO description
-    assert "object lifecycle methods" in captured_prompts[2]
+    assert result == "The parsed content."
+    assert len(read_entries) == 1
+    assert read_entries[0]["filepath"] == known_filepath
+    assert read_entries[0]["title"] == "ModelAPI_Feature Class Reference"
 
 
-# ---------------------------------------------------------------------------
-# Round 2 edge cases
-# ---------------------------------------------------------------------------
-
-def test_round2_excludes_already_read_pages(tmp_path):
+def test_read_page_tool_handles_file_not_found(tmp_path, monkeypatch):
     bot = _make_bot(tmp_path)
-    pages_read = []
+    read_entries = []
+    tool = bot._ReadPageToolCls(bot._entry_by_filepath, 8000, read_entries)
 
-    def fake_parse(filepath, doc_category, max_chars=8000):
-        pages_read.append(filepath)
-        return "content"
-
-    with patch("core.agentic_chatbot.parse_page", side_effect=fake_parse):
-        bot.llm.invoke = MagicMock(side_effect=[
-            MagicMock(content='["classModelAPI__Feature.html"]'),
-            MagicMock(content="Partial.\nNEED_MORE_INFO: more info"),
-            MagicMock(content='["classModelAPI__Object.html"]'),
-            MagicMock(content="Full answer."),
-        ])
-        bot.ask("List methods")
-
-    # No filepath should appear twice
-    assert len(pages_read) == len(set(pages_read))
-
-
-def test_round2_no_new_results_returns_round1_answer(tmp_path):
-    # Only one entry in index — round 2 will find no new pages
-    single_entry_config = _make_config(tmp_path, index_entries=[
-        {
-            "filepath": str(tmp_path / "classModelAPI__Feature.html"),
-            "filename": "classModelAPI__Feature.html",
-            "title": "ModelAPI_Feature Class Reference",
-            "module": "SHAPER",
-            "doc_category": "dev",
-        }
-    ])
-    with patch("core.agentic_chatbot.ChatOpenAI"):
-        bot = AgenticChatbot(single_entry_config)
-
-    with patch("core.agentic_chatbot.parse_page", return_value="content"):
-        bot.llm.invoke = MagicMock(side_effect=[
-            MagicMock(content='["classModelAPI__Feature.html"]'),
-            MagicMock(content="Partial answer.\nNEED_MORE_INFO: more info"),
-            # No more LLM calls expected
-        ])
-        result = bot.ask("List methods")
-
-    assert result["filters"]["rounds_used"] == 1  # stayed at round 1
-    assert "Partial answer" in result["answer"]
-
-
-# ---------------------------------------------------------------------------
-# Error handling
-# ---------------------------------------------------------------------------
-
-def test_empty_search_results_returns_error(tmp_path):
-    empty_config = _make_config(tmp_path, index_entries=[])
-    with patch("core.agentic_chatbot.ChatOpenAI"):
-        bot = AgenticChatbot(empty_config)
-    result = bot.ask("Completely unrelated query xyz123")
-    assert result["error"] is not None
-    assert result["answer"] is None
-    assert result["sources"] == []
-    assert result["filters"]["rounds_used"] == 0
-
-
-def test_parse_page_file_not_found_skipped(tmp_path):
-    bot = _make_bot(tmp_path)
-    bot.llm.invoke = MagicMock(side_effect=[
-        MagicMock(content='["classModelAPI__Feature.html"]'),
-        MagicMock(content="Answer from remaining pages."),
-    ])
+    known_filepath = bot._page_index[0]["filepath"]
 
     def fake_parse(filepath, doc_category, max_chars=8000):
         raise FileNotFoundError(f"not found: {filepath}")
 
-    with patch("core.agentic_chatbot.parse_page", side_effect=fake_parse):
-        result = bot.ask("some question")
+    monkeypatch.setattr("core.agentic_chatbot.parse_page", fake_parse)
+    result = tool.forward(known_filepath, "dev")
 
-    # Should not crash; answer still returned (from empty context)
-    assert result["error"] is None
+    assert "error" in result.lower() or "not found" in result.lower()
+    assert read_entries == []
 
 
-def test_llm_selection_malformed_json_falls_back_to_first_n(tmp_path):
+# ---------------------------------------------------------------------------
+# ask() orchestration
+# ---------------------------------------------------------------------------
+
+def test_ask_returns_error_dict_on_agent_exception(tmp_path):
     bot = _make_bot(tmp_path)
-    with patch("core.agentic_chatbot.parse_page", return_value="content"):
-        bot.llm.invoke = MagicMock(side_effect=[
-            MagicMock(content="not valid json at all"),  # malformed selection
-            MagicMock(content="Fallback answer."),
-        ])
-        result = bot.ask("ModelAPI_Feature methods")
+    bot._CodeAgent = MagicMock(
+        return_value=_FakeAgent(run_fn=lambda task: (_ for _ in ()).throw(RuntimeError("boom")))
+    )
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
+
+    assert result["error"] is not None
+    assert result["answer"] is None
+    assert result["sources"] == []
+    assert result["filters"]["mode"] == "agentic"
+
+
+def test_ask_builds_sources_and_grounded_true_when_pages_read(tmp_path, monkeypatch):
+    bot = _make_bot(tmp_path)
+    known_filepath = bot._page_index[0]["filepath"]
+    monkeypatch.setattr(
+        "core.agentic_chatbot.parse_page",
+        lambda filepath, doc_category, max_chars=8000: "page text",
+    )
+
+    captured_tools = {}
+
+    def run_fn(task):
+        # Simulate the agent calling read_page during its loop.
+        for tool in captured_tools["tools"]:
+            if tool.name == "read_page":
+                tool.forward(known_filepath, "dev")
+        return "The final answer."
+
+    def fake_code_agent(tools, model, max_steps, **kwargs):
+        captured_tools["tools"] = tools
+        return _FakeAgent(run_fn=run_fn, steps=4)
+
+    bot._CodeAgent = fake_code_agent
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
 
     assert result["error"] is None
-    assert len(result["sources"]) > 0  # used fallback (first N from search)
+    assert result["answer"] == "The final answer."
+    assert len(result["sources"]) == 1
+    assert result["sources"][0]["filepath"] == known_filepath
+    assert result["filters"]["grounded"] is True
+    assert result["filters"]["steps_used"] == 4
 
 
-# ---------------------------------------------------------------------------
-# Output format
-# ---------------------------------------------------------------------------
+def test_ask_sources_carry_the_parsed_page_content(tmp_path, monkeypatch):
+    """
+    #114: the evaluator's groundedness/retrieval_relevance grading reads
+    source["content"] to build the FACTS block. Without it every agentic
+    answer looks ungrounded regardless of how good the retrieval was.
+    """
+    bot = _make_bot(tmp_path)
+    known_filepath = bot._page_index[0]["filepath"]
+    monkeypatch.setattr(
+        "core.agentic_chatbot.parse_page",
+        lambda filepath, doc_category, max_chars=8000: "The actual page text the agent read.",
+    )
+
+    captured_tools = {}
+
+    def run_fn(task):
+        for tool in captured_tools["tools"]:
+            if tool.name == "read_page":
+                tool.forward(known_filepath, "dev")
+        return "The final answer."
+
+    def fake_code_agent(tools, model, max_steps, **kwargs):
+        captured_tools["tools"] = tools
+        return _FakeAgent(run_fn=run_fn, steps=4)
+
+    bot._CodeAgent = fake_code_agent
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
+
+    assert result["sources"][0]["content"] == "The actual page text the agent read."
+
+
+def test_ask_grounded_false_and_empty_sources_when_no_pages_read(tmp_path):
+    bot = _make_bot(tmp_path)
+    bot._CodeAgent = MagicMock(return_value=_FakeAgent(run_fn=lambda task: "Answer with no reads."))
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
+
+    assert result["error"] is None
+    assert result["sources"] == []
+    assert result["filters"]["grounded"] is False
+
+
+def test_ask_coerces_non_str_answer_to_str(tmp_path):
+    class _Wrapper:
+        def __str__(self):
+            return "wrapped answer"
+
+    bot = _make_bot(tmp_path)
+    bot._CodeAgent = MagicMock(return_value=_FakeAgent(run_fn=lambda task: _Wrapper()))
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
+
+    assert result["answer"] == "wrapped answer"
+    assert isinstance(result["answer"], str)
+
+
+def test_ask_max_steps_override_passed_to_agent(tmp_path):
+    bot = _make_bot(tmp_path)
+    captured = {}
+
+    def fake_code_agent(tools, model, max_steps, **kwargs):
+        captured["max_steps"] = max_steps
+        return _FakeAgent(run_fn=lambda task: "answer")
+
+    bot._CodeAgent = fake_code_agent
+    bot._OpenAIServerModel = MagicMock()
+
+    bot.ask("question", max_steps=2)
+
+    assert captured["max_steps"] == 2
+
+
+def test_ask_uses_config_max_steps_by_default(tmp_path):
+    bot = _make_bot(tmp_path)
+    captured = {}
+
+    def fake_code_agent(tools, model, max_steps, **kwargs):
+        captured["max_steps"] = max_steps
+        return _FakeAgent(run_fn=lambda task: "answer")
+
+    bot._CodeAgent = fake_code_agent
+    bot._OpenAIServerModel = MagicMock()
+
+    bot.ask("question")
+
+    assert captured["max_steps"] == 6
+
+
+def test_ask_replaces_leaked_code_answer_with_fallback_when_sources_read(tmp_path, monkeypatch):
+    bot = _make_bot(tmp_path)
+    known_filepath = bot._page_index[0]["filepath"]
+    monkeypatch.setattr(
+        "core.agentic_chatbot.parse_page",
+        lambda filepath, doc_category, max_chars=8000: "page text",
+    )
+
+    captured_tools = {}
+
+    def run_fn(task):
+        for tool in captured_tools["tools"]:
+            if tool.name == "read_page":
+                tool.forward(known_filepath, "dev")
+        return '<code>\nread_page(filepath="foo.html", doc_category="dev")\n</code>'
+
+    def fake_code_agent(tools, model, max_steps, **kwargs):
+        captured_tools["tools"] = tools
+        return _FakeAgent(run_fn=run_fn, steps=8)
+
+    bot._CodeAgent = fake_code_agent
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
+
+    assert result["error"] is None
+    assert "<code>" not in result["answer"]
+    assert "read_page(" not in result["answer"]
+    assert "ModelAPI_Feature Class Reference" in result["answer"]
+    assert result["filters"]["degraded_answer"] is True
+
+
+def test_ask_replaces_leaked_code_answer_with_fallback_when_no_sources_read(tmp_path):
+    bot = _make_bot(tmp_path)
+    bot._CodeAgent = MagicMock(
+        return_value=_FakeAgent(
+            run_fn=lambda task: "Calling tools:\n[{'id': 'call_7', 'type': 'function'}]",
+            steps=8,
+        )
+    )
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
+
+    assert result["error"] is None
+    assert "Calling tools:" not in result["answer"]
+    assert result["filters"]["degraded_answer"] is True
+    assert result["filters"]["grounded"] is False
+
+
+def test_ask_normal_answer_is_not_flagged_degraded(tmp_path):
+    bot = _make_bot(tmp_path)
+    bot._CodeAgent = MagicMock(return_value=_FakeAgent(run_fn=lambda task: "A clean prose answer."))
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
+
+    assert result["answer"] == "A clean prose answer."
+    assert result["filters"]["degraded_answer"] is False
+
 
 def test_returns_correct_output_format(tmp_path):
     bot = _make_bot(tmp_path)
-    with patch("core.agentic_chatbot.parse_page", return_value="content"):
-        bot.llm.invoke = MagicMock(side_effect=[
-            MagicMock(content='["classModelAPI__Feature.html"]'),
-            MagicMock(content="The answer."),
-        ])
-        result = bot.ask("question")
+    bot._CodeAgent = MagicMock(return_value=_FakeAgent(run_fn=lambda task: "answer"))
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
 
     assert set(result.keys()) == {"answer", "sources", "filters", "error"}
     assert isinstance(result["sources"], list)
     assert isinstance(result["filters"], dict)
     assert "mode" in result["filters"]
-    assert "rounds_used" in result["filters"]
+    assert "steps_used" in result["filters"]
+    assert "grounded" in result["filters"]
+    assert "degraded_answer" in result["filters"]
+
+
+# ---------------------------------------------------------------------------
+# Parameter parity: temperature, max_tokens, ssl_cert_file
+# ---------------------------------------------------------------------------
+
+def test_ask_passes_temperature_and_max_tokens_to_model(tmp_path):
+    bot = _make_bot(tmp_path)
+    captured = {}
+
+    def fake_openai_server_model(model_id, api_base, api_key, **kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    def fake_code_agent(tools, model, max_steps, **kwargs):
+        return _FakeAgent(run_fn=lambda task: "answer")
+
+    bot._CodeAgent = fake_code_agent
+    bot._OpenAIServerModel = fake_openai_server_model
+
+    bot.ask("question", temperature=0.5, max_tokens=1234)
+
+    assert captured["temperature"] == 0.5
+    assert captured["max_tokens"] == 1234
+
+
+def test_ask_defaults_temperature_and_max_tokens_from_config(tmp_path):
+    config = _make_config(tmp_path)
+    config.temperature = 0.3
+    config.max_tokens = 999
+    bot = AgenticChatbot(config)
+    captured = {}
+
+    def fake_openai_server_model(model_id, api_base, api_key, **kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    def fake_code_agent(tools, model, max_steps, **kwargs):
+        return _FakeAgent(run_fn=lambda task: "answer")
+
+    bot._CodeAgent = fake_code_agent
+    bot._OpenAIServerModel = fake_openai_server_model
+
+    bot.ask("question")
+
+    assert captured["temperature"] == 0.3
+    assert captured["max_tokens"] == 999
+
+
+def test_ask_wires_ssl_cert_file_into_client_kwargs(tmp_path):
+    # httpx.Client(verify=<path>) actually parses the file, so it must be a
+    # real PEM bundle — reuse the system CA bundle rather than pull in a new
+    # test dependency (e.g. `cryptography`) just to mint a throwaway cert.
+    system_bundles = [
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+        "/etc/ssl/certs/ca-certificates.crt",
+    ]
+    bundle = next((p for p in system_bundles if Path(p).exists()), None)
+    if bundle is None:
+        pytest.skip("no system CA bundle found to use as a fake cert file")
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text(Path(bundle).read_text())
+
+    config = _make_config(tmp_path)
+    config.llm.ssl_cert_file = str(cert_path)
+    bot = AgenticChatbot(config)
+    captured = {}
+
+    def fake_openai_server_model(model_id, api_base, api_key, **kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    def fake_code_agent(tools, model, max_steps, **kwargs):
+        return _FakeAgent(run_fn=lambda task: "answer")
+
+    bot._CodeAgent = fake_code_agent
+    bot._OpenAIServerModel = fake_openai_server_model
+
+    bot.ask("question")
+
+    assert "client_kwargs" in captured
+    assert "http_client" in captured["client_kwargs"]
+
+
+def test_ask_missing_ssl_cert_file_raises(tmp_path):
+    config = _make_config(tmp_path)
+    config.llm.ssl_cert_file = str(tmp_path / "missing_cert.pem")
+    bot = AgenticChatbot(config)
+    bot._CodeAgent = MagicMock()
+    bot._OpenAIServerModel = MagicMock()
+
+    with pytest.raises(FileNotFoundError):
+        bot.ask("question")

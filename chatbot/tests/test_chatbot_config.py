@@ -9,8 +9,6 @@ def test_agentic_config_defaults():
     from core.config import AgenticConfig
     cfg = AgenticConfig(page_index_path="/tmp/idx.json")
     assert cfg.max_chars_per_page == 8000
-    assert cfg.max_pages_per_round == 3
-    assert cfg.max_pages_round2 == 2
 
 
 def test_agentic_config_custom_values():
@@ -18,12 +16,8 @@ def test_agentic_config_custom_values():
     cfg = AgenticConfig(
         page_index_path="/tmp/idx.json",
         max_chars_per_page=4000,
-        max_pages_per_round=5,
-        max_pages_round2=1,
     )
     assert cfg.max_chars_per_page == 4000
-    assert cfg.max_pages_per_round == 5
-    assert cfg.max_pages_round2 == 1
 
 
 def test_chatbot_config_agentic_from_json(tmp_path):
@@ -40,7 +34,6 @@ def test_chatbot_config_agentic_from_json(tmp_path):
     assert cfg.agentic is not None
     assert cfg.agentic.page_index_path == "/tmp/page_index.json"
     assert cfg.agentic.max_chars_per_page == 4000
-    assert cfg.agentic.max_pages_per_round == 3  # default
 
 
 def test_chatbot_config_agentic_null_from_json(tmp_path):
@@ -85,22 +78,6 @@ def test_agentic_config_max_steps_custom():
     from core.config import AgenticConfig
     cfg = AgenticConfig(page_index_path="/tmp/idx.json", max_steps=10)
     assert cfg.max_steps == 10
-
-
-def test_smol_enabled_defaults_false():
-    cfg = ChatbotConfig(project_name="test", chromadb_path="/tmp/db/chromadb")
-    assert cfg.smol_enabled is False
-
-
-def test_smol_enabled_from_json(tmp_path):
-    config_json = tmp_path / "config.json"
-    config_json.write_text(json.dumps({
-        "project_name": "test",
-        "chromadb_path": "/tmp/db/chromadb",
-        "smol_enabled": True,
-    }))
-    cfg = ChatbotConfig.load(str(config_json))
-    assert cfg.smol_enabled is True
 
 
 def test_k_retrieve_defaults_none():

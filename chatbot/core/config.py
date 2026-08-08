@@ -35,9 +35,7 @@ class RerankerConfig:
 class AgenticConfig:
     page_index_path: str           # required — path to page_index.json (relative or absolute)
     max_chars_per_page: int = 8000
-    max_pages_per_round: int = 3
-    max_pages_round2: int = 2
-    max_steps: int = 6             # CodeAgent step budget for agentic-smol mode
+    max_steps: int = 6             # CodeAgent step budget
 
 
 @dataclass
@@ -81,7 +79,6 @@ class ChatbotConfig:
     # loaded; it has no effect on its own.
     title_boost_enabled: bool = False
     hyde_enabled: bool = False      # opt-in HyDE: embed an LLM-written hypothetical passage instead of the raw question
-    smol_enabled: bool = False      # opt-in agentic-smol mode (smolagents CodeAgent multi-hop). Requires agentic block too.
 
     # LLM generation parameters
     temperature: float = 0.0
@@ -142,7 +139,7 @@ class ChatbotConfig:
         # Known top-level keys (scalars + nested blocks)
         scalar_keys = {"project_name", "chromadb_path", "k_standard", "k_deep_dive", "k_retrieve",
                        "deep_dive_batch_size", "top_n_after_rerank", "expansion_char_budget", "temperature", "max_tokens",
-                       "bm25_enabled", "title_boost_enabled", "hyde_enabled", "smol_enabled"}
+                       "bm25_enabled", "title_boost_enabled", "hyde_enabled"}
         nested_keys = {"llm", "embedding", "reranker", "agentic"}
         valid_keys = scalar_keys | nested_keys
         invalid = set(data.keys()) - valid_keys

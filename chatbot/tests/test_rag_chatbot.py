@@ -386,12 +386,12 @@ def test_config_default_style_is_not_a_preset():
 
 
 def test_format_answer_warns_when_not_grounded():
-    """grounded=False (agentic-smol answered without reading a page) must be visible."""
+    """grounded=False (agentic answered without reading a page) must be visible."""
     from ui.web import WebUI
     ui = WebUI(MagicMock())
     out = ui._format_answer_markdown({
         "answer": "some answer", "sources": [],
-        "filters": {"mode": "agentic-smol", "steps_used": 2, "grounded": False},
+        "filters": {"mode": "agentic", "steps_used": 2, "grounded": False},
         "error": None,
     })
     assert "Warning" in out
@@ -403,7 +403,7 @@ def test_format_answer_no_warning_when_grounded():
     ui = WebUI(MagicMock())
     out = ui._format_answer_markdown({
         "answer": "some answer", "sources": [],
-        "filters": {"mode": "agentic-smol", "steps_used": 2, "grounded": True},
+        "filters": {"mode": "agentic", "steps_used": 2, "grounded": True},
         "error": None,
     })
     assert "Warning" not in out
@@ -497,7 +497,7 @@ def test_emit_json_falls_back_to_content_for_agentic_sources():
     from chatbot import _emit_json
     buf = io.StringIO()
     _emit_json({
-        "answer": "a", "error": None, "filters": {"mode": "agentic-smol", "grounded": True},
+        "answer": "a", "error": None, "filters": {"mode": "agentic", "grounded": True},
         "sources": [{"title": "T", "module": "M", "doc_category": "dev"}],
     }, buf)
     src = json.loads(buf.getvalue())["sources"][0]
@@ -569,7 +569,7 @@ def test_handle_message_routes_to_agentic(tmp_path):
     agentic.ask.return_value = {
         "answer": "agentic answer",
         "sources": [],
-        "filters": {"mode": "agentic", "rounds_used": 1},
+        "filters": {"mode": "agentic", "steps_used": 3},
         "error": None,
     }
     ui = WebUI(rag, agentic_chatbot=agentic)
@@ -580,13 +580,11 @@ def test_handle_message_routes_to_agentic(tmp_path):
         response_style="Precise (Recommended)", deep_dive=False,
         search_depth=40, reranker_enabled=True, top_n=15, hyde_enabled=False,
         bm25_enabled=False, answer_length=2000,
-        max_chars_per_page=8000, max_pages_per_round=3, max_pages_round2=2,
+        max_chars_per_page=8000, max_steps=6,
     )
     agentic.ask.assert_called_once_with(
         "question",
-        max_chars_per_page=8000,
-        max_pages_per_round=3,
-        max_pages_round2=2,
+        max_steps=6,
         max_tokens=2000,
     )
     rag.ask.assert_not_called()
@@ -606,7 +604,7 @@ def test_handle_message_forwards_bm25_toggle():
         response_style="Precise (Recommended)", deep_dive=False,
         search_depth=40, reranker_enabled=True, top_n=15, hyde_enabled=True,
         bm25_enabled=True, answer_length=2000,
-        max_chars_per_page=8000, max_pages_per_round=3, max_pages_round2=2,
+        max_chars_per_page=8000, max_steps=6,
     )
     assert rag.ask.call_args.kwargs["bm25_enabled"] is True
 
@@ -625,7 +623,7 @@ def test_handle_message_config_default_style_sends_no_temperature():
         response_style=ChatbotConfig.CONFIG_DEFAULT_STYLE, deep_dive=False,
         search_depth=40, reranker_enabled=True, top_n=15, hyde_enabled=False,
         bm25_enabled=False, answer_length=2000,
-        max_chars_per_page=8000, max_pages_per_round=3, max_pages_round2=2,
+        max_chars_per_page=8000, max_steps=6,
     )
     assert rag.ask.call_args.kwargs["temperature"] is None
 

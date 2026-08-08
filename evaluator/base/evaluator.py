@@ -1,3 +1,4 @@
+import re
 import subprocess
 import sys
 import json
@@ -195,7 +196,19 @@ class MistralLLM:
             try:
                 return json.loads(content)
             except json.JSONDecodeError:
-                return {"content": content}
+                pass
+            # Some gateways accept response_format=json_schema with HTTP 200
+            # but still reply with the JSON wrapped in a markdown code fence
+            # instead of raw JSON. Strip ```json ... ``` / ``` ... ``` before
+            # giving up, so a cosmetic wrapper doesn't get misread as a
+            # missing "score" (a pipeline failure, not a real 0.0 grade).
+            fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", content, re.DOTALL)
+            if fenced:
+                try:
+                    return json.loads(fenced.group(1))
+                except json.JSONDecodeError:
+                    pass
+            return {"content": content}
 
         # Return a simple object with content attribute for compatibility
         class Response:
@@ -279,8 +292,7 @@ def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
     matching chatbot.py CLI flags:
     - rag mode: k, temperature, reranker_enabled, top_n, deep_dive,
       hyde_enabled, bm25_enabled, title_boost_enabled
-    - agentic mode: temperature, max_pages_per_round, max_pages_round2,
-      max_chars_per_page
+    - agentic mode: temperature, max_steps, max_chars_per_page
     """
     start_time = time.perf_counter()
     cmd = [sys.executable, "chatbot.py", "--question", question, "--json-output"]
@@ -304,10 +316,8 @@ def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
             cmd.append("--no-bm25")
         if config.get("title_boost_enabled") is False:
             cmd.append("--no-title-boost")
-        if config.get("max_pages_per_round") is not None:
-            cmd.extend(["--max-pages-per-round", str(config["max_pages_per_round"])])
-        if config.get("max_pages_round2") is not None:
-            cmd.extend(["--max-pages-round2", str(config["max_pages_round2"])])
+        if config.get("max_steps") is not None:
+            cmd.extend(["--max-steps", str(config["max_steps"])])
         if config.get("max_chars_per_page") is not None:
             cmd.extend(["--max-chars-per-page", str(config["max_chars_per_page"])])
 
