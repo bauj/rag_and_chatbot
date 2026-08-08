@@ -1,0 +1,662 @@
+#!/usr/bin/env python3
+"""
+Hyperparameter optimizer for the RAG/agentic chatbot.
+
+Replaces the exhaustive grid search of evaluator/benchmark with a sample-efficient
+Bayesian search (Optuna, TPE sampler) suited to an expensive (minutes-to-hours per
+configuration) and stochastic (LLM-graded) objective: the average score of the N
+dataset questions across the 4 evaluation metrics (correctness, relevance,
+groundedness, retrieval_relevance).
+
+Two techniques address the specifics of this problem on top of plain Bayesian
+optimization:
+- Pruning: a configuration's running average is checked periodically while it is
+  being evaluated, and evaluation is aborted early if it is clearly worse than
+  other trials at the same point — the single biggest lever for cutting total
+  runtime, since most of the cost is running the N questions through the chatbot
+  and grading LLM.
+- Final validation: because scores are stochastic, the top candidates found by the
+  search are re-evaluated on the full dataset a few more times after optimization,
+  to report a mean +/- standard deviation and avoid crowning a noisy outlier.
+"""
+
+import sys
+import json
+import os
+import time
+import random
+import argparse
+import statistics
+from pathlib import Path
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+try:
+    import optuna
+except ImportError as exc:
+    raise ImportError(
+        "optuna is required to run the optimizer. Install it with "
+        "'pip install -r requirements.txt' (or 'pip install optuna') in the "
+        "project's virtual environment."
+    ) from exc
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+OPTIMIZER_CONFIG_FILE = SCRIPT_DIR / "optimizer_config.json"
+OPTIMIZER_CONFIG_EXAMPLE_FILE = SCRIPT_DIR / "optimizer_config.example.json"
+# Anchored to the script's own directory rather than the current working
+# directory, so results/studies always land next to optimizer.py regardless of
+# where `python optimizer.py` is run from.
+RESULTS_DIR = SCRIPT_DIR / "optimizer_results"
+STUDIES_DIR = SCRIPT_DIR / "studies"
+
+_SUPPORTED_MODES = {"rag", "agentic"}
+_SUPPORTED_PARAM_TYPES = {"int", "float", "bool"}
+
+# Import from evaluator base package
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from evaluator.base.evaluator import (
+    _call_chatbot,
+    _validate_config,
+    run_evaluation,
+    _load_examples,
+    EVAL_METRICS,
+)
+
+
+def _validate_optimizer_config(config_data: Dict[str, Any]) -> None:
+    """Fail fast with a clear message if optimizer_config.json is missing or
+    misusing keys the rest of this module indexes directly, instead of a bare
+    KeyError/AttributeError deep inside a multi-hour run."""
+    if "search_space" not in config_data:
+        raise ValueError(
+            "Optimizer config is missing required key: search_space. "
+            f"See {OPTIMIZER_CONFIG_EXAMPLE_FILE} for the expected structure."
+        )
+
+    search_space = config_data["search_space"]
+    mode_spec = search_space.get("mode")
+    if not mode_spec or not mode_spec.get("choices"):
+        raise ValueError(
+            "optimizer config's search_space must have a 'mode' entry with a "
+            f"non-empty 'choices' list (e.g. {{\"choices\": [\"rag\", \"agentic\"]}}). "
+            f"See {OPTIMIZER_CONFIG_EXAMPLE_FILE} for the expected structure."
+        )
+
+    unknown_modes = set(mode_spec["choices"]) - _SUPPORTED_MODES
+    if unknown_modes:
+        raise ValueError(
+            f"Unsupported mode(s) in search_space['mode']['choices']: {sorted(unknown_modes)}. "
+            f"Supported modes are: {sorted(_SUPPORTED_MODES)}."
+        )
+
+    fixed_params_by_mode = config_data.get("fixed_params", {})
+
+    for mode in mode_spec["choices"]:
+        sub_space = search_space.get(mode)
+        if not sub_space:
+            raise ValueError(
+                f"search_space['mode']['choices'] includes '{mode}' but search_space has no "
+                f"(non-empty) '{mode}' entry with that mode's hyperparameters."
+            )
+        if "mode" in sub_space:
+            raise ValueError(f"search_space['{mode}'] must not define a 'mode' parameter — that name is reserved.")
+
+        for name, spec in sub_space.items():
+            ptype = spec.get("type")
+            if ptype not in _SUPPORTED_PARAM_TYPES:
+                raise ValueError(
+                    f"search_space['{mode}']['{name}'].type must be one of "
+                    f"{sorted(_SUPPORTED_PARAM_TYPES)}, got {ptype!r}."
+                )
+            if ptype in ("int", "float") and ("low" not in spec or "high" not in spec):
+                raise ValueError(
+                    f"search_space['{mode}']['{name}'] of type '{ptype}' needs both 'low' and 'high'."
+                )
+
+        overlap = set(fixed_params_by_mode.get(mode, {})) & set(sub_space)
+        if overlap:
+            raise ValueError(
+                f"fixed_params['{mode}'] and search_space['{mode}'] both define {sorted(overlap)} — "
+                "a hyperparameter cannot be both fixed and optimized."
+            )
+
+
+def load_optimizer_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Load optimizer parameters from JSON configuration."""
+    path = Path(config_path) if config_path else OPTIMIZER_CONFIG_FILE
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Optimizer config file not found: {path}. "
+            f"Create it from {OPTIMIZER_CONFIG_EXAMPLE_FILE} and rerun."
+        )
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Optimizer config file is invalid JSON: {path}: {exc}") from exc
+
+    _validate_optimizer_config(config_data)
+    return config_data
+
+
+def _suggest_trial_config(
+    trial: "optuna.trial.Trial",
+    search_space: Dict[str, Any],
+    fixed_params_by_mode: Dict[str, Dict[str, Any]],
+) -> Tuple[str, Dict[str, Any]]:
+    """Sample a (mode, hyperparameters) pair for this trial.
+
+    'mode' is itself an optimized categorical choice between 'rag' and 'agentic';
+    only the sub search space matching the sampled mode is then sampled from, so a
+    trial never suggests parameters that don't apply to it. This is Optuna's
+    standard pattern for a conditional/branching search space (a branch variable
+    followed by branch-specific parameters) — TPESampler(multivariate=True,
+    group=True) is built to handle exactly this.
+    """
+    mode = trial.suggest_categorical("mode", search_space["mode"]["choices"])
+    sub_space = search_space[mode]
+    params = dict(fixed_params_by_mode.get(mode, {}))
+    for name, spec in sub_space.items():
+        # Prefixed with the mode so a name reused across branches (e.g. both rag
+        # and agentic have a "temperature") is tracked as a distinct Optuna
+        # parameter per branch, even if the two ranges differ.
+        key = f"{mode}__{name}"
+        ptype = spec["type"]
+        if ptype == "int":
+            value = trial.suggest_int(key, spec["low"], spec["high"], step=spec.get("step", 1))
+        elif ptype == "float":
+            value = trial.suggest_float(key, spec["low"], spec["high"], log=spec.get("log", False))
+        elif ptype == "bool":
+            value = trial.suggest_categorical(key, [True, False])
+        params[name] = value
+    return mode, params
+
+
+def _params_from_trial(
+    t: "optuna.trial.FrozenTrial",
+    config_data: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any]]:
+    """Reconstruct the (mode, hyperparameters) pair for an already-sampled trial,
+    e.g. to re-run its exact configuration during final validation."""
+    mode = t.params["mode"]
+    fixed = config_data.get("fixed_params", {}).get(mode, {})
+    prefix = f"{mode}__"
+    params = dict(fixed)
+    for k, v in t.params.items():
+        if k.startswith(prefix):
+            params[k[len(prefix):]] = v
+    return mode, params
+
+
+def _run_question(
+    question_id: int,
+    example: Dict[str, Any],
+    mode: str,
+    config: Dict[str, Any],
+    chatbot_timeout: Optional[int],
+) -> Tuple[int, Dict[str, float], float, float]:
+    """Run one dataset question through the chatbot and the 4 grading metrics.
+
+    Returns (question_id, per_metric_scores, question_average_score, request_time).
+    """
+    question = example["inputs"]["question"]
+    reference_answer = example["outputs"]["answer"]
+
+    answer_dict = _call_chatbot(question, mode, chatbot_timeout, config=config)
+    # Metrics run sequentially here on purpose: this function runs inside a worker
+    # thread of the per-question pool below. Submitting more work to that same
+    # bounded pool from within one of its own workers can deadlock once all
+    # workers are occupied waiting on sub-tasks that have no free thread to run on.
+    evaluations = run_evaluation(question, answer_dict, reference_answer)
+    request_time = answer_dict.get("request_time", 0.0)
+
+    metric_scores = {m: evaluations[m].get("score", 0.0) for m in EVAL_METRICS}
+    question_average = sum(metric_scores.values()) / len(metric_scores)
+    return question_id, metric_scores, question_average, request_time
+
+
+def evaluate_config_on_dataset(
+    config: Dict[str, Any],
+    dataset: List[Dict[str, Any]],
+    mode: str,
+    chatbot_timeout: Optional[int],
+    workers: int,
+    trial: Optional["optuna.trial.Trial"] = None,
+    min_questions_before_report: int = 0,
+    interval_questions: int = 1,
+) -> Tuple[List[float], Dict[str, float], float]:
+    """Run a hyperparameter configuration over the whole dataset.
+
+    If `trial` is given, the running average score is periodically reported to
+    Optuna (via trial.report) once at least `min_questions_before_report`
+    questions have completed, checked every `interval_questions` questions.
+    optuna.TrialPruned is raised if Optuna decides the trial should be cut short.
+
+    Returns (per_question_average_scores, per_metric_averages, avg_request_time).
+    """
+    n = len(dataset)
+    question_scores: List[Optional[float]] = [None] * n
+    request_times: List[float] = [0.0] * n
+    metric_totals = {m: 0.0 for m in EVAL_METRICS}
+    completed = 0
+
+    def _record(question_id: int, metric_scores: Dict[str, float], q_avg: float, req_time: float) -> None:
+        question_scores[question_id - 1] = q_avg
+        request_times[question_id - 1] = req_time
+        for m, v in metric_scores.items():
+            metric_totals[m] += v
+
+    def _maybe_report(step: int) -> None:
+        if trial is None or step < min_questions_before_report:
+            return
+        if step % interval_questions != 0 and step != n:
+            return
+        running_mean = sum(s for s in question_scores if s is not None) / step
+        trial.report(running_mean, step)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            # Processed in fixed-size chunks (rather than one giant future map) so
+            # pruning is checked between chunks instead of only after every single
+            # question has finished across the whole dataset.
+            for chunk_start in range(0, n, workers):
+                chunk = list(enumerate(dataset[chunk_start:chunk_start + workers], start=chunk_start + 1))
+                futures = {
+                    executor.submit(_run_question, q_id, example, mode, config, chatbot_timeout): q_id
+                    for q_id, example in chunk
+                }
+                for future in as_completed(futures):
+                    q_id, metric_scores, q_avg, req_time = future.result()
+                    _record(q_id, metric_scores, q_avg, req_time)
+                completed += len(chunk)
+                _maybe_report(completed)
+    else:
+        for q_id, example in enumerate(dataset, 1):
+            _, metric_scores, q_avg, req_time = _run_question(q_id, example, mode, config, chatbot_timeout)
+            _record(q_id, metric_scores, q_avg, req_time)
+            completed += 1
+            _maybe_report(completed)
+
+    per_metric_avg = {m: metric_totals[m] / n for m in EVAL_METRICS}
+    avg_request_time = sum(request_times) / n if n else 0.0
+    return question_scores, per_metric_avg, avg_request_time
+
+
+def objective(
+    trial: "optuna.trial.Trial",
+    config_data: Dict[str, Any],
+    dataset: List[Dict[str, Any]],
+) -> float:
+    mode, params = _suggest_trial_config(trial, config_data["search_space"], config_data.get("fixed_params", {}))
+
+    pruning_cfg = config_data.get("pruning", {})
+    pruning_enabled = pruning_cfg.get("enabled", True)
+    workers = config_data.get("workers", 1)
+    chatbot_timeout = config_data.get("chatbot_timeout_seconds")
+
+    print(f"\n[Trial {trial.number}] starting: mode={mode} params={params}")
+    start = time.perf_counter()
+    _, per_metric_avg, avg_request_time = evaluate_config_on_dataset(
+        params,
+        dataset,
+        mode,
+        chatbot_timeout,
+        workers,
+        trial=trial if pruning_enabled else None,
+        min_questions_before_report=pruning_cfg.get("min_questions_before_pruning", 20),
+        interval_questions=pruning_cfg.get("interval_questions", 5),
+    )
+    elapsed = time.perf_counter() - start
+
+    overall = sum(per_metric_avg.values()) / len(per_metric_avg)
+    trial.set_user_attr("mode", mode)
+    trial.set_user_attr("per_metric_avg", per_metric_avg)
+    trial.set_user_attr("avg_request_time", avg_request_time)
+    trial.set_user_attr("elapsed_seconds", elapsed)
+    trial.set_user_attr("n_questions", len(dataset))
+    return overall
+
+
+def _make_trial_callback(config_data: Dict[str, Any]):
+    """Build an Optuna callback that prints each finished trial with its mode
+    resolved and its params de-prefixed (trial.params holds raw 'mode__name'
+    keys plus 'mode' itself — see _suggest_trial_config)."""
+
+    def _callback(study: "optuna.Study", trial: "optuna.trial.FrozenTrial") -> None:
+        if trial.state == optuna.trial.TrialState.COMPLETE:
+            mode, params = _params_from_trial(trial, config_data)
+            is_best = study.best_trial.number == trial.number
+            marker = " *NEW BEST*" if is_best else ""
+            print(f"[Trial {trial.number}] COMPLETE value={trial.value:.3f}{marker} mode={mode} params={params}")
+        elif trial.state == optuna.trial.TrialState.PRUNED:
+            mode, params = _params_from_trial(trial, config_data)
+            last_step = max(trial.intermediate_values) if trial.intermediate_values else None
+            partial = trial.intermediate_values.get(last_step, float("nan")) if last_step is not None else float("nan")
+            print(
+                f"[Trial {trial.number}] PRUNED at question {last_step} "
+                f"(running average was {partial:.3f}) mode={mode} params={params}"
+            )
+        elif trial.state == optuna.trial.TrialState.FAIL:
+            print(f"[Trial {trial.number}] FAILED params={trial.params}")
+
+    return _callback
+
+
+def run_final_validation(
+    top_trials: List["optuna.trial.FrozenTrial"],
+    dataset: List[Dict[str, Any]],
+    config_data: Dict[str, Any],
+    repeats: int,
+) -> List[Dict[str, Any]]:
+    """Re-evaluate the top candidates on the full dataset several more times
+    (no pruning) to report mean +/- stdev and guard against a noisy outlier
+    winning purely by luck during the search."""
+    workers = config_data.get("workers", 1)
+    chatbot_timeout = config_data.get("chatbot_timeout_seconds")
+
+    validated = []
+    for rank, t in enumerate(top_trials, 1):
+        mode, params = _params_from_trial(t, config_data)
+        print(f"\nValidating candidate {rank}/{len(top_trials)} (trial {t.number}, search value={t.value:.3f}): mode={mode} params={params}")
+
+        run_values = []
+        per_metric_runs = []
+        for r in range(repeats):
+            print(f"  Repeat {r + 1}/{repeats}...")
+            _, per_metric_avg, _ = evaluate_config_on_dataset(params, dataset, mode, chatbot_timeout, workers)
+            overall = sum(per_metric_avg.values()) / len(per_metric_avg)
+            run_values.append(overall)
+            per_metric_runs.append(per_metric_avg)
+            print(f"    -> {overall:.3f}")
+
+        mean_v = statistics.mean(run_values)
+        std_v = statistics.stdev(run_values) if len(run_values) > 1 else 0.0
+        validated.append({
+            "trial_number": t.number,
+            "mode": mode,
+            "params": params,
+            "search_value": t.value,
+            "validation_runs": run_values,
+            "validation_mean": mean_v,
+            "validation_std": std_v,
+            "per_metric_runs": per_metric_runs,
+        })
+
+    validated.sort(key=lambda r: r["validation_mean"], reverse=True)
+    return validated
+
+
+def _serialize_trial(t: "optuna.trial.FrozenTrial") -> Dict[str, Any]:
+    return {
+        "number": t.number,
+        "state": t.state.name,
+        "value": t.value,
+        "params": t.params,
+        "user_attrs": t.user_attrs,
+        "intermediate_values": {str(k): v for k, v in t.intermediate_values.items()},
+    }
+
+
+def _default_storage(study_name: str) -> str:
+    STUDIES_DIR.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{STUDIES_DIR / study_name}.db"
+
+
+def run_optimizer(config_data: Dict[str, Any]) -> Dict[str, Any]:
+    _validate_config()
+
+    # -1 means "use all CPUs" (same convention as evaluator/benchmark's --workers),
+    # resolved once here so every reader of config_data["workers"] below (objective,
+    # run_final_validation) sees the same concrete integer.
+    workers_cfg = config_data.get("workers", 1)
+    if workers_cfg == -1:
+        workers_cfg = os.cpu_count() or 1
+    elif workers_cfg < -1:
+        raise ValueError(f"'workers' must be -1 or a positive integer, got {workers_cfg}.")
+    config_data["workers"] = workers_cfg
+
+    n_jobs_cfg = config_data.get("n_jobs", 1)
+    effective_n_jobs = (os.cpu_count() or 1) if n_jobs_cfg == -1 else n_jobs_cfg
+    effective_concurrency = workers_cfg * effective_n_jobs
+    if effective_concurrency > 4:
+        # Unlike a lightweight thread, each "worker" here spawns a full chatbot.py
+        # subprocess that reloads the embedding model, the Chroma vectorstore and
+        # (if reranker_enabled) the BAAI/bge-reranker-v2-m3 cross-encoder — several
+        # GB of RAM by itself — from scratch. High workers x n_jobs has previously
+        # driven this process into swap and gotten it OOM-killed mid-trial (visible
+        # afterwards as a trial stuck in RUNNING state in the study database), which
+        # looks like the optimizer "hanging" even though nothing in this script
+        # deadlocks on its own. Concurrent processes also all open the SAME Chroma
+        # persist_directory, which is a further contention point under high concurrency.
+        print(
+            f"WARNING: workers={workers_cfg} x n_jobs={n_jobs_cfg} means up to "
+            f"{effective_concurrency} chatbot.py subprocesses running at once, each "
+            "reloading its own models (the RAG reranker alone is several GB). This "
+            "can exhaust RAM and make the run appear to hang rather than actually "
+            "deadlocking. Consider a modest workers value (e.g. 2-4) unless you've "
+            "confirmed the machine has enough RAM for that many concurrent model loads."
+        )
+
+    dataset = _load_examples()
+    questions_limit = config_data.get("questions_limit")
+    if questions_limit is not None:
+        dataset = dataset[:questions_limit]
+
+    # dataset.json is grouped by module/topic rather than shuffled, so a pruned
+    # trial that only sees the first N questions would see a biased, unrepresentative
+    # sample. Shuffle once with a fixed seed and reuse that same order for every
+    # trial, so intermediate values stay comparable across trials at a given step.
+    shuffle_seed = config_data.get("dataset_shuffle_seed")
+    if shuffle_seed is not None:
+        dataset = list(dataset)
+        random.Random(shuffle_seed).shuffle(dataset)
+
+    study_name = config_data.get("study_name", "chatbot_hyperparameter_optimization")
+    storage = config_data.get("storage") or _default_storage(study_name)
+
+    pruning_cfg = config_data.get("pruning", {})
+    if pruning_cfg.get("enabled", True):
+        pruner = optuna.pruners.PercentilePruner(
+            percentile=pruning_cfg.get("percentile", 25.0),
+            n_startup_trials=pruning_cfg.get("n_warmup_trials", 5),
+            n_warmup_steps=pruning_cfg.get("min_questions_before_pruning", 20),
+            interval_steps=pruning_cfg.get("interval_questions", 5),
+        )
+    else:
+        pruner = optuna.pruners.NopPruner()
+
+    sampler = optuna.samplers.TPESampler(
+        seed=config_data.get("sampler_seed"),
+        multivariate=True,
+        group=True,
+    )
+
+    study = optuna.create_study(
+        study_name=study_name,
+        storage=storage,
+        direction="maximize",
+        sampler=sampler,
+        pruner=pruner,
+        load_if_exists=True,
+    )
+
+    n_trials = config_data.get("n_trials", 30)
+    already_run = len([t for t in study.trials if t.state != optuna.trial.TrialState.RUNNING])
+    stuck_running = len(study.trials) - already_run
+    next_trial_number = len(study.trials)
+
+    print(f"\n{'=' * 80}")
+    print("OPTIMIZER CONFIGURATION")
+    print(f"{'=' * 80}")
+    print(f"Workers per trial: {workers_cfg}")
+    search_space = config_data["search_space"]
+    fixed_params_by_mode = config_data.get("fixed_params", {})
+    print(f"Modes considered: {search_space['mode']['choices']} (mode itself is optimized)")
+    print(f"Questions per trial: {len(dataset)}")
+    for m in search_space["mode"]["choices"]:
+        print(f"  [{m}] search space: {json.dumps(search_space[m])}")
+        if fixed_params_by_mode.get(m):
+            print(f"  [{m}] fixed params: {fixed_params_by_mode[m]}")
+    print(f"Sampler: TPE (seed={config_data.get('sampler_seed')})")
+    print(f"Pruning: {'enabled' if pruning_cfg.get('enabled', True) else 'disabled'}")
+    print(f"Study: {study_name} ({storage})")
+    if already_run or stuck_running:
+        # Trial numbers are cumulative for the whole study (persisted in `storage`),
+        # not per invocation — so on a resumed study the first trial printed below
+        # is expected to start at #{next_trial_number}, not #0.
+        note = f"Resuming existing study: {already_run} trial(s) already recorded"
+        if stuck_running:
+            note += f" ({stuck_running} left stuck in RUNNING state by an interrupted previous session — Optuna will just skip over them and start fresh trials)"
+        print(note)
+        print(f"New trials in this session will be numbered starting at #{next_trial_number} (not #0) — trial numbers are cumulative for this study.")
+    print(f"Trials to run this session: {n_trials}")
+    if config_data.get("n_jobs", 1) != 1:
+        print(
+            f"n_jobs={config_data.get('n_jobs')}: trials run concurrently, so their 'starting'/'COMPLETE'/'PRUNED' "
+            "lines below may print out of numeric order — that's expected, not a bug."
+        )
+    print(f"{'=' * 80}\n")
+
+    study.optimize(
+        lambda trial: objective(trial, config_data, dataset),
+        n_trials=n_trials,
+        timeout=config_data.get("timeout_seconds"),
+        n_jobs=config_data.get("n_jobs", 1),
+        callbacks=[_make_trial_callback(config_data)],
+        gc_after_trial=True,
+    )
+
+    completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    completed_trials.sort(key=lambda t: t.value, reverse=True)
+
+    try:
+        best_trial = study.best_trial
+    except ValueError:
+        # No trial completed (e.g. everything failed or was pruned before finishing) —
+        # study.best_trial raises rather than returning None in that case.
+        best_trial = None
+
+    print(f"\n{'=' * 80}")
+    print("SEARCH COMPLETE")
+    print(f"{'=' * 80}")
+    if best_trial is not None:
+        best_mode, best_params = _params_from_trial(best_trial, config_data)
+        print(f"Best trial: #{best_trial.number} value={best_trial.value:.3f}")
+        print(f"Mode: {best_mode}")
+        print(f"Params: {best_params}")
+    else:
+        print("No trial completed successfully.")
+
+    validation_results = None
+    final_validation_cfg = config_data.get("final_validation", {})
+    if final_validation_cfg.get("enabled", True) and completed_trials:
+        top_k = final_validation_cfg.get("top_k", 3)
+        repeats = final_validation_cfg.get("repeats", 3)
+        top_trials = completed_trials[:top_k]
+        print(f"\n{'=' * 80}")
+        print(f"FINAL VALIDATION (top {len(top_trials)} candidates, {repeats} repeats each)")
+        print(f"{'=' * 80}")
+        validation_results = run_final_validation(top_trials, dataset, config_data, repeats)
+
+        print(f"\n{'=' * 80}")
+        print("VALIDATED RANKING")
+        print(f"{'=' * 80}")
+        for rank, r in enumerate(validation_results, 1):
+            print(
+                f"{rank}. trial #{r['trial_number']} [{r['mode']}]: "
+                f"{r['validation_mean']:.3f} +/- {r['validation_std']:.3f} "
+                f"(search value was {r['search_value']:.3f}) params={r['params']}"
+            )
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output = {
+        "metadata": {
+            "timestamp": timestamp,
+            "optimizer_config": config_data,
+            "study_name": study_name,
+            "storage": storage,
+            "n_questions": len(dataset),
+        },
+        "best_trial": _serialize_trial(best_trial) if best_trial is not None else None,
+        "trials": [_serialize_trial(t) for t in study.trials],
+        "final_validation": validation_results,
+    }
+    results_file = RESULTS_DIR / f"optimizer_{timestamp}.json"
+    with open(results_file, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
+
+    print(f"\nResults saved to: {results_file}")
+
+    print(f"\n{'=' * 80}")
+    print("RECOMMENDED CONFIGURATION")
+    print(f"{'=' * 80}")
+    if validation_results:
+        best = validation_results[0]
+        print(json.dumps({"mode": best["mode"], "params": best["params"]}, indent=2, ensure_ascii=False))
+    elif best_trial is not None:
+        print(json.dumps({"mode": best_mode, "params": best_params}, indent=2, ensure_ascii=False))
+    else:
+        print("No trial completed — nothing to recommend.")
+
+    return output
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Bayesian hyperparameter optimizer for the RAG/agentic chatbot"
+    )
+    parser.add_argument("--config", type=str, default=None,
+                         help="Path to optimizer config JSON (default: optimizer_config.json)")
+    parser.add_argument("--n-trials", type=int, default=None,
+                         help="Number of trials to run this session (overrides config)")
+    parser.add_argument("--timeout", type=int, default=None,
+                         help="Wall-clock budget in seconds for the whole study (overrides config)")
+    parser.add_argument("--limit", type=int, default=None,
+                         help="Limit number of dataset questions per trial (overrides config)")
+    parser.add_argument("--workers", type=int, default=None,
+                         help="Parallel threads for evaluating questions within a single trial, "
+                              "-1 for all CPUs (overrides config)")
+    parser.add_argument("--chatbot-timeout", type=int, default=None,
+                         help="Timeout in seconds for each chatbot request (overrides config)")
+    parser.add_argument("--study-name", type=str, default=None,
+                         help="Optuna study name (overrides config)")
+    parser.add_argument("--storage", type=str, default=None,
+                         help="Optuna storage URL, e.g. sqlite:///studies/foo.db (overrides config)")
+    parser.add_argument("--no-pruning", action="store_true",
+                         help="Disable pruning regardless of config")
+    parser.add_argument("--no-validation", action="store_true",
+                         help="Skip the final validation pass regardless of config")
+
+    args = parser.parse_args()
+
+    config_data = load_optimizer_config(Path(args.config) if args.config else None)
+
+    if args.n_trials is not None:
+        config_data["n_trials"] = args.n_trials
+    if args.timeout is not None:
+        config_data["timeout_seconds"] = args.timeout
+    if args.limit is not None:
+        config_data["questions_limit"] = args.limit
+    if args.workers is not None:
+        config_data["workers"] = args.workers
+    if args.chatbot_timeout is not None:
+        config_data["chatbot_timeout_seconds"] = args.chatbot_timeout
+    if args.study_name is not None:
+        config_data["study_name"] = args.study_name
+    if args.storage is not None:
+        config_data["storage"] = args.storage
+    if args.no_pruning:
+        config_data.setdefault("pruning", {})["enabled"] = False
+    if args.no_validation:
+        config_data.setdefault("final_validation", {})["enabled"] = False
+
+    run_optimizer(config_data)
+
+
+if __name__ == "__main__":
+    main()

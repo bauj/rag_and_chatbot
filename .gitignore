@@ -46,8 +46,11 @@ chatbot/config.json
 evaluator/base/config.json
 evaluator/benchmark/benchmark_config.json
 evaluator/base/dataset.json
+evaluator/optimizer/optimizer_config.json
 
 # Results
 evaluator/benchmark/benchmark_results/
 evaluator/benchmark/graphs/
 evaluator/base/evaluation_results.json
+evaluator/optimizer/optimizer_results/
+evaluator/optimizer/studies/
