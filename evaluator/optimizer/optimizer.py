@@ -62,7 +62,11 @@ RESULTS_DIR = SCRIPT_DIR / "optimizer_results"
 STUDIES_DIR = SCRIPT_DIR / "studies"
 
 _SUPPORTED_MODES = {"rag", "agentic"}
-_SUPPORTED_PARAM_TYPES = {"int", "float", "bool"}
+_SUPPORTED_PARAM_TYPES = {"int", "float", "bool", "categorical"}
+# Sub-spaces sampled unconditionally every trial (unlike "rag"/"agentic", which are
+# mutually exclusive branches of "mode") — model choice and extraction params apply
+# regardless of which mode a trial ends up using.
+_FLAT_SUBSPACE_KEYS = ("model", "extraction")
 
 # Import from evaluator base package
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -73,6 +77,39 @@ from evaluator.base.evaluator import (
     _load_examples,
     EVAL_METRICS,
 )
+from evaluator.base import extraction_cache
+from evaluator.base.extraction_cache import TUNABLE_EXTRACTION_FIELDS
+
+
+def _validate_sub_space(label: str, sub_space: Dict[str, Any], fixed_params: Dict[str, Any]) -> None:
+    """Shared per-parameter validation for one search_space sub-space (a mode's
+    rag/agentic block, or the flat 'model'/'extraction' blocks) — every entry
+    needs a supported type, 'low'/'high' for int/float, 'choices' for categorical."""
+    if "mode" in sub_space:
+        raise ValueError(f"search_space['{label}'] must not define a 'mode' parameter — that name is reserved.")
+
+    for name, spec in sub_space.items():
+        ptype = spec.get("type")
+        if ptype not in _SUPPORTED_PARAM_TYPES:
+            raise ValueError(
+                f"search_space['{label}']['{name}'].type must be one of "
+                f"{sorted(_SUPPORTED_PARAM_TYPES)}, got {ptype!r}."
+            )
+        if ptype in ("int", "float") and ("low" not in spec or "high" not in spec):
+            raise ValueError(
+                f"search_space['{label}']['{name}'] of type '{ptype}' needs both 'low' and 'high'."
+            )
+        if ptype == "categorical" and not spec.get("choices"):
+            raise ValueError(
+                f"search_space['{label}']['{name}'] of type 'categorical' needs a non-empty 'choices' list."
+            )
+
+    overlap = set(fixed_params) & set(sub_space)
+    if overlap:
+        raise ValueError(
+            f"fixed_params['{label}'] and search_space['{label}'] both define {sorted(overlap)} — "
+            "a hyperparameter cannot be both fixed and optimized."
+        )
 
 
 def _validate_optimizer_config(config_data: Dict[str, Any]) -> None:
@@ -101,7 +138,7 @@ def _validate_optimizer_config(config_data: Dict[str, Any]) -> None:
             f"Supported modes are: {sorted(_SUPPORTED_MODES)}."
         )
 
-    fixed_params_by_mode = config_data.get("fixed_params", {})
+    fixed_params_by_key = config_data.get("fixed_params", {})
 
     for mode in mode_spec["choices"]:
         sub_space = search_space.get(mode)
@@ -110,26 +147,27 @@ def _validate_optimizer_config(config_data: Dict[str, Any]) -> None:
                 f"search_space['mode']['choices'] includes '{mode}' but search_space has no "
                 f"(non-empty) '{mode}' entry with that mode's hyperparameters."
             )
-        if "mode" in sub_space:
-            raise ValueError(f"search_space['{mode}'] must not define a 'mode' parameter — that name is reserved.")
+        _validate_sub_space(mode, sub_space, fixed_params_by_key.get(mode, {}))
 
-        for name, spec in sub_space.items():
-            ptype = spec.get("type")
-            if ptype not in _SUPPORTED_PARAM_TYPES:
-                raise ValueError(
-                    f"search_space['{mode}']['{name}'].type must be one of "
-                    f"{sorted(_SUPPORTED_PARAM_TYPES)}, got {ptype!r}."
-                )
-            if ptype in ("int", "float") and ("low" not in spec or "high" not in spec):
-                raise ValueError(
-                    f"search_space['{mode}']['{name}'] of type '{ptype}' needs both 'low' and 'high'."
-                )
+    # 'model' and 'extraction' are optional, flat (mode-independent) sub-spaces:
+    # sampled on every trial regardless of which mode ('rag'/'agentic') it uses.
+    if "model" in search_space:
+        _validate_sub_space("model", search_space["model"], fixed_params_by_key.get("model", {}))
 
-        overlap = set(fixed_params_by_mode.get(mode, {})) & set(sub_space)
-        if overlap:
+    if "extraction" in search_space:
+        extraction_space = search_space["extraction"]
+        _validate_sub_space("extraction", extraction_space, fixed_params_by_key.get("extraction", {}))
+        unknown_fields = set(extraction_space) - set(TUNABLE_EXTRACTION_FIELDS)
+        if unknown_fields:
             raise ValueError(
-                f"fixed_params['{mode}'] and search_space['{mode}'] both define {sorted(overlap)} — "
-                "a hyperparameter cannot be both fixed and optimized."
+                f"search_space['extraction'] has unsupported field(s): {sorted(unknown_fields)}. "
+                f"Supported: {list(TUNABLE_EXTRACTION_FIELDS)}."
+            )
+        unknown_fixed = set(fixed_params_by_key.get("extraction", {})) - set(TUNABLE_EXTRACTION_FIELDS)
+        if unknown_fixed:
+            raise ValueError(
+                f"fixed_params['extraction'] has unsupported field(s): {sorted(unknown_fixed)}. "
+                f"Supported: {list(TUNABLE_EXTRACTION_FIELDS)}."
             )
 
 
@@ -152,12 +190,42 @@ def load_optimizer_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     return config_data
 
 
+def _suggest_value(trial: "optuna.trial.Trial", key: str, spec: Dict[str, Any]) -> Any:
+    ptype = spec["type"]
+    if ptype == "int":
+        return trial.suggest_int(key, spec["low"], spec["high"], step=spec.get("step", 1))
+    if ptype == "float":
+        return trial.suggest_float(key, spec["low"], spec["high"], log=spec.get("log", False))
+    if ptype == "bool":
+        return trial.suggest_categorical(key, [True, False])
+    if ptype == "categorical":
+        return trial.suggest_categorical(key, spec["choices"])
+    raise ValueError(f"Unsupported param type {ptype!r} for {key!r}.")
+
+
+def _suggest_sub_space(
+    trial: "optuna.trial.Trial",
+    prefix: str,
+    sub_space: Dict[str, Any],
+    fixed: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Sample every parameter in one search_space sub-space, each prefixed with
+    `prefix` so it's tracked as a distinct Optuna parameter from any same-named
+    parameter in another sub-space (e.g. both 'rag' and 'agentic' have a
+    'temperature', with potentially different ranges)."""
+    params = dict(fixed)
+    for name, spec in sub_space.items():
+        params[name] = _suggest_value(trial, f"{prefix}__{name}", spec)
+    return params
+
+
 def _suggest_trial_config(
     trial: "optuna.trial.Trial",
     search_space: Dict[str, Any],
-    fixed_params_by_mode: Dict[str, Dict[str, Any]],
-) -> Tuple[str, Dict[str, Any]]:
-    """Sample a (mode, hyperparameters) pair for this trial.
+    fixed_params_by_key: Dict[str, Dict[str, Any]],
+) -> Tuple[str, Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Sample a full trial configuration: (mode, chatbot hyperparameters,
+    extraction overrides).
 
     'mode' is itself an optimized categorical choice between 'rag' and 'agentic';
     only the sub search space matching the sampled mode is then sampled from, so a
@@ -165,40 +233,58 @@ def _suggest_trial_config(
     standard pattern for a conditional/branching search space (a branch variable
     followed by branch-specific parameters) — TPESampler(multivariate=True,
     group=True) is built to handle exactly this.
+
+    'model' and 'extraction' (both optional in search_space) are sampled
+    unconditionally on every trial regardless of mode — an LLM/reranker choice or
+    an extraction variant applies whether the trial is rag or agentic. 'model'
+    params (model/base_url/api_key) are merged into the returned hyperparameter
+    dict alongside the mode-specific ones (both end up as chatbot.py CLI flags via
+    _call_chatbot); 'extraction' params are returned separately since they drive
+    an extraction_cache.get_or_build() lookup instead of a CLI flag.
     """
     mode = trial.suggest_categorical("mode", search_space["mode"]["choices"])
-    sub_space = search_space[mode]
-    params = dict(fixed_params_by_mode.get(mode, {}))
-    for name, spec in sub_space.items():
-        # Prefixed with the mode so a name reused across branches (e.g. both rag
-        # and agentic have a "temperature") is tracked as a distinct Optuna
-        # parameter per branch, even if the two ranges differ.
-        key = f"{mode}__{name}"
-        ptype = spec["type"]
-        if ptype == "int":
-            value = trial.suggest_int(key, spec["low"], spec["high"], step=spec.get("step", 1))
-        elif ptype == "float":
-            value = trial.suggest_float(key, spec["low"], spec["high"], log=spec.get("log", False))
-        elif ptype == "bool":
-            value = trial.suggest_categorical(key, [True, False])
-        params[name] = value
-    return mode, params
+    params = _suggest_sub_space(trial, mode, search_space[mode], fixed_params_by_key.get(mode, {}))
+
+    if "model" in search_space:
+        params.update(_suggest_sub_space(trial, "model", search_space["model"], fixed_params_by_key.get("model", {})))
+
+    extraction_overrides = None
+    if "extraction" in search_space:
+        extraction_overrides = _suggest_sub_space(
+            trial, "extraction", search_space["extraction"], fixed_params_by_key.get("extraction", {})
+        )
+
+    return mode, params, extraction_overrides
 
 
 def _params_from_trial(
     t: "optuna.trial.FrozenTrial",
     config_data: Dict[str, Any],
-) -> Tuple[str, Dict[str, Any]]:
-    """Reconstruct the (mode, hyperparameters) pair for an already-sampled trial,
-    e.g. to re-run its exact configuration during final validation."""
+) -> Tuple[str, Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Reconstruct (mode, hyperparameters, extraction overrides) for an
+    already-sampled trial, e.g. to re-run its exact configuration during final
+    validation."""
+    search_space = config_data["search_space"]
+    fixed_params_by_key = config_data.get("fixed_params", {})
     mode = t.params["mode"]
-    fixed = config_data.get("fixed_params", {}).get(mode, {})
-    prefix = f"{mode}__"
-    params = dict(fixed)
-    for k, v in t.params.items():
-        if k.startswith(prefix):
-            params[k[len(prefix):]] = v
-    return mode, params
+
+    def _collect(prefix: str, fixed: Dict[str, Any]) -> Dict[str, Any]:
+        collected = dict(fixed)
+        marker = f"{prefix}__"
+        for k, v in t.params.items():
+            if k.startswith(marker):
+                collected[k[len(marker):]] = v
+        return collected
+
+    params = _collect(mode, fixed_params_by_key.get(mode, {}))
+    if "model" in search_space:
+        params.update(_collect("model", fixed_params_by_key.get("model", {})))
+
+    extraction_overrides = None
+    if "extraction" in search_space:
+        extraction_overrides = _collect("extraction", fixed_params_by_key.get("extraction", {}))
+
+    return mode, params, extraction_overrides
 
 
 def _run_question(
@@ -207,6 +293,7 @@ def _run_question(
     mode: str,
     config: Dict[str, Any],
     chatbot_timeout: Optional[int],
+    chatbot_config_path: Optional[str] = None,
 ) -> Tuple[int, Dict[str, float], float, float]:
     """Run one dataset question through the chatbot and the 4 grading metrics.
 
@@ -215,7 +302,8 @@ def _run_question(
     question = example["inputs"]["question"]
     reference_answer = example["outputs"]["answer"]
 
-    answer_dict = _call_chatbot(question, mode, chatbot_timeout, config=config)
+    answer_dict = _call_chatbot(question, mode, chatbot_timeout, config=config,
+                                 chatbot_config_path=chatbot_config_path)
     # Metrics run sequentially here on purpose: this function runs inside a worker
     # thread of the per-question pool below. Submitting more work to that same
     # bounded pool from within one of its own workers can deadlock once all
@@ -237,6 +325,7 @@ def evaluate_config_on_dataset(
     trial: Optional["optuna.trial.Trial"] = None,
     min_questions_before_report: int = 0,
     interval_questions: int = 1,
+    chatbot_config_path: Optional[str] = None,
 ) -> Tuple[List[float], Dict[str, float], float]:
     """Run a hyperparameter configuration over the whole dataset.
 
@@ -277,7 +366,8 @@ def evaluate_config_on_dataset(
             for chunk_start in range(0, n, workers):
                 chunk = list(enumerate(dataset[chunk_start:chunk_start + workers], start=chunk_start + 1))
                 futures = {
-                    executor.submit(_run_question, q_id, example, mode, config, chatbot_timeout): q_id
+                    executor.submit(_run_question, q_id, example, mode, config, chatbot_timeout,
+                                     chatbot_config_path): q_id
                     for q_id, example in chunk
                 }
                 for future in as_completed(futures):
@@ -287,7 +377,8 @@ def evaluate_config_on_dataset(
                 _maybe_report(completed)
     else:
         for q_id, example in enumerate(dataset, 1):
-            _, metric_scores, q_avg, req_time = _run_question(q_id, example, mode, config, chatbot_timeout)
+            _, metric_scores, q_avg, req_time = _run_question(q_id, example, mode, config, chatbot_timeout,
+                                                                chatbot_config_path)
             _record(q_id, metric_scores, q_avg, req_time)
             completed += 1
             _maybe_report(completed)
@@ -302,16 +393,31 @@ def objective(
     config_data: Dict[str, Any],
     dataset: List[Dict[str, Any]],
 ) -> float:
-    mode, params = _suggest_trial_config(trial, config_data["search_space"], config_data.get("fixed_params", {}))
+    mode, params, extraction_overrides = _suggest_trial_config(
+        trial, config_data["search_space"], config_data.get("fixed_params", {})
+    )
 
     pruning_cfg = config_data.get("pruning", {})
     pruning_enabled = pruning_cfg.get("enabled", True)
     workers = config_data.get("workers", 1)
     chatbot_timeout = config_data.get("chatbot_timeout_seconds")
 
-    print(f"\n[Trial {trial.number}] starting: mode={mode} params={params}")
+    print(f"\n[Trial {trial.number}] starting: mode={mode} params={params}"
+          + (f" extraction={extraction_overrides}" if extraction_overrides is not None else ""))
     start = time.perf_counter()
     try:
+        chatbot_config_path = None
+        if extraction_overrides is not None:
+            # Cost note: unlike pruning below, there is no early-exit here — a trial
+            # that's the first to sample a never-before-built extraction combo pays
+            # the full rebuild cost (minutes) regardless of how the trial eventually
+            # scores. Subsequent trials sampling the SAME combo reuse the cache.
+            build_start = time.perf_counter()
+            chatbot_config_path = extraction_cache.get_or_build(
+                extraction_overrides, timeout_seconds=config_data.get("extraction_timeout_seconds")
+            )
+            trial.set_user_attr("extraction_build_seconds", time.perf_counter() - build_start)
+
         _, per_metric_avg, avg_request_time = evaluate_config_on_dataset(
             params,
             dataset,
@@ -321,6 +427,7 @@ def objective(
             trial=trial if pruning_enabled else None,
             min_questions_before_report=pruning_cfg.get("min_questions_before_pruning", 20),
             interval_questions=pruning_cfg.get("interval_questions", 5),
+            chatbot_config_path=chatbot_config_path,
         )
     finally:
         # Recorded even on optuna.TrialPruned (raised from inside the call above)
@@ -328,6 +435,8 @@ def objective(
         trial.set_user_attr("elapsed_seconds", time.perf_counter() - start)
     overall = sum(per_metric_avg.values()) / len(per_metric_avg)
     trial.set_user_attr("mode", mode)
+    if extraction_overrides is not None:
+        trial.set_user_attr("extraction_overrides", extraction_overrides)
     trial.set_user_attr("per_metric_avg", per_metric_avg)
     trial.set_user_attr("avg_request_time", avg_request_time)
     trial.set_user_attr("n_questions", len(dataset))
@@ -355,12 +464,12 @@ def _make_trial_callback(config_data: Dict[str, Any]):
     def _callback(study: "optuna.Study", trial: "optuna.trial.FrozenTrial") -> None:
         elapsed = _format_duration(trial.user_attrs.get("elapsed_seconds"))
         if trial.state == optuna.trial.TrialState.COMPLETE:
-            mode, params = _params_from_trial(trial, config_data)
+            mode, params, _ = _params_from_trial(trial, config_data)
             is_best = study.best_trial.number == trial.number
             marker = " *NEW BEST*" if is_best else ""
             print(f"[Trial {trial.number}] COMPLETE in {elapsed} value={trial.value:.3f}{marker} mode={mode} params={params}")
         elif trial.state == optuna.trial.TrialState.PRUNED:
-            mode, params = _params_from_trial(trial, config_data)
+            mode, params, _ = _params_from_trial(trial, config_data)
             last_step = max(trial.intermediate_values) if trial.intermediate_values else None
             partial = trial.intermediate_values.get(last_step, float("nan")) if last_step is not None else float("nan")
             print(
@@ -387,15 +496,28 @@ def run_final_validation(
 
     validated = []
     for rank, t in enumerate(top_trials, 1):
-        mode, params = _params_from_trial(t, config_data)
-        print(f"\nValidating candidate {rank}/{len(top_trials)} (trial {t.number}, search value={t.value:.3f}): mode={mode} params={params}")
+        mode, params, extraction_overrides = _params_from_trial(t, config_data)
+        print(f"\nValidating candidate {rank}/{len(top_trials)} (trial {t.number}, search value={t.value:.3f}): "
+              f"mode={mode} params={params}"
+              + (f" extraction={extraction_overrides}" if extraction_overrides is not None else ""))
+
+        chatbot_config_path = None
+        if extraction_overrides is not None:
+            # Cache hit in the common case (this exact combo was already built during
+            # the search that produced this trial) — only a real rebuild if a study's
+            # storage was reused without its extraction_cache/ (e.g. copied elsewhere).
+            chatbot_config_path = extraction_cache.get_or_build(
+                extraction_overrides, timeout_seconds=config_data.get("extraction_timeout_seconds")
+            )
 
         run_values = []
         per_metric_runs = []
         for r in range(repeats):
             print(f"  Repeat {r + 1}/{repeats}...")
             repeat_start = time.perf_counter()
-            _, per_metric_avg, _ = evaluate_config_on_dataset(params, dataset, mode, chatbot_timeout, workers)
+            _, per_metric_avg, _ = evaluate_config_on_dataset(
+                params, dataset, mode, chatbot_timeout, workers, chatbot_config_path=chatbot_config_path
+            )
             overall = sum(per_metric_avg.values()) / len(per_metric_avg)
             run_values.append(overall)
             per_metric_runs.append(per_metric_avg)
@@ -407,6 +529,7 @@ def run_final_validation(
             "trial_number": t.number,
             "mode": mode,
             "params": params,
+            "extraction_overrides": extraction_overrides,
             "search_value": t.value,
             "validation_runs": run_values,
             "validation_mean": mean_v,
@@ -522,13 +645,29 @@ def run_optimizer(config_data: Dict[str, Any]) -> Dict[str, Any]:
     print(f"{'=' * 80}")
     print(f"Workers per trial: {workers_cfg}")
     search_space = config_data["search_space"]
-    fixed_params_by_mode = config_data.get("fixed_params", {})
+    fixed_params_by_key = config_data.get("fixed_params", {})
     print(f"Modes considered: {search_space['mode']['choices']} (mode itself is optimized)")
     print(f"Questions per trial: {len(dataset)}")
     for m in search_space["mode"]["choices"]:
         print(f"  [{m}] search space: {json.dumps(search_space[m])}")
-        if fixed_params_by_mode.get(m):
-            print(f"  [{m}] fixed params: {fixed_params_by_mode[m]}")
+        if fixed_params_by_key.get(m):
+            print(f"  [{m}] fixed params: {fixed_params_by_key[m]}")
+    if "model" in search_space:
+        print(f"  [model, every trial] search space: {json.dumps(search_space['model'])}")
+        if fixed_params_by_key.get("model"):
+            print(f"  [model, every trial] fixed params: {fixed_params_by_key['model']}")
+    if "extraction" in search_space:
+        print(f"  [extraction, every trial] search space: {json.dumps(search_space['extraction'])}")
+        if fixed_params_by_key.get("extraction"):
+            print(f"  [extraction, every trial] fixed params: {fixed_params_by_key['extraction']}")
+        n_warmup_trials = pruning_cfg.get("n_warmup_trials", 5) if pruning_cfg.get("enabled", True) else 0
+        print(
+            f"WARNING: extraction hyperparameters are being searched. Unlike other params, a new "
+            f"combination costs a full corpus re-extraction (minutes) with no early-exit, cached "
+            f"afterwards under {extraction_cache.CACHE_ROOT}/ (~hundreds of MB each). TPE's random "
+            f"startup phase (~{n_warmup_trials or 'several'} trials) can each land on a distinct "
+            "combination, so keep this sub-space small (2-3 values per dimension)."
+        )
     print(f"Sampler: TPE (seed={config_data.get('sampler_seed')})")
     print(f"Pruning: {'enabled' if pruning_cfg.get('enabled', True) else 'disabled'}")
     print(f"Study: {study_name} ({storage})")
@@ -572,10 +711,12 @@ def run_optimizer(config_data: Dict[str, Any]) -> Dict[str, Any]:
     print("SEARCH COMPLETE")
     print(f"{'=' * 80}")
     if best_trial is not None:
-        best_mode, best_params = _params_from_trial(best_trial, config_data)
+        best_mode, best_params, best_extraction = _params_from_trial(best_trial, config_data)
         print(f"Best trial: #{best_trial.number} value={best_trial.value:.3f}")
         print(f"Mode: {best_mode}")
         print(f"Params: {best_params}")
+        if best_extraction is not None:
+            print(f"Extraction: {best_extraction}")
     else:
         print("No trial completed successfully.")
 
@@ -594,10 +735,11 @@ def run_optimizer(config_data: Dict[str, Any]) -> Dict[str, Any]:
         print("VALIDATED RANKING")
         print(f"{'=' * 80}")
         for rank, r in enumerate(validation_results, 1):
+            extraction_suffix = f" extraction={r['extraction_overrides']}" if r.get("extraction_overrides") is not None else ""
             print(
                 f"{rank}. trial #{r['trial_number']} [{r['mode']}]: "
                 f"{r['validation_mean']:.3f} +/- {r['validation_std']:.3f} "
-                f"(search value was {r['search_value']:.3f}) params={r['params']}"
+                f"(search value was {r['search_value']:.3f}) params={r['params']}{extraction_suffix}"
             )
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -625,9 +767,15 @@ def run_optimizer(config_data: Dict[str, Any]) -> Dict[str, Any]:
     print(f"{'=' * 80}")
     if validation_results:
         best = validation_results[0]
-        print(json.dumps({"mode": best["mode"], "params": best["params"]}, indent=2, ensure_ascii=False))
+        recommended = {"mode": best["mode"], "params": best["params"]}
+        if best.get("extraction_overrides") is not None:
+            recommended["extraction"] = best["extraction_overrides"]
+        print(json.dumps(recommended, indent=2, ensure_ascii=False))
     elif best_trial is not None:
-        print(json.dumps({"mode": best_mode, "params": best_params}, indent=2, ensure_ascii=False))
+        recommended = {"mode": best_mode, "params": best_params}
+        if best_extraction is not None:
+            recommended["extraction"] = best_extraction
+        print(json.dumps(recommended, indent=2, ensure_ascii=False))
     else:
         print("No trial completed — nothing to recommend.")
 
@@ -651,6 +799,9 @@ def main() -> None:
                               "-1 for all CPUs (overrides config)")
     parser.add_argument("--chatbot-timeout", type=int, default=None,
                          help="Timeout in seconds for each chatbot request (overrides config)")
+    parser.add_argument("--extraction-timeout", type=int, default=None,
+                         help="Timeout in seconds for building an extraction variant, "
+                              "default no limit (overrides config)")
     parser.add_argument("--study-name", type=str, default=None,
                          help="Optuna study name (overrides config)")
     parser.add_argument("--storage", type=str, default=None,
@@ -674,6 +825,8 @@ def main() -> None:
         config_data["workers"] = args.workers
     if args.chatbot_timeout is not None:
         config_data["chatbot_timeout_seconds"] = args.chatbot_timeout
+    if args.extraction_timeout is not None:
+        config_data["extraction_timeout_seconds"] = args.extraction_timeout
     if args.study_name is not None:
         config_data["study_name"] = args.study_name
     if args.storage is not None:

@@ -4,29 +4,46 @@
     "_comment_mode": "'mode' is itself an optimized hyperparameter: each trial samples whether to run 'rag' or 'agentic', then only that mode's sub-space below is sampled. Restrict choices to a single mode (e.g. [\"rag\"]) to optimize just that mode instead.",
 
     "rag": {
-      "k": {"type": "int", "low": 3, "high": 15},
+      "k_standard": {"type": "int", "low": 20, "high": 60},
+      "k_deep_dive": {"type": "int", "low": 30, "high": 90},
       "top_n": {"type": "int", "low": 3, "high": 20},
       "temperature": {"type": "float", "low": 0.0, "high": 1.0},
+      "max_tokens": {"type": "int", "low": 500, "high": 4000},
       "reranker_enabled": {"type": "bool"},
+      "reranker_model": {"type": "categorical", "choices": ["BAAI/bge-reranker-v2-m3"]},
       "deep_dive": {"type": "bool"},
       "hyde_enabled": {"type": "bool"},
       "bm25_enabled": {"type": "bool"},
-      "title_boost_enabled": {"type": "bool"}
+      "title_boost_enabled": {"type": "bool"},
+      "k_retrieve": {"type": "int", "low": 20, "high": 100},
+      "deep_dive_batch_size": {"type": "int", "low": 5, "high": 20},
+      "expansion_char_budget": {"type": "int", "low": 10000, "high": 100000}
     },
+    "_comment_rag": "Full list of rag fields: k_standard, k_deep_dive, top_n, temperature, max_tokens, reranker_enabled, reranker_model, deep_dive, hyde_enabled, bm25_enabled, title_boost_enabled, k_retrieve, deep_dive_batch_size, expansion_char_budget. k_standard/k_deep_dive replace the single 'k' CLI override (chatbot.py --k still exists for a flat override, but isn't used here since only ONE of k_standard/k_deep_dive actually applies per trial anyway, picked by that trial's own deep_dive value — see chatbot/core/rag_chatbot.py). k_retrieve is ignored in deep dive mode; deep_dive_batch_size only applies when deep_dive is true — both are harmless, just inert, on trials where they don't apply (TPE learns this on its own). reranker_model only has an effect when reranker_enabled is true.",
+
     "agentic": {
       "temperature": {"type": "float", "low": 0.0, "high": 1.0},
-      "max_pages_per_round": {"type": "int", "low": 2, "high": 8},
-      "max_pages_round2": {"type": "int", "low": 1, "high": 5},
+      "max_tokens": {"type": "int", "low": 500, "high": 4000},
+      "max_steps": {"type": "int", "low": 2, "high": 10},
       "max_chars_per_page": {"type": "int", "low": 2000, "high": 12000}
-    }
+    },
+    "_comment_agentic": "Full list of agentic fields: temperature, max_tokens, max_steps (the CodeAgent step budget), max_chars_per_page.",
+
+    "model": {
+      "model": {"type": "categorical", "choices": ["mistralai-small"]}
+    },
+    "_comment_model": "Optional, flat sub-space (sampled every trial regardless of mode — the answering LLM applies either way). Full fields: model, base_url, api_key. Only 'model' is shown here: base_url/api_key pick an entirely different provider/endpoint, and since they're sampled independently a naive search could pair a model name with the wrong endpoint's api_key. If you want to compare providers, either add base_url/api_key here too and keep 'model' consistent with each (e.g. one categorical value per (base_url, api_key, model) trio isn't directly expressible — safer to run separate studies per provider), or just pin base_url/api_key via fixed_params.model and only search 'model' (multiple model names on the SAME endpoint, the common case). Remove this whole 'model' key from search_space to skip it entirely and always use chatbot/config.json's llm block.",
+
+    "_comment_extraction": "Optional, flat sub-space (sampled every trial regardless of mode), shipped ABSENT here on purpose — unlike everything else in this file, get_or_build() has no way to know a value 'already matches' your current extraction/config.json build, so even a single-value combination forces one real corpus re-extraction (minutes, no early-exit) before the first trial can even start. See extraction_timeout_seconds below and the 'Extraction parameters' section of README.md before adding this back. To enable, add: \"extraction\": {\"chunking.char_chunk_size\": {\"type\": \"int\", \"low\": 700, \"high\": 1300}, \"embedding.model\": {\"type\": \"categorical\", \"choices\": [\"all-MiniLM-L6-v2\"]}}. Full fields: use_token_chunking, chunking.max_tokens, chunking.overlap_tokens, chunking.char_chunk_size, chunking.char_overlap, quality.min_score, quality.min_word_count, quality.substantial_word_count, embedding.model, embedding.type, embedding.base_url, embedding.api_key. Keep each field to 2-3 values once enabled."
   },
-  "_comment_search_space": "One sub-space per mode; only the one matching a trial's sampled mode is used for that trial. Same per-parameter spec syntax either way: 'int'/'float' need 'low'/'high' (float accepts an optional 'log': true for log-scale sampling); 'bool' needs nothing else.",
 
   "fixed_params": {
     "rag": {},
-    "agentic": {}
+    "agentic": {},
+    "model": {},
+    "extraction": {}
   },
-  "_comment_fixed_params": "Per-mode hyperparameters passed to every trial of that mode but never sampled (e.g. pin top_n while optimizing everything else in rag). Must not overlap with that mode's search_space keys.",
+  "_comment_fixed_params": "Per-key (mode name, 'model', or 'extraction') hyperparameters passed to every trial but never sampled — e.g. fixed_params.model = {\"base_url\": \"...\", \"api_key\": \"...\"} to pin the endpoint while search_space.model only searches 'model' names on it. Must not overlap with the matching search_space entry.",
 
   "n_trials": 30,
   "_comment_n_trials": "Number of configurations Optuna will try. With Bayesian optimization (TPE), 30-50 trials is usually enough to clearly beat random/grid search on a search space this size.",
@@ -38,11 +55,16 @@
   "_comment_questions_limit": "Cap the number of dataset questions evaluated per trial. Useful to dry-run/debug the optimizer itself quickly; set to null to use the full 94-question dataset for real runs.",
 
   "chatbot_timeout_seconds": null,
+  "_comment_chatbot_timeout_seconds": "Timeout in seconds for a single chatbot.py question call. null = no limit.",
+
+  "extraction_timeout_seconds": null,
+  "_comment_extraction_timeout_seconds": "Timeout in seconds for building ONE extraction variant (search_space.extraction). null = no limit — a real corpus re-extraction can legitimately take several minutes, so only set this if you want a hard ceiling.",
+
   "workers": 1,
   "_comment_workers": "Threads used to evaluate questions of a SINGLE trial in parallel (same idea as benchmark.py --workers; -1 uses all CPUs). Each unit here is a full chatbot.py subprocess that reloads its own models from scratch (the RAG reranker alone is ~2-4GB of RAM) -- unlike a lightweight thread, so a high value can exhaust RAM and make the run appear to hang (or get OOM-killed) rather than actually deadlocking. Keep this modest (2-4) unless you've confirmed the machine has enough RAM for that many concurrent model loads, and keep it at 1 if the LLM endpoint enforces rate limits. Multiplies with n_jobs below (n_jobs x workers concurrent chatbot calls at once), so raise them one at a time.",
 
   "n_jobs": 1,
-  "_comment_n_jobs": "Number of trials Optuna runs concurrently. Keep at 1 unless your LLM/chatbot backend can comfortably absorb several simultaneous full dataset evaluations at once.",
+  "_comment_n_jobs": "Number of trials Optuna runs concurrently. Keep at 1 unless your LLM/chatbot backend can comfortably absorb several simultaneous full dataset evaluations at once — this also multiplies concurrent extraction builds if two trials sample different never-before-seen extraction combos at once (safe: each combo is serialized by its own lock — see evaluator/base/extraction_cache.py — but that many parallel multi-minute builds add up).",
 
   "sampler_seed": 42,
   "dataset_shuffle_seed": 42,
@@ -59,7 +81,7 @@
     "min_questions_before_pruning": 20,
     "interval_questions": 5
   },
-  "_comment_pruning": "A trial only becomes eligible for pruning after n_warmup_trials other trials have fully completed (so the pruner has something to compare against) AND after min_questions_before_pruning questions have been evaluated within that trial itself (so one unlucky early question can't kill an otherwise good config). From then on it is re-checked every interval_questions questions, and pruned only if its running average score falls below the given percentile of other trials at the same step — trials of both modes are compared together, which is exactly what lets a bad rag config lose out to a good agentic one (or vice versa). Set enabled to false to always run every trial through the full dataset.",
+  "_comment_pruning": "A trial only becomes eligible for pruning after n_warmup_trials other trials have fully completed (so the pruner has something to compare against) AND after min_questions_before_pruning questions have been evaluated within that trial itself (so one unlucky early question can't kill an otherwise good config). From then on it is re-checked every interval_questions questions, and pruned only if its running average score falls below the given percentile of other trials at the same step — trials of both modes are compared together, which is exactly what lets a bad rag config lose out to a good agentic one (or vice versa). Set enabled to false to always run every trial through the full dataset. Note: pruning can only cut short the per-question evaluation loop — it cannot help during an extraction build (search_space.extraction), which has no early-exit.",
 
   "final_validation": {
     "enabled": true,

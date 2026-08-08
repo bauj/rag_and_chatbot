@@ -45,6 +45,9 @@ LLM_API_KEY = os.getenv("MISTRAL_API_KEY", llm_config.get("api_key"))
 SSL_CERTIF = os.getenv("SSL_CERTIF", llm_config.get("ssl_cert_file"))
 
 CHATBOT_DIR = os.getenv("CHATBOT_DIR", evaluator_config.get("chatbot_path"))
+# Only needed by evaluator/base/extraction_cache.py (optimizer/benchmark's extraction
+# hyperparameters); falls back to the same relative depth as chatbot_path's default.
+EXTRACTION_DIR = os.getenv("EXTRACTION_DIR", evaluator_config.get("extraction_path", "../../extraction"))
 
 def _validate_config() -> None:
     """Fail fast with an actionable message if required config is missing,
@@ -285,25 +288,49 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
         pass  # already exited on its own
 
 def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
-                   config: Optional[Dict[str, Any]] = None) -> dict:
+                   config: Optional[Dict[str, Any]] = None,
+                   chatbot_config_path: Optional[str] = None) -> dict:
     """Call chatbot.py and return parsed answer/documents.
 
     `config` carries hyperparameter overrides and is translated into the
     matching chatbot.py CLI flags:
-    - rag mode: k, temperature, reranker_enabled, top_n, deep_dive,
-      hyde_enabled, bm25_enabled, title_boost_enabled
-    - agentic mode: temperature, max_steps, max_chars_per_page
+    - both modes: temperature, max_tokens, model, base_url, api_key
+    - rag mode: k, k_standard, k_deep_dive, reranker_enabled, top_n, deep_dive,
+      hyde_enabled, bm25_enabled, title_boost_enabled, k_retrieve,
+      deep_dive_batch_size, expansion_char_budget, reranker_model
+    - agentic mode: max_steps, max_chars_per_page
+
+    `chatbot_config_path`, if given, is passed as chatbot.py's --config — used
+    to point at an extraction-parameter variant's own chatbot config (matching
+    chromadb_path/embedding model), see evaluator/base/extraction_cache.py.
+    Hyperparameter flags above still layer on top of it normally.
     """
     start_time = time.perf_counter()
     cmd = [sys.executable, "chatbot.py", "--question", question, "--json-output"]
+    if chatbot_config_path:
+        cmd.extend(["--config", chatbot_config_path])
     if mode:
         cmd.extend(["--mode", mode])
 
     if config:
         if config.get("k") is not None:
             cmd.extend(["--k", str(config["k"])])
+        if config.get("k_standard") is not None:
+            cmd.extend(["--k-standard", str(config["k_standard"])])
+        if config.get("k_deep_dive") is not None:
+            cmd.extend(["--k-deep-dive", str(config["k_deep_dive"])])
         if config.get("temperature") is not None:
             cmd.extend(["--temperature", str(config["temperature"])])
+        if config.get("max_tokens") is not None:
+            cmd.extend(["--max-tokens", str(config["max_tokens"])])
+        if config.get("model") is not None:
+            cmd.extend(["--model", str(config["model"])])
+        if config.get("base_url") is not None:
+            cmd.extend(["--base-url", str(config["base_url"])])
+        if config.get("api_key") is not None:
+            cmd.extend(["--api-key", str(config["api_key"])])
+        if config.get("reranker_model") is not None:
+            cmd.extend(["--reranker-model", str(config["reranker_model"])])
         if config.get("top_n") is not None:
             cmd.extend(["--top-n", str(config["top_n"])])
         if config.get("reranker_enabled") is False:
@@ -316,6 +343,12 @@ def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
             cmd.append("--no-bm25")
         if config.get("title_boost_enabled") is False:
             cmd.append("--no-title-boost")
+        if config.get("k_retrieve") is not None:
+            cmd.extend(["--k-retrieve", str(config["k_retrieve"])])
+        if config.get("deep_dive_batch_size") is not None:
+            cmd.extend(["--deep-dive-batch-size", str(config["deep_dive_batch_size"])])
+        if config.get("expansion_char_budget") is not None:
+            cmd.extend(["--expansion-char-budget", str(config["expansion_char_budget"])])
         if config.get("max_steps") is not None:
             cmd.extend(["--max-steps", str(config["max_steps"])])
         if config.get("max_chars_per_page") is not None:

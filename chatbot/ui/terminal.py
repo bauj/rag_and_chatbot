@@ -392,11 +392,15 @@ class TerminalUI:
                            deep_dive: bool = False,
                            k: Optional[int] = None,
                            temperature: Optional[float] = None,
+                           max_tokens: Optional[int] = None,
                            reranker_enabled: bool = True,
                            top_n: Optional[int] = None,
                            hyde_enabled: Optional[bool] = None,
                            bm25_enabled: Optional[bool] = None,
-                           title_boost_enabled: Optional[bool] = None):
+                           title_boost_enabled: Optional[bool] = None,
+                           k_retrieve: Optional[int] = None,
+                           deep_dive_batch_size: Optional[int] = None,
+                           expansion_char_budget: Optional[int] = None):
         """
         Run single question and exit
 
@@ -407,19 +411,25 @@ class TerminalUI:
             deep_dive: Use deep dive mode
             k: Override number of chunks to retrieve
             temperature: Override LLM temperature
+            max_tokens: Override LLM max_tokens
             reranker_enabled: Whether to apply reranking
             top_n: Override number of docs kept after reranking
             hyde_enabled: Runtime toggle for HyDE (None = whatever was configured)
             bm25_enabled: Runtime toggle for BM25 hybrid retrieval (None = whatever was configured)
             title_boost_enabled: Runtime toggle for the title/identifier RRF channel
                 (None = whatever was configured)
+            k_retrieve: Override per-channel retrieval depth before RRF fusion
+            deep_dive_batch_size: Override deep dive's summarization batch size
+            expansion_char_budget: Override the shared char budget for section expansion
         """
         print(f"Question: {question}\n")
         result = self.chatbot.ask(
             question, module, doc_type, deep_dive,
-            k=k, temperature=temperature,
+            k=k, temperature=temperature, max_tokens=max_tokens,
             reranker_enabled=reranker_enabled, top_n=top_n,
             hyde_enabled=hyde_enabled, bm25_enabled=bm25_enabled,
             title_boost_enabled=title_boost_enabled,
+            k_retrieve=k_retrieve, deep_dive_batch_size=deep_dive_batch_size,
+            expansion_char_budget=expansion_char_budget,
         )
         self._print_answer(result)

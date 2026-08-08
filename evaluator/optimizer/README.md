@@ -22,11 +22,34 @@ Edit `optimizer_config.json`:
 
 - `search_space.mode.choices`: which chatbot mode(s) to consider — `["rag", "agentic"]` to let the optimizer pick whichever mode scores higher, or a single-element list (e.g. `["rag"]`) to pin one mode.
 
-- `search_space.rag` / `search_space.agentic`: the hyperparameters to optimize for each mode and their range (`int`/`float` need `low`/`high`; `bool` needs nothing else). `rag` has booleans + `k`/`top_n` ints + `temperature` float; `agentic` has ints + `temperature` float only, no booleans. Only the sub-space matching a trial's sampled mode is ever used by that trial.
+- `search_space.rag` / `search_space.agentic`: the hyperparameters to optimize for each mode and their range (`int`/`float` need `low`/`high`; `bool` needs nothing else; `categorical` needs a `choices` list, e.g. for model names). Only the sub-space matching a trial's sampled mode is ever used by that trial.
+  - `rag`: `k_standard`, `k_deep_dive`, `top_n`, `temperature`, `max_tokens`, `reranker_enabled`, `reranker_model`, `deep_dive`, `hyde_enabled`, `bm25_enabled`, `title_boost_enabled`, `k_retrieve`, `deep_dive_batch_size`, `expansion_char_budget`. `k_standard`/`k_deep_dive` are the RAG pool size, used depending on that trial's own `deep_dive` value (`chatbot.py --k` also exists as a flat override of whichever applies, but isn't needed here since only one of the two ever takes effect per trial anyway). `k_retrieve` (per-channel retrieval depth before RRF fusion) is ignored in deep dive mode; `deep_dive_batch_size` only applies when `deep_dive` is true; `reranker_model` only has an effect when `reranker_enabled` is true.
+  - `agentic`: `temperature`, `max_tokens`, `max_steps` (CodeAgent step budget), `max_chars_per_page`.
+  - This mirrors exactly what `chatbot.py`'s CLI flags support — see `chatbot.py --help` for the authoritative list if `chatbot/core/config.py` changes again.
+
+- `search_space.model` (optional): LLM choice, sampled on **every** trial regardless of mode — `model`, `base_url`, `api_key`. See [Model choice](#model-choice) below before searching over `base_url`/`api_key`.
+
+- `search_space.extraction` (optional): corpus/embedding pipeline choice, also sampled on every trial regardless of mode. See [Extraction parameters](#extraction-parameters) below — this one is expensive, read it before enabling.
 
 - `n_trials`, `pruning`, `final_validation`: see the inline `_comment_*` keys in `optimizer_config.example.json` for what each knob does.
 
 The evaluator's own config (`evaluator/base/config.json` — LLM endpoint, chatbot path) is reused as-is; there's nothing optimizer-specific to set up there.
+
+### Model choice
+
+`search_space.model` is a flat sub-space (like `search_space.extraction`), sampled once per trial independent of `mode` — the answering LLM applies whether that trial ends up rag or agentic. `model` (the LLM name) is the common case: comparing several model names available on the same endpoint. `base_url`/`api_key` pick an entirely different provider; since every field in a sub-space is sampled independently, mixing multiple `(base_url, api_key)` values with multiple `model` values can pair a model name with the wrong endpoint's key. If you want to compare providers, either keep `base_url`/`api_key` to one value each (pin them via `fixed_params.model` while only `model` varies), or run separate studies per provider.
+
+`reranker_model` (which cross-encoder re-ranks candidates) lives in `search_space.rag` instead, not here — it's rag-only and only takes effect when `reranker_enabled` is true.
+
+### Extraction parameters
+
+`search_space.extraction` sweeps the parameters of `extraction/process_docs.py` — chunking strategy, quality filtering, embedding model — the pipeline that builds the ChromaDB (rag) and `page_index.json` (agentic) the chatbot actually reads from. This is fundamentally more expensive than every other parameter here: changing the chatbot's `k` or `temperature` is a different CLI flag on the next subprocess call (seconds); changing the corpus's chunk size means re-running extraction over the whole corpus (minutes, no early-exit) before a single question can be asked.
+
+To keep this tractable, `evaluator/base/extraction_cache.py` builds each distinct combination **at most once**: a trial resolves its sampled extraction params to a hash key, checks `evaluator/extraction_cache/<hash>_extracted/` for an existing build, and only invokes `process_docs.py` on a cache miss — a per-key file lock (`fcntl.flock`) serializes concurrent trials (`n_jobs > 1`) that land on the same never-before-seen combination instead of racing to build it twice. Once built, a matching chatbot config is generated alongside it (same `chromadb_path`/`embedding.model` as what was just built — a mismatch here silently returns wrong retrieval results, see `chatbot/config.json`'s own comment on this) and passed to every chatbot call in that trial via `--config`.
+
+What this buys you: repeated trials that land on the same combination (common as TPE converges on a promising region) are essentially free after the first. What it doesn't buy you: there is still no early-exit from the build itself — pruning can only cut short the *per-question* evaluation loop that follows, not the extraction run. Optuna's TPE sampler also spends its first several trials (`n_startup_trials`, default ~10) sampling randomly before it has enough data to be smart, so a wide `search_space.extraction` can mean that many distinct — expensive — combinations get built in the opening trials alone. Keep each field to 2-3 values.
+
+Fields: `use_token_chunking`, `chunking.max_tokens`, `chunking.overlap_tokens`, `chunking.char_chunk_size`, `chunking.char_overlap`, `quality.min_score`, `quality.min_word_count`, `quality.substantial_word_count`, `embedding.model`, `embedding.type`, `embedding.base_url`, `embedding.api_key` (dotted keys map to `extraction/config.json`'s nested blocks). `embedding.model`/`embedding.type` here are what determines the matching chatbot-side embedding config — don't also put `embedding.model` in a raw chatbot override elsewhere, extraction is the only place it's safe to vary. Leave `extraction_timeout_seconds` (top-level config key, or `--extraction-timeout`) at `null` unless you want a hard ceiling on one build.
 
 ### Concurrency and memory
 
@@ -81,7 +104,7 @@ python optimizer.py --n-trials 2 --limit 3 --no-validation
 python optimizer.py --n-trials 20
 ```
 
-Key flags (all mirror a `optimizer_config.json` key and override it): `--n-trials`, `--timeout`, `--limit`, `--workers`, `--chatbot-timeout`, `--study-name`, `--storage`, `--no-pruning`, `--no-validation`, `--config <path>`.
+Key flags (all mirror a `optimizer_config.json` key and override it): `--n-trials`, `--timeout`, `--limit`, `--workers`, `--chatbot-timeout`, `--extraction-timeout`, `--study-name`, `--storage`, `--no-pruning`, `--no-validation`, `--config <path>`.
 
 ## How a trial is scored
 
@@ -104,7 +127,8 @@ Each run writes `optimizer_results/optimizer_YYYYMMDD_HHMMSS.json`:
     {
       "trial_number": 12,
       "mode": "rag",
-      "params": { "k": 7, "temperature": 0.4, ... },
+      "params": { "k_standard": 45, "temperature": 0.4, ... },
+      "extraction_overrides": { "chunking.char_chunk_size": 900 },
       "search_value": 7.8,
       "validation_runs": [7.6, 7.9, 7.7],
       "validation_mean": 7.73,
@@ -114,7 +138,7 @@ Each run writes `optimizer_results/optimizer_YYYYMMDD_HHMMSS.json`:
 }
 ```
 
-`trials[].params` holds Optuna's raw, per-branch-prefixed keys (`"mode"` plus `"<mode>__<name>"` for each sampled hyperparameter) — that's what makes a `temperature` sampled under `rag` a genuinely distinct parameter from one sampled under `agentic`. `final_validation[].params` is the de-prefixed, ready-to-use hyperparameter dict for that candidate's mode.
+`trials[].params` holds Optuna's raw, per-branch-prefixed keys (`"mode"` plus `"<mode>__<name>"`/`"model__<name>"`/`"extraction__<name>"` for each sampled parameter) — that's what makes a `temperature` sampled under `rag` a genuinely distinct parameter from one sampled under `agentic`. `final_validation[].params` is the de-prefixed, ready-to-use hyperparameter dict for that candidate's mode (`rag`/`agentic` params merged with any `model` ones); `extraction_overrides` is `null` unless `search_space.extraction` was in play, in which case it's the dict passed to `extraction_cache.get_or_build()`.
 
 `final_validation` (when enabled) is sorted by `validation_mean` descending — its first entry is the recommended configuration, also printed at the end of the run.
 
