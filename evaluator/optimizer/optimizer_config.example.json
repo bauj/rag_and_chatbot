@@ -88,5 +88,10 @@
     "top_k": 3,
     "repeats": 3
   },
-  "_comment_final_validation": "Each metric score is stochastic (LLM-graded), so the single best-value trial found during the search could just be lucky. After optimization, the top_k trials (ranked by Optuna's value, regardless of which mode they used) are each re-evaluated on the FULL dataset 'repeats' more times (no pruning) to report a mean +/- standard deviation per candidate and pick a genuinely robust winner rather than a noisy outlier."
+  "_comment_final_validation": "Each metric score is stochastic (LLM-graded), so the single best-value trial found during the search could just be lucky. After optimization, the top_k trials (ranked by Optuna's value, regardless of which mode they used) are each re-evaluated on the FULL dataset 'repeats' more times (no pruning) to report a mean +/- standard deviation per candidate and pick a genuinely robust winner rather than a noisy outlier.",
+
+  "plots": {
+    "enabled": true
+  },
+  "_comment_plots": "Saves 3 PNGs to graphs/<study_name>/ after the search (requires matplotlib, already a project dependency): 01_optimization_history (objective value per trial, green=accepted/red=refused, plus the running best-so-far curve), 02_param_importances (which parameters actually moved the score, via Optuna's fANOVA evaluator — needs at least 2 completed trials), 03_param_evolution (one small subplot per sampled parameter, value vs trial number, same green/red coloring — useful to see whether the search is converging on a region for a given knob or still spread out). Set enabled to false (or --no-plots) to skip."
 }

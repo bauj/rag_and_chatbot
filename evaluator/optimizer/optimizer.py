@@ -42,14 +42,29 @@ except ImportError as exc:
         "project's virtual environment."
     ) from exc
 
+try:
+    import matplotlib
+    matplotlib.use("Agg")  # headless: this script never opens an interactive window
+    import matplotlib.pyplot as plt
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
 # TPESampler(multivariate=True, group=True) below is a deliberate, informed choice
 # (it's Optuna's documented pattern for a conditional/branching search space — see
 # _suggest_trial_config) rather than an accidental one, so silence just these two
 # known ExperimentalWarnings instead of leaving them to clutter every run's output.
+# optuna.visualization.matplotlib's plot_* functions are similarly still marked
+# experimental despite being stable since Optuna 2.2 — same reasoning for silencing.
 warnings.filterwarnings(
     "ignore",
     category=optuna.exceptions.ExperimentalWarning,
     message=r"Argument ``(multivariate|group)``",
+)
+warnings.filterwarnings(
+    "ignore",
+    category=optuna.exceptions.ExperimentalWarning,
+    message=r".*plot_param_importances is experimental",
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -60,6 +75,11 @@ OPTIMIZER_CONFIG_EXAMPLE_FILE = SCRIPT_DIR / "optimizer_config.example.json"
 # where `python optimizer.py` is run from.
 RESULTS_DIR = SCRIPT_DIR / "optimizer_results"
 STUDIES_DIR = SCRIPT_DIR / "studies"
+GRAPHS_DIR = SCRIPT_DIR / "graphs"
+
+# Accepted (COMPLETE) vs refused (PRUNED/FAIL) — used consistently across every plot.
+_STATE_COLOR_ACCEPTED = "#2ca02c"
+_STATE_COLOR_REFUSED = "#d62728"
 
 _SUPPORTED_MODES = {"rag", "agentic"}
 _SUPPORTED_PARAM_TYPES = {"int", "float", "bool", "categorical"}
@@ -557,6 +577,155 @@ def _default_storage(study_name: str) -> str:
     return f"sqlite:///{STUDIES_DIR / study_name}.db"
 
 
+def _trial_color(state: "optuna.trial.TrialState") -> str:
+    """Green for an accepted (COMPLETE) trial, red for anything refused (PRUNED/FAIL)."""
+    return _STATE_COLOR_ACCEPTED if state == optuna.trial.TrialState.COMPLETE else _STATE_COLOR_REFUSED
+
+
+def _trial_display_value(t: "optuna.trial.FrozenTrial") -> Optional[float]:
+    """The value to plot for a trial: its final value if it completed, otherwise
+    its last reported running average before being pruned (None for FAIL, which
+    has neither)."""
+    if t.value is not None:
+        return t.value
+    if t.intermediate_values:
+        return t.intermediate_values[max(t.intermediate_values)]
+    return None
+
+
+def _plot_optimization_history(study: "optuna.Study", ax) -> None:
+    """Objective value per trial (green=accepted, red=refused) plus the running
+    best-so-far curve — the standard first plot for any hyperparameter search,
+    and directly answers 'is this still improving or has it plateaued'."""
+    trials = sorted(study.trials, key=lambda t: t.number)
+    best_so_far = []
+    best = None
+    any_point = False
+    for t in trials:
+        y = _trial_display_value(t)
+        if y is None:
+            continue
+        any_point = True
+        ax.scatter(t.number, y, color=_trial_color(t.state), s=28, zorder=3)
+        if t.state == optuna.trial.TrialState.COMPLETE:
+            best = y if best is None else max(best, y)
+        if best is not None:
+            best_so_far.append((t.number, best))
+
+    if best_so_far:
+        xs, ys = zip(*best_so_far)
+        ax.plot(xs, ys, color="#1f77b4", linewidth=2, zorder=2, label="best so far")
+
+    ax.set_xlabel("Trial")
+    ax.set_ylabel("Objective value")
+    ax.set_title("Optimization history")
+    if not any_point:
+        ax.text(0.5, 0.5, "No trial produced a value yet", ha="center", va="center", transform=ax.transAxes)
+        return
+
+    from matplotlib.lines import Line2D
+    handles = [
+        Line2D([0], [0], marker="o", color="none", markerfacecolor=_STATE_COLOR_ACCEPTED,
+               markersize=8, label="Accepted (complete)"),
+        Line2D([0], [0], marker="o", color="none", markerfacecolor=_STATE_COLOR_REFUSED,
+               markersize=8, label="Refused (pruned/failed)"),
+    ]
+    if best_so_far:
+        handles.append(Line2D([0], [0], color="#1f77b4", linewidth=2, label="Best so far"))
+    ax.legend(handles=handles, loc="best", fontsize=8)
+
+
+def _plot_param_evolution(study: "optuna.Study", path: Path) -> None:
+    """One small subplot per Optuna-level parameter (trial number vs sampled
+    value, green=accepted/red=refused), so a glance shows whether the sampler is
+    converging on a region for each knob or still spread out. Uses the raw
+    Optuna param names (e.g. 'rag__k_standard', 'extraction__embedding.model')
+    rather than de-prefixed ones — each is already an unambiguous decision
+    Optuna actually made, which is what this plot is about."""
+    trials = [t for t in study.trials if t.params]
+    if not trials:
+        return
+
+    param_names = sorted({k for t in trials for k in t.params})
+    if not param_names:
+        return
+
+    ncols = min(3, len(param_names))
+    nrows = -(-len(param_names) // ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3 * nrows), squeeze=False)
+    flat_axes = [ax for row in axes for ax in row]
+
+    for ax, name in zip(flat_axes, param_names):
+        xs, raw_vals, colors = [], [], []
+        for t in trials:
+            if name not in t.params:
+                continue
+            xs.append(t.number)
+            raw_vals.append(t.params[name])
+            colors.append(_trial_color(t.state))
+
+        if all(isinstance(v, bool) for v in raw_vals):
+            ys = [int(v) for v in raw_vals]
+            ax.set_yticks([0, 1])
+            ax.set_yticklabels(["False", "True"])
+        elif all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in raw_vals):
+            ys = raw_vals
+        else:
+            categories = sorted({v for v in raw_vals}, key=str)
+            codes = {c: i for i, c in enumerate(categories)}
+            ys = [codes[v] for v in raw_vals]
+            ax.set_yticks(list(codes.values()))
+            ax.set_yticklabels(list(codes.keys()))
+
+        ax.scatter(xs, ys, c=colors, s=22, zorder=3)
+        ax.set_title(name, fontsize=9)
+        ax.tick_params(labelsize=7)
+
+    for ax in flat_axes[len(param_names):]:
+        ax.axis("off")
+
+    fig.suptitle("Parameter evolution across trials (green = accepted, red = refused)", fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def generate_plots(study: "optuna.Study", output_dir: Path) -> Optional[Path]:
+    """Save the small set of plots that matter for a hyperparameter search:
+    optimization history, parameter importances, and per-parameter evolution.
+    No-op (with a message) if matplotlib isn't installed."""
+    if not HAS_MATPLOTLIB:
+        print("matplotlib not available -- skipping plots. Install with: pip install matplotlib")
+        return None
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    _plot_optimization_history(study, ax)
+    fig.tight_layout()
+    fig.savefig(output_dir / "01_optimization_history.png", dpi=150)
+    plt.close(fig)
+
+    completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    if len(completed) >= 2:
+        try:
+            imp_ax = optuna.visualization.matplotlib.plot_param_importances(study)
+            imp_ax.figure.tight_layout()
+            imp_ax.figure.savefig(output_dir / "02_param_importances.png", dpi=150)
+            plt.close(imp_ax.figure)
+        except (ValueError, RuntimeError) as e:
+            # e.g. every completed trial shares the exact same params (nothing to
+            # attribute importance to) -- not worth failing the whole run over.
+            print(f"Skipped parameter importance plot: {e}")
+    else:
+        print("Skipped parameter importance plot: needs at least 2 completed trials.")
+
+    _plot_param_evolution(study, output_dir / "03_param_evolution.png")
+
+    print(f"Plots saved to: {output_dir}/")
+    return output_dir
+
+
 def run_optimizer(config_data: Dict[str, Any]) -> Dict[str, Any]:
     _validate_config()
 
@@ -762,6 +931,9 @@ def run_optimizer(config_data: Dict[str, Any]) -> Dict[str, Any]:
 
     print(f"\nResults saved to: {results_file}")
 
+    if config_data.get("plots", {}).get("enabled", True):
+        generate_plots(study, GRAPHS_DIR / study_name)
+
     print(f"\n{'=' * 80}")
     print("RECOMMENDED CONFIGURATION")
     print(f"{'=' * 80}")
@@ -810,6 +982,8 @@ def main() -> None:
                          help="Disable pruning regardless of config")
     parser.add_argument("--no-validation", action="store_true",
                          help="Skip the final validation pass regardless of config")
+    parser.add_argument("--no-plots", action="store_true",
+                         help="Skip generating plots regardless of config")
 
     args = parser.parse_args()
 
@@ -835,6 +1009,8 @@ def main() -> None:
         config_data.setdefault("pruning", {})["enabled"] = False
     if args.no_validation:
         config_data.setdefault("final_validation", {})["enabled"] = False
+    if args.no_plots:
+        config_data.setdefault("plots", {})["enabled"] = False
 
     run_optimizer(config_data)
 

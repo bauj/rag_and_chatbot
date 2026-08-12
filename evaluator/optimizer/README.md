@@ -104,7 +104,7 @@ python optimizer.py --n-trials 2 --limit 3 --no-validation
 python optimizer.py --n-trials 20
 ```
 
-Key flags (all mirror a `optimizer_config.json` key and override it): `--n-trials`, `--timeout`, `--limit`, `--workers`, `--chatbot-timeout`, `--extraction-timeout`, `--study-name`, `--storage`, `--no-pruning`, `--no-validation`, `--config <path>`.
+Key flags (all mirror a `optimizer_config.json` key and override it): `--n-trials`, `--timeout`, `--limit`, `--workers`, `--chatbot-timeout`, `--extraction-timeout`, `--study-name`, `--storage`, `--no-pruning`, `--no-validation`, `--no-plots`, `--config <path>`.
 
 ## How a trial is scored
 
@@ -143,6 +143,16 @@ Each run writes `optimizer_results/optimizer_YYYYMMDD_HHMMSS.json`:
 `final_validation` (when enabled) is sorted by `validation_mean` descending — its first entry is the recommended configuration, also printed at the end of the run.
 
 Optuna's study itself is persisted separately in `studies/<study_name>.db` (SQLite), which is what makes resuming/extending a study possible across sessions.
+
+## Plots
+
+After the search, 3 PNGs are saved to `graphs/<study_name>/` (regenerated from the study's full history each run, so a resumed study's plots always reflect every trial recorded so far, not just this session's):
+
+- **`01_optimization_history.png`** — objective value per trial (green = accepted/`COMPLETE`, red = refused/`PRUNED` or `FAIL`), plus the running best-so-far curve. The first thing to look at: is the search still improving or has it plateaued?
+- **`02_param_importances.png`** — which parameters actually moved the score, via Optuna's fANOVA evaluator (`optuna.visualization.matplotlib.plot_param_importances`). Needs at least 2 completed trials; skipped with a message otherwise.
+- **`03_param_evolution.png`** — one small subplot per Optuna-level parameter (`mode`, `rag__k_standard`, `model__model`, ...), sampled value against trial number, same green/red coloring. Shows whether TPE is converging on a region for a given knob or still exploring broadly.
+
+Set `plots.enabled` to `false` (or pass `--no-plots`) to skip. Needs `matplotlib`, already a project dependency (see `requirements.txt`) — if it's missing, plot generation is skipped with a message rather than failing the run.
 
 ## Metrics
 
