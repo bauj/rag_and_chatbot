@@ -635,7 +635,7 @@ def _plot_optimization_history(study: "optuna.Study", ax) -> None:
     ax.legend(handles=handles, loc="best", fontsize=8)
 
 
-def _plot_param_evolution(study: "optuna.Study", path: Path) -> None:
+def _plot_param_evolution(study: "optuna.Study", path: Path, exclude_mode: bool = False) -> None:
     """One small subplot per Optuna-level parameter (trial number vs sampled
     value, green=accepted/red=refused), so a glance shows whether the sampler is
     converging on a region for each knob or still spread out. Uses the raw
@@ -646,7 +646,7 @@ def _plot_param_evolution(study: "optuna.Study", path: Path) -> None:
     if not trials:
         return
 
-    param_names = sorted({k for t in trials for k in t.params})
+    param_names = sorted({k for t in trials for k in t.params if not (exclude_mode and k == "mode")})
     if not param_names:
         return
 
@@ -706,10 +706,18 @@ def generate_plots(study: "optuna.Study", output_dir: Path) -> Optional[Path]:
     fig.savefig(output_dir / "01_optimization_history.png", dpi=150)
     plt.close(fig)
 
+    # "mode" is a real Optuna parameter even when the config pins a single choice
+    # (search_space.mode.choices == [X]) -- not worth a bar/subplot of its own then,
+    # since it never varies.
+    single_mode = len({t.params.get("mode") for t in study.trials if "mode" in t.params}) <= 1
+
     completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
     if len(completed) >= 2:
         try:
-            imp_ax = optuna.visualization.matplotlib.plot_param_importances(study)
+            importance_params = None
+            if single_mode:
+                importance_params = sorted({k for t in study.trials for k in t.params if k != "mode"}) or None
+            imp_ax = optuna.visualization.matplotlib.plot_param_importances(study, params=importance_params)
             imp_ax.figure.tight_layout()
             imp_ax.figure.savefig(output_dir / "02_param_importances.png", dpi=150)
             plt.close(imp_ax.figure)
@@ -720,7 +728,7 @@ def generate_plots(study: "optuna.Study", output_dir: Path) -> Optional[Path]:
     else:
         print("Skipped parameter importance plot: needs at least 2 completed trials.")
 
-    _plot_param_evolution(study, output_dir / "03_param_evolution.png")
+    _plot_param_evolution(study, output_dir / "03_param_evolution.png", exclude_mode=single_mode)
 
     print(f"Plots saved to: {output_dir}/")
     return output_dir
