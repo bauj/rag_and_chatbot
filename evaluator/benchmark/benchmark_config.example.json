@@ -1,19 +1,38 @@
 {
   "modes": ["rag", "agentic"],
-  "_comment_hyperparams": "Every combination of values below is run (a full cross-product), so each extra value multiplies the total number of runs. Prefer varying one or two dimensions at a time over turning every list into [a, b] at once.",
+  "_comment_hyperparams": "Every combination of values below is run: each mode in 'modes' gets its own full cross-product over ITS hyperparams (rag_hyperparams for rag, agentic_hyperparams for agentic — the two are never combined with each other), and that in turn is cross-produced with model_hyperparams and extraction_hyperparams. Each extra value in ANY list multiplies the total run count — prefer varying one or two dimensions at a time. Omit a key entirely to leave that setting at whatever chatbot/config.json (or extraction/config.json) already has (chatbot.py/process_docs.py only override what's explicitly passed).",
+
   "rag_hyperparams": {
-    "k": [3, 5],
-    "temperature": [0.3, 0.7],
-    "reranker_enabled": [true],
+    "k_standard": [40],
+    "k_deep_dive": [60],
     "top_n": [5, 10],
+    "temperature": [0.3, 0.7],
+    "max_tokens": [2000],
+    "reranker_enabled": [true],
+    "reranker_model": ["BAAI/bge-reranker-v2-m3"],
     "deep_dive": [false],
     "hyde_enabled": [false],
     "bm25_enabled": [true, false],
-    "title_boost_enabled": [true]
+    "title_boost_enabled": [true],
+    "k_retrieve": [80],
+    "deep_dive_batch_size": [10],
+    "expansion_char_budget": [60000]
   },
+  "_comment_rag_hyperparams": "Full list: k_standard, k_deep_dive, top_n, temperature, max_tokens, reranker_enabled, reranker_model, deep_dive, hyde_enabled, bm25_enabled, title_boost_enabled, k_retrieve, deep_dive_batch_size, expansion_char_budget. k_standard/k_deep_dive replace a single 'k' override — chatbot.py --k still exists for a flat override, but each RUN here is either deep_dive or not, so only the matching one of k_standard/k_deep_dive actually takes effect per run (see chatbot/core/rag_chatbot.py). k_retrieve is ignored in deep dive mode; deep_dive_batch_size only applies when deep_dive is true. reranker_model only has an effect when reranker_enabled is true.",
+
   "agentic_hyperparams": {
     "temperature": [0.3, 0.7],
+    "max_tokens": [2000],
     "max_steps": [4, 6, 8],
     "max_chars_per_page": [8000]
-  }
+  },
+  "_comment_agentic_hyperparams": "Full list: temperature, max_tokens, max_steps (the CodeAgent step budget), max_chars_per_page.",
+
+  "model_hyperparams": {
+    "model": ["mistralai-small"]
+  },
+  "_comment_model_hyperparams": "Applied on top of EVERY mode/hyperparameter combination above (the answering LLM choice is independent of rag vs agentic). Full fields: model, base_url, api_key. A single value (as shipped) costs nothing extra — it's the same as chatbot/config.json's own llm.model, just made explicit. Add a second value, e.g. [\"mistralai-small\", \"gpt-4o-mini\"], to actually compare two models on the same endpoint. Varying base_url/api_key means switching provider entirely — since values are cross-produced independently, mixing multiple (base_url, api_key) pairs with multiple 'model' values can pair a model name with the wrong endpoint's key; keep base_url/api_key to a single value each (or run separate benchmarks per provider) unless you're sure every combination is valid. Leave as {} to skip this dimension entirely and always use chatbot/config.json's llm block unchanged.",
+
+  "extraction_hyperparams": {},
+  "_comment_extraction_hyperparams": "Applied on top of EVERY mode/model/hyperparameter combination above. Full fields: use_token_chunking, chunking.max_tokens, chunking.overlap_tokens, chunking.char_chunk_size, chunking.char_overlap, quality.min_score, quality.min_word_count, quality.substantial_word_count, embedding.model, embedding.type, embedding.base_url, embedding.api_key. Shipped empty ON PURPOSE, unlike model_hyperparams above: extraction_cache.get_or_build() has no way to know a value 'already matches' your current extraction/config.json build, so EVEN a single value here — e.g. {\"embedding.model\": [\"all-MiniLM-L6-v2\"]}, even if that's already your default — forces one real corpus re-extraction (minutes, no early-exit) the first time this exact combination is seen, before the first run. Each distinct combination costs that once, then is cached under evaluator/extraction_cache/ and reused across every mode/model/hyperparameter combination that shares it (built once, not once per run) — but grid search here runs EVERY combination (no smart sampling like evaluator/optimizer's Bayesian search), so keep this to 1-2 values per field once you do enable it, e.g. {\"chunking.char_chunk_size\": [800, 1200]} to compare two chunk sizes."
 }

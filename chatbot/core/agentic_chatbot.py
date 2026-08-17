@@ -103,6 +103,7 @@ class AgenticChatbot:
             max_steps: Optional[int] = None,
             max_tokens: Optional[int] = None,
             temperature: Optional[float] = None,
+            max_chars_per_page: Optional[int] = None,
             **kwargs) -> Dict[str, Any]:
         """
         Answer a question by letting a CodeAgent search the page index and read pages.
@@ -111,6 +112,7 @@ class AgenticChatbot:
             max_steps: Override config value at runtime.
             max_tokens: Override config.max_tokens at runtime.
             temperature: Override config.temperature at runtime.
+            max_chars_per_page: Override config.agentic.max_chars_per_page at runtime.
             **kwargs: Accepted for interface compatibility; ignored.
 
         Returns:
@@ -118,10 +120,11 @@ class AgenticChatbot:
         """
         cfg = self._agentic_cfg
         _max_steps = max_steps if max_steps is not None else cfg.max_steps
+        _max_chars_per_page = max_chars_per_page if max_chars_per_page is not None else cfg.max_chars_per_page
 
         read_entries: List[dict] = []
         search_tool = self._SearchPagesToolCls(self._page_index)
-        read_tool = self._ReadPageToolCls(self._entry_by_filepath, cfg.max_chars_per_page, read_entries)
+        read_tool = self._ReadPageToolCls(self._entry_by_filepath, _max_chars_per_page, read_entries)
 
         model = self._OpenAIServerModel(
             model_id=self.config.llm.model,

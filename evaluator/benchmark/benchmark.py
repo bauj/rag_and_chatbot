@@ -10,7 +10,7 @@ import os
 import argparse
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from itertools import product
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -46,9 +46,14 @@ def _validate_benchmark_config(config_data: Dict[str, Any]) -> None:
             f"Supported modes are: {sorted(_SUPPORTED_MODES)}."
         )
 
-    if "temperature" not in config_data["agentic_hyperparams"]:
+    # model_hyperparams (llm/reranker choice) and extraction_hyperparams are both
+    # optional and apply on top of every mode/hyperparameter combination below —
+    # see run_benchmark for how they're cross-producted in.
+    unknown_fields = set(config_data.get("extraction_hyperparams", {})) - set(TUNABLE_EXTRACTION_FIELDS)
+    if unknown_fields:
         raise ValueError(
-            "benchmark config's 'agentic_hyperparams' must include a 'temperature' list."
+            f"benchmark config's 'extraction_hyperparams' has unsupported field(s): "
+            f"{sorted(unknown_fields)}. Supported: {list(TUNABLE_EXTRACTION_FIELDS)}."
         )
 
 def load_benchmark_config() -> Dict[str, Any]:
@@ -80,17 +85,19 @@ from evaluator.base.evaluator import (
     _load_examples,
     EVAL_METRICS,
 )
+from evaluator.base import extraction_cache
+from evaluator.base.extraction_cache import TUNABLE_EXTRACTION_FIELDS
 
-def generate_rag_configs(hyperparams: Dict) -> List[Dict]:
-    """Generate all RAG hyperparameter combinations"""
+def generate_hyperparam_configs(hyperparams: Dict) -> List[Dict]:
+    """Generate all hyperparameter combinations (full cross-product), for either mode."""
     keys = list(hyperparams.keys())
     values = [hyperparams[k] for k in keys]
-    
+
     configs = []
     for combo in product(*values):
         config = dict(zip(keys, combo))
         configs.append(config)
-    
+
     return configs
 
 def calculate_average_scores(questions: List[Dict[str, Any]]) -> Dict[str, float]:
@@ -107,6 +114,7 @@ def run_benchmark(
     verbose: bool = False,
     max_workers: int = 1,
     timeout_seconds: int = None,
+    extraction_timeout_seconds: int = None,
 ):
     """Run full benchmark with all configurations"""
 
@@ -122,49 +130,68 @@ def run_benchmark(
     # Timestamp for results
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    all_results = {
-        "metadata": {
-            "timestamp": timestamp,
-            "benchmark_config": config_data,
-            "total_questions": len(dataset) if limit_questions is None else min(limit_questions, len(dataset)),
-            "workers": max_workers,
-            "timeout_seconds": timeout_seconds,
-        },
-        "results": []
-    }
-
     if limit_questions is not None:
         dataset = dataset[:limit_questions]
 
-    rag_configs = generate_rag_configs(config_data["rag_hyperparams"])
-    agentic_configs = [
-        {"temperature": temp}
-        for temp in config_data["agentic_hyperparams"]["temperature"]
-    ]
+    rag_configs = generate_hyperparam_configs(config_data["rag_hyperparams"])
+    agentic_configs = generate_hyperparam_configs(config_data["agentic_hyperparams"])
 
     mode_configs = {
         "rag": rag_configs,
         "agentic": agentic_configs,
     }
 
-    total_runs = sum(
-        len(mode_configs[mode]) * len(dataset)
-        for mode in modes
+    # model_hyperparams (llm/reranker choice) applies on top of every mode/hyperparameter
+    # combination below; an empty/absent block yields a single {} combo (no override).
+    model_configs = generate_hyperparam_configs(config_data.get("model_hyperparams", {}))
+
+    # extraction_hyperparams is kept separate from model_configs: it doesn't translate
+    # into chatbot.py CLI flags, it drives extraction_cache.get_or_build() which returns
+    # a --config path (built once per distinct combo, then reused for every mode/model/
+    # hyperparameter combination that shares it). None (not {}) marks "not searching
+    # extraction at all", so get_or_build isn't called with a meaningless empty combo.
+    extraction_hyperparams = config_data.get("extraction_hyperparams", {})
+    extraction_param_configs = (
+        generate_hyperparam_configs(extraction_hyperparams) if extraction_hyperparams else [None]
     )
+
+    total_runs = (
+        len(extraction_param_configs) * len(model_configs)
+        * sum(len(mode_configs[mode]) for mode in modes) * len(dataset)
+    )
+
+    all_results = {
+        "metadata": {
+            "timestamp": timestamp,
+            "benchmark_config": config_data,
+            "total_questions": len(dataset),
+            "workers": max_workers,
+            "timeout_seconds": timeout_seconds,
+        },
+        "results": []
+    }
 
     print(f"\n{'='*80}")
     print("BENCHMARK CONFIGURATION")
     print(f"{'='*80}")
     print(f"Questions: {len(dataset)}")
     for mode in modes:
+        print(f"{mode.upper()}: {len(mode_configs[mode])} hyperparameter configuration(s)")
+    if model_configs != [{}]:
+        print(f"Model variants: {len(model_configs)} (applied to every mode/hyperparameter combination)")
+    if extraction_param_configs != [None]:
+        print(f"Extraction variants: {len(extraction_param_configs)} (each requires a full corpus "
+              f"re-extraction the first time it's seen — cached under {extraction_cache.CACHE_ROOT}/)")
         print(
-            f"{mode.upper()}: {len(mode_configs[mode])} configurations × {len(dataset)} questions = "
-            f"{len(mode_configs[mode]) * len(dataset)} runs"
+            "WARNING: unlike Bayesian search (evaluator/optimizer), grid search here builds and runs "
+            "EVERY combination — extraction dimensions multiply the run count on top of an already "
+            "expensive rebuild. Keep extraction_hyperparams to 1-2 values per field."
         )
     if max_workers > 1:
         print(f"Workers: {max_workers}")
     print(f"{'─'*80}")
-    print(f"Total: {total_runs} runs")
+    print(f"Total: {total_runs} runs "
+          f"({len(extraction_param_configs)} extraction × {len(model_configs)} model × hyperparameter × questions)")
     print(f"Output: {output_path}")
     print(f"{'='*80}\n")
 
@@ -176,12 +203,14 @@ def run_benchmark(
         example: Dict[str, Any],
         mode: str,
         config: Dict[str, Any],
+        chatbot_config_path: Optional[str],
         timeout_seconds: int = None,
     ) -> Dict[str, Any]:
         question = example["inputs"]["question"]
         reference_answer = example["outputs"]["answer"]
 
-        answer_dict = _call_chatbot(question, mode, timeout_seconds, config=config)
+        answer_dict = _call_chatbot(question, mode, timeout_seconds, config=config,
+                                     chatbot_config_path=chatbot_config_path)
         # Metrics run sequentially here on purpose: this function itself runs inside a
         # worker thread of the per-question pool below. Submitting more work to that
         # same bounded pool from within one of its own workers can deadlock once all
@@ -210,9 +239,11 @@ def run_benchmark(
             "request_time": request_time,
         }
 
-    def _run_mode(mode: str, configs: List[Dict[str, Any]]):
+    def _run_mode(mode: str, configs: List[Dict[str, Any]], extraction_config: Optional[Dict[str, Any]],
+                  chatbot_config_path: Optional[str]):
         print(f"\n{'='*80}")
-        print(f"TESTING {mode.upper()} MODE")
+        print(f"TESTING {mode.upper()} MODE"
+              + (f" (extraction: {extraction_config})" if extraction_config is not None else ""))
         print(f"{'='*80}\n")
 
         for config_idx, config in enumerate(configs, 1):
@@ -222,7 +253,8 @@ def run_benchmark(
             if max_workers > 1:
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = {
-                        executor.submit(_run_question, q_idx, example, mode, config, timeout_seconds): q_idx
+                        executor.submit(_run_question, q_idx, example, mode, config,
+                                         chatbot_config_path, timeout_seconds): q_idx
                         for q_idx, example in enumerate(dataset, 1)
                     }
 
@@ -233,7 +265,7 @@ def run_benchmark(
                     questions.sort(key=lambda x: x["question_id"])
             else:
                 questions = [
-                    _run_question(q_idx, example, mode, config, timeout_seconds)
+                    _run_question(q_idx, example, mode, config, chatbot_config_path, timeout_seconds)
                     for q_idx, example in enumerate(dataset, 1)
                 ]
 
@@ -245,6 +277,7 @@ def run_benchmark(
             config_results = {
                 "mode": mode,
                 "configuration": config,
+                "extraction": extraction_config,
                 "questions": questions,
                 "average_scores": avg_scores,
                 "average_request_time": avg_request_time,
@@ -254,8 +287,16 @@ def run_benchmark(
             print(f"  Average scores: {' | '.join([f'{k}: {v:.1f}' for k, v in avg_scores.items()])}")
             print(f"  Average request time: {avg_request_time:.3f}s")
 
-    for mode in modes:
-        _run_mode(mode, mode_configs[mode])
+    for extraction_config in extraction_param_configs:
+        chatbot_config_path = None
+        if extraction_config is not None:
+            chatbot_config_path = extraction_cache.get_or_build(
+                extraction_config, timeout_seconds=extraction_timeout_seconds
+            )
+        for model_config in model_configs:
+            for mode in modes:
+                merged_configs = [{**model_config, **hp_config} for hp_config in mode_configs[mode]]
+                _run_mode(mode, merged_configs, extraction_config, chatbot_config_path)
 
     results_file = output_path / f"benchmark_{timestamp}.json"
     with open(results_file, "w", encoding="utf-8") as f:
@@ -348,6 +389,8 @@ if __name__ == "__main__":
                         help="Number of worker threads for parallel execution, one per question (use -1 for all CPUs)")
     parser.add_argument("--timeout", type=int, default=None,
                         help="Timeout in seconds for each chatbot request (default: no timeout)")
+    parser.add_argument("--extraction-timeout", type=int, default=None,
+                        help="Timeout in seconds for building an extraction variant (default: no limit)")
 
     args = parser.parse_args()
     workers = args.workers
@@ -366,4 +409,5 @@ if __name__ == "__main__":
             verbose=args.verbose,
             max_workers=workers,
             timeout_seconds=args.timeout,
+            extraction_timeout_seconds=args.extraction_timeout,
         )

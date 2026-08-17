@@ -9,7 +9,7 @@ import json
 import argparse
 from pathlib import Path
 
-from core import ChatbotConfig, DocumentationChatbot
+from core import ChatbotConfig, DocumentationChatbot, RerankerConfig
 
 
 def _emit_json(result, stream):
@@ -86,6 +86,17 @@ Examples:
         '--model',
         help='Model name (overrides config)'
     )
+    parser.add_argument(
+        '--api-key',
+        dest='api_key',
+        help='LLM API key (overrides config)'
+    )
+    parser.add_argument(
+        '--reranker-model',
+        dest='reranker_model',
+        help='Cross-encoder reranker model (overrides config; enables reranking even if '
+             'disabled in config, rag mode only, terminal single-question mode)'
+    )
 
     # Query options (terminal mode)
     parser.add_argument(
@@ -115,7 +126,23 @@ Examples:
     parser.add_argument(
         '--k',
         type=int,
-        help='Override number of chunks to retrieve (rag mode only, terminal single-question mode)'
+        help='Override number of chunks to retrieve for THIS call regardless of deep_dive '
+             '(rag mode only, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--k-standard',
+        type=int,
+        dest='k_standard',
+        help='Override config.k_standard (the pool size used when deep_dive is off) — unlike '
+             '--k, this only takes effect on calls where deep_dive is off, so both --k-standard '
+             'and --k-deep-dive can be set at once without conflicting (rag mode only)'
+    )
+    parser.add_argument(
+        '--k-deep-dive',
+        type=int,
+        dest='k_deep_dive',
+        help='Override config.k_deep_dive (the pool size used when deep_dive is on) — see '
+             '--k-standard (rag mode only)'
     )
     parser.add_argument(
         '--top-n',
@@ -146,9 +173,36 @@ Examples:
              '(rag mode only, terminal single-question mode)'
     )
     parser.add_argument(
+        '--k-retrieve',
+        type=int,
+        dest='k_retrieve',
+        help='Override per-channel retrieval depth before RRF fusion (rag mode only, ignored in '
+             'deep dive mode, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--deep-dive-batch-size',
+        type=int,
+        dest='deep_dive_batch_size',
+        help='Override deep dive\'s summarization batch size (rag mode only, only applies with '
+             '--deep-dive, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--expansion-char-budget',
+        type=int,
+        dest='expansion_char_budget',
+        help='Override the shared char budget for section expansion (rag mode only, terminal '
+             'single-question mode)'
+    )
+    parser.add_argument(
         '--temperature',
         type=float,
         help='Override LLM temperature (terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--max-tokens',
+        type=int,
+        dest='max_tokens',
+        help='Override LLM max_tokens (terminal single-question mode)'
     )
     parser.add_argument(
         '--max-steps',
@@ -219,6 +273,21 @@ Examples:
             config.llm.base_url = args.base_url
         if args.model:
             config.llm.model = args.model
+        if args.api_key:
+            config.llm.api_key = args.api_key
+        if args.reranker_model:
+            # Lets a trial opt into reranking purely via CLI even if config.json has
+            # it disabled (config.reranker is None) — same spirit as the boolean
+            # runtime toggles (--no-rerank etc.) already supported for the rest of
+            # the retrieval pipeline.
+            if config.reranker is None:
+                config.reranker = RerankerConfig(model=args.reranker_model)
+            else:
+                config.reranker.model = args.reranker_model
+        if args.k_standard is not None:
+            config.k_standard = args.k_standard
+        if args.k_deep_dive is not None:
+            config.k_deep_dive = args.k_deep_dive
 
         # Initialize core chatbot
         print("Loading documentation database...")
@@ -259,9 +328,14 @@ Examples:
                 print("Warning: --deep-dive is not supported in agentic mode and will be ignored.",
                       file=sys.stderr)
             if (args.k is not None or args.top_n is not None or args.no_rerank
-                    or args.no_hyde or args.no_bm25 or args.no_title_boost):
-                print("Warning: --k, --top-n, --no-rerank, --no-hyde, --no-bm25 and --no-title-boost are not "
-                      "supported in agentic mode and will be ignored.", file=sys.stderr)
+                    or args.no_hyde or args.no_bm25 or args.no_title_boost
+                    or args.k_retrieve is not None or args.deep_dive_batch_size is not None
+                    or args.expansion_char_budget is not None or args.reranker_model is not None
+                    or args.k_standard is not None or args.k_deep_dive is not None):
+                print("Warning: --k, --k-standard, --k-deep-dive, --top-n, --no-rerank, --no-hyde, "
+                      "--no-bm25, --no-title-boost, --k-retrieve, --deep-dive-batch-size, "
+                      "--expansion-char-budget and --reranker-model are not supported in agentic "
+                      "mode and will be ignored.", file=sys.stderr)
         try:
             from core import AgenticChatbot
             print("Loading agentic chatbot (smolagents)...")
@@ -289,7 +363,9 @@ Examples:
                 result = agentic_chatbot.ask(
                     args.question,
                     temperature=args.temperature,
+                    max_tokens=args.max_tokens,
                     max_steps=args.max_steps,
+                    max_chars_per_page=args.max_chars_per_page,
                 )
             elif args.json_output:
                 # run_single_question() only prints, so ask directly to get the dict.
@@ -300,11 +376,15 @@ Examples:
                     deep_dive=args.deep_dive,
                     k=args.k,
                     temperature=args.temperature,
+                    max_tokens=args.max_tokens,
                     reranker_enabled=not args.no_rerank,
                     top_n=args.top_n,
                     hyde_enabled=not args.no_hyde,
                     bm25_enabled=not args.no_bm25,
                     title_boost_enabled=not args.no_title_boost,
+                    k_retrieve=args.k_retrieve,
+                    deep_dive_batch_size=args.deep_dive_batch_size,
+                    expansion_char_budget=args.expansion_char_budget,
                 )
             else:
                 # Single question mode
@@ -315,11 +395,15 @@ Examples:
                     deep_dive=args.deep_dive,
                     k=args.k,
                     temperature=args.temperature,
+                    max_tokens=args.max_tokens,
                     reranker_enabled=not args.no_rerank,
                     top_n=args.top_n,
                     hyde_enabled=not args.no_hyde,
                     bm25_enabled=not args.no_bm25,
                     title_boost_enabled=not args.no_title_boost,
+                    k_retrieve=args.k_retrieve,
+                    deep_dive_batch_size=args.deep_dive_batch_size,
+                    expansion_char_budget=args.expansion_char_budget,
                 )
                 result = None
 

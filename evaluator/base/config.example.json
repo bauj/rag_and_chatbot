@@ -3,6 +3,8 @@
   "_comment_project_name": "No spaces — used as ChromaDB collection name. Use underscores.",
   "chatbot_path": "your_chatbot_dir_path_here",
   "_comment_chatbot_path": "Default: '../../chatbot'",
+  "extraction_path": "../../extraction",
+  "_comment_extraction_path": "Only used by evaluator/optimizer and evaluator/benchmark when their extraction hyperparameters are set — points to the extraction/ pipeline (process_docs.py) so extraction-parameter variants can be built on demand.",
 
   "llm":
   {  

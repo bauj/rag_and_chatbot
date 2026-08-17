@@ -3,6 +3,7 @@ import subprocess
 import sys
 import json
 import os
+import signal
 import time
 import argparse
 from pathlib import Path
@@ -44,6 +45,9 @@ LLM_API_KEY = os.getenv("MISTRAL_API_KEY", llm_config.get("api_key"))
 SSL_CERTIF = os.getenv("SSL_CERTIF", llm_config.get("ssl_cert_file"))
 
 CHATBOT_DIR = os.getenv("CHATBOT_DIR", evaluator_config.get("chatbot_path"))
+# Only needed by evaluator/base/extraction_cache.py (optimizer/benchmark's extraction
+# hyperparameters); falls back to the same relative depth as chatbot_path's default.
+EXTRACTION_DIR = os.getenv("EXTRACTION_DIR", evaluator_config.get("extraction_path", "../../extraction"))
 
 def _validate_config() -> None:
     """Fail fast with an actionable message if required config is missing,
@@ -267,26 +271,66 @@ def _build_documents(sources: list) -> list:
         documents.append(doc)
     return documents
 
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kill proc and any descendants it may have spawned, not just its own PID.
+
+    proc is started with start_new_session=True (its own process group), so
+    killing that whole group reaches anything it forked off — unlike proc.kill(),
+    which only signals proc itself and would leave descendants as orphans still
+    holding memory/CPU (or a lock on the shared Chroma persist_directory).
+    """
+    try:
+        if os.name == "posix":
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        pass  # already exited on its own
+
 def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
-                   config: Optional[Dict[str, Any]] = None) -> dict:
+                   config: Optional[Dict[str, Any]] = None,
+                   chatbot_config_path: Optional[str] = None) -> dict:
     """Call chatbot.py and return parsed answer/documents.
 
     `config` carries hyperparameter overrides and is translated into the
     matching chatbot.py CLI flags:
-    - rag mode: k, temperature, reranker_enabled, top_n, deep_dive,
-      hyde_enabled, bm25_enabled, title_boost_enabled
-    - agentic mode: temperature, max_steps, max_chars_per_page
+    - both modes: temperature, max_tokens, model, base_url, api_key
+    - rag mode: k, k_standard, k_deep_dive, reranker_enabled, top_n, deep_dive,
+      hyde_enabled, bm25_enabled, title_boost_enabled, k_retrieve,
+      deep_dive_batch_size, expansion_char_budget, reranker_model
+    - agentic mode: max_steps, max_chars_per_page
+
+    `chatbot_config_path`, if given, is passed as chatbot.py's --config — used
+    to point at an extraction-parameter variant's own chatbot config (matching
+    chromadb_path/embedding model), see evaluator/base/extraction_cache.py.
+    Hyperparameter flags above still layer on top of it normally.
     """
     start_time = time.perf_counter()
     cmd = [sys.executable, "chatbot.py", "--question", question, "--json-output"]
+    if chatbot_config_path:
+        cmd.extend(["--config", chatbot_config_path])
     if mode:
         cmd.extend(["--mode", mode])
 
     if config:
         if config.get("k") is not None:
             cmd.extend(["--k", str(config["k"])])
+        if config.get("k_standard") is not None:
+            cmd.extend(["--k-standard", str(config["k_standard"])])
+        if config.get("k_deep_dive") is not None:
+            cmd.extend(["--k-deep-dive", str(config["k_deep_dive"])])
         if config.get("temperature") is not None:
             cmd.extend(["--temperature", str(config["temperature"])])
+        if config.get("max_tokens") is not None:
+            cmd.extend(["--max-tokens", str(config["max_tokens"])])
+        if config.get("model") is not None:
+            cmd.extend(["--model", str(config["model"])])
+        if config.get("base_url") is not None:
+            cmd.extend(["--base-url", str(config["base_url"])])
+        if config.get("api_key") is not None:
+            cmd.extend(["--api-key", str(config["api_key"])])
+        if config.get("reranker_model") is not None:
+            cmd.extend(["--reranker-model", str(config["reranker_model"])])
         if config.get("top_n") is not None:
             cmd.extend(["--top-n", str(config["top_n"])])
         if config.get("reranker_enabled") is False:
@@ -299,29 +343,50 @@ def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
             cmd.append("--no-bm25")
         if config.get("title_boost_enabled") is False:
             cmd.append("--no-title-boost")
+        if config.get("k_retrieve") is not None:
+            cmd.extend(["--k-retrieve", str(config["k_retrieve"])])
+        if config.get("deep_dive_batch_size") is not None:
+            cmd.extend(["--deep-dive-batch-size", str(config["deep_dive_batch_size"])])
+        if config.get("expansion_char_budget") is not None:
+            cmd.extend(["--expansion-char-budget", str(config["expansion_char_budget"])])
         if config.get("max_steps") is not None:
             cmd.extend(["--max-steps", str(config["max_steps"])])
         if config.get("max_chars_per_page") is not None:
             cmd.extend(["--max-chars-per-page", str(config["max_chars_per_page"])])
 
     try:
-        result = subprocess.run(
+        # Popen (rather than subprocess.run) so a timeout can be handled with
+        # _kill_process_tree below: run()'s own timeout handling only kills the
+        # immediate chatbot.py PID, which would leave any processes it spawned
+        # (e.g. from agentic-smol's CodeAgent executing arbitrary generated code)
+        # still running — burning memory/CPU and potentially still holding a lock
+        # on the shared Chroma persist_directory, which could then stall other
+        # chatbot calls too.
+        proc = subprocess.Popen(
             cmd,
             cwd=CHATBOT_DIR,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_seconds,
-            check=False,
+            start_new_session=True,
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_seconds)
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc)
+            proc.communicate()  # drain pipes / reap the now-dead process
+            raise
+
         elapsed = time.perf_counter() - start_time
-        if result.returncode != 0:
+        if returncode != 0:
             return {
-                "answer": f"Error calling chatbot: {result.stderr}",
+                "answer": f"Error calling chatbot: {stderr}",
                 "documents": [],
                 "request_time": elapsed,
             }
 
-        stdout = result.stdout.strip()
+        stdout = stdout.strip()
         json_start = stdout.find('{')
         if json_start < 0:
             raise ValueError("No JSON found in chatbot output")

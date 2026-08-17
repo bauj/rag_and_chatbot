@@ -41,6 +41,11 @@ gradio==6.10.0                  # Web interface (optional, for --web mode)
 matplotlib==3.8.4               # Graphing and visualization (for --graphs option)
 
 # ============================================
+# OPTIMIZER (evaluator/optimizer/optimizer.py)
+# ============================================
+optuna==4.9.0                   # Bayesian hyperparameter search (TPE sampler + pruning)
+
+# ============================================
 # TESTING
 # ============================================
 pytest==7.4.4                   # Testing framework

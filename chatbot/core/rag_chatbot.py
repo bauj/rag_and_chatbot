@@ -473,10 +473,10 @@ Passage:"""
 
         return result
 
-    def _expand_survivors(self, docs: List) -> List:
+    def _expand_survivors(self, docs: List, expansion_char_budget: Optional[int] = None) -> List:
         """Swap each doc for its full section, spending one shared char budget."""
         result = []
-        budget = self.config.expansion_char_budget
+        budget = expansion_char_budget if expansion_char_budget is not None else self.config.expansion_char_budget
 
         for doc in docs:
             doc, spent = self._expand_to_section(doc, budget)
@@ -487,7 +487,8 @@ Passage:"""
 
     def _select_context(self, query: str, docs: List,
                         reranker_enabled: bool = True,
-                        top_n: Optional[int] = None) -> List:
+                        top_n: Optional[int] = None,
+                        expansion_char_budget: Optional[int] = None) -> List:
         """
         Turn a retrieval pool into the documents the LLM actually reads.
 
@@ -512,7 +513,7 @@ Passage:"""
 
         docs = self._pick_section_representatives(docs)[:limit]
 
-        return self._expand_survivors(docs)
+        return self._expand_survivors(docs, expansion_char_budget=expansion_char_budget)
 
     def _create_prompt(self) -> PromptTemplate:
         """Create the base prompt template"""
@@ -556,7 +557,10 @@ Answer (based strictly on the documentation above):"""
                      top_n: Optional[int] = None,
                      hyde_enabled: Optional[bool] = None,
                      bm25_enabled: Optional[bool] = None,
-                     title_boost_enabled: Optional[bool] = None):
+                     title_boost_enabled: Optional[bool] = None,
+                     k_retrieve: Optional[int] = None,
+                     deep_dive_batch_size: Optional[int] = None,
+                     expansion_char_budget: Optional[int] = None):
         """
         Create RAG chain with optional filtering
 
@@ -573,6 +577,10 @@ Answer (based strictly on the documentation above):"""
             bm25_enabled: Runtime toggle for BM25 hybrid retrieval (None = whatever was configured)
             title_boost_enabled: Runtime toggle for the title/identifier RRF channel
                 (None = whatever was configured)
+            k_retrieve: Override per-channel retrieval depth before RRF fusion (optional,
+                ignored in deep dive mode — see below)
+            deep_dive_batch_size: Override deep dive's summarization batch size (optional)
+            expansion_char_budget: Override the shared char budget for section expansion (optional)
 
         Returns:
             Tuple of (chain, retriever, source_docs_holder). source_docs_holder is a
@@ -587,9 +595,10 @@ Answer (based strictly on the documentation above):"""
         # Deep dive deliberately keeps using k unchanged — it bypasses this whole
         # rerank/BM25/title pipeline and retrieves+summarizes directly, so there is
         # no fusion step here for a deeper per-channel search to feed.
+        effective_k_retrieve = k_retrieve if k_retrieve is not None else self.config.k_retrieve
         retrieve_k = k
-        if not deep_dive and self.config.k_retrieve is not None:
-            retrieve_k = self.config.k_retrieve
+        if not deep_dive and effective_k_retrieve is not None:
+            retrieve_k = effective_k_retrieve
         search_kwargs = {"k": retrieve_k}
 
         effective_hyde = hyde_enabled if hyde_enabled is not None else (self.hyde_llm is not None)
@@ -644,7 +653,7 @@ Answer (based strictly on the documentation above):"""
             # Deep dive: retrieve more docs and summarize in batches
             def summarize_batch(docs):
                 summaries = []
-                batch_size = self.config.deep_dive_batch_size
+                batch_size = deep_dive_batch_size if deep_dive_batch_size is not None else self.config.deep_dive_batch_size
 
                 for i in range(0, len(docs), batch_size):
                     batch = docs[i:i + batch_size]
@@ -704,6 +713,7 @@ Answer (based strictly on the documentation above):"""
                     question, raw_docs,
                     reranker_enabled=reranker_enabled,
                     top_n=top_n,
+                    expansion_char_budget=expansion_char_budget,
                 )
                 source_docs_holder[:] = reranked  # per-call cache for source attribution
                 return "\n\n".join(doc.page_content for doc in reranked)
@@ -732,7 +742,10 @@ Answer (based strictly on the documentation above):"""
             top_n: Optional[int] = None,
             hyde_enabled: Optional[bool] = None,
             bm25_enabled: Optional[bool] = None,
-            title_boost_enabled: Optional[bool] = None) -> Dict[str, Any]:
+            title_boost_enabled: Optional[bool] = None,
+            k_retrieve: Optional[int] = None,
+            deep_dive_batch_size: Optional[int] = None,
+            expansion_char_budget: Optional[int] = None) -> Dict[str, Any]:
         """
         Ask a question and get an answer with sources
 
@@ -748,6 +761,12 @@ Answer (based strictly on the documentation above):"""
             top_n: Override docs kept after reranking
             hyde_enabled: Runtime toggle for HyDE (None = whatever was configured)
             bm25_enabled: Runtime toggle for BM25 hybrid retrieval (None = whatever was configured)
+            k_retrieve: Override per-channel retrieval depth before RRF fusion (higher
+                priority than config; ignored in deep dive mode)
+            deep_dive_batch_size: Override deep dive's summarization batch size (higher
+                priority than config)
+            expansion_char_budget: Override the shared char budget for section expansion
+                (higher priority than config)
             title_boost_enabled: Runtime toggle for the title/identifier RRF channel
                 (None = whatever was configured)
 
@@ -817,6 +836,8 @@ Answer (based strictly on the documentation above):"""
                 reranker_enabled=reranker_enabled, top_n=top_n,
                 hyde_enabled=hyde_enabled, bm25_enabled=bm25_enabled,
                 title_boost_enabled=title_boost_enabled,
+                k_retrieve=k_retrieve, deep_dive_batch_size=deep_dive_batch_size,
+                expansion_char_budget=expansion_char_budget,
             )
             answer = chain.invoke(question)
             # Reuse docs already retrieved+reranked inside the standard chain.
@@ -830,6 +851,7 @@ Answer (based strictly on the documentation above):"""
                     question, raw_source_docs,
                     reranker_enabled=reranker_enabled,
                     top_n=top_n,
+                    expansion_char_budget=expansion_char_budget,
                 )
 
             # Format sources

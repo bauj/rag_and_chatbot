@@ -47,8 +47,15 @@ chatbot/config_*.json
 evaluator/base/config.json
 evaluator/benchmark/benchmark_config.json
 evaluator/base/dataset.json
+evaluator/optimizer/optimizer_config.json
 
 # Results
 evaluator/benchmark/benchmark_results/
 evaluator/benchmark/graphs/
 evaluator/base/evaluation_results.json
+evaluator/optimizer/optimizer_results/
+evaluator/optimizer/studies/
+evaluator/optimizer/graphs/
+# Whole tree, not just */*_extracted/ subdirs: also covers the per-variant .lock files
+# extraction_cache.py creates alongside them (see evaluator/base/extraction_cache.py).
+evaluator/extraction_cache/
