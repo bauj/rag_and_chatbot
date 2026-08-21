@@ -4,6 +4,8 @@ Unified entry point for Documentation RAG Chatbot
 Routes to terminal or web interface based on CLI arguments
 """
 
+from sympy import vector
+from scipy.linalg._expm_frechet import vec
 import sys
 import json
 import argparse
@@ -339,7 +341,7 @@ Examples:
         try:
             from core import AgenticChatbot
             print("Loading agentic chatbot (smolagents)...")
-            agentic_chatbot = AgenticChatbot(config)
+            agentic_chatbot = AgenticChatbot(config, vectorstore=chatbot.vectorstore)
             print("Agentic chatbot ready.")
         except ImportError as e:
             if args.mode == 'agentic':

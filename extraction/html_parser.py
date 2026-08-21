@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from langchain_chroma import Chroma
 from bs4 import BeautifulSoup, NavigableString, Tag
 from markdownify import markdownify as _markdownify
 
@@ -352,49 +353,49 @@ def save_page_index(entries: List[Dict[str, Any]], output_path: str) -> None:
         json.dump(entries, f, ensure_ascii=False, indent=2)
 
 
+def _tokenize(text: str) -> Set[str]:
+    return {t.lower() for t in re.split(r'[\s_\-]+', text) if len(t) >= 3}
+
 def search_pages(
+    vectorstore: Chroma,
     page_index: List[Dict[str, Any]],
     query: str,
+    k: int = 50,
     exclude_filepaths: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Search the page index for entries matching the query.
+    Dense semantic search over the RAG-mode ChromaDB, mapped back to
+    page_index entries so read_page(filepath=...) keeps working unchanged.
 
-    Two-stage token matching:
-    1. Filename tokens: for each query token, find pages whose filename contains it (case-insensitive)
-    2. Title tokens: for each remaining query token, find pages whose title contains it
-
-    Deduplicates by filepath. Preserves insertion order (filename matches first).
-    exclude_filepaths: set of filepath strings to skip.
+    Chroma chunk metadata may hold a web URL instead of a local filepath
+    (extraction config-dependent), so the join to page_index is done via
+    filename — the raw, unmodified trailing segment of the URL — rather
+    than the url/filepath fields directly.
     """
-    if exclude_filepaths is None:
-        exclude_filepaths = set()
+    exclude_filepaths = exclude_filepaths or set()
+    by_filename = {e['filename']: e for e in page_index}
 
-    tokens = [t.lower() for t in re.split(r'[\s_\-]+', query) if len(t) >= 3]
-    if not tokens:
-        return []
+    hits = vectorstore.similarity_search(query, k=k * 4)  # over-fetch; dedup + join will shrink it
 
-    seen: Set[str] = set(exclude_filepaths)
+    seen: Set[str] = set()
     result = []
+    for doc in hits:
+        url = doc.metadata.get('url', '')
+        if not url:
+            continue
+        filename = url.split('/')[-1].split('#')[0]
 
-    # Stage 1: filename matches
-    for token in tokens:
-        for entry in page_index:
-            fp = entry['filepath']
-            if fp in seen:
-                continue
-            if token in entry['filename'].lower():
-                seen.add(fp)
-                result.append(entry)
+        entry = by_filename.get(filename)
+        if entry is None:
+            continue  # chunk has no matching page_index entry — skip rather than guess
 
-    # Stage 2: title matches
-    for token in tokens:
-        for entry in page_index:
-            fp = entry['filepath']
-            if fp in seen:
-                continue
-            if token in entry['title'].lower():
-                seen.add(fp)
-                result.append(entry)
+        filepath = entry['filepath']
+        if filepath in seen or filepath in exclude_filepaths:
+            continue
+        seen.add(filepath)
+        result.append(entry)
+
+        if len(result) >= k:
+            break
 
     return result

@@ -14,7 +14,10 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from langchain_chroma import Chroma
 from .config import ChatbotConfig
+from .debug_trace_writer import DebugTraceWriter
+from .grounding_judge import check_grounding_llm
 
 # Matches code the model wrote instead of prose when forced to answer at max_steps
 # (smolagents' default code_block_tags is literally "<code>"/"</code>") — see
@@ -42,7 +45,7 @@ class AgenticChatbot:
     Requires config.agentic to be set and the smolagents package to be installed.
     """
 
-    def __init__(self, config: ChatbotConfig):
+    def __init__(self, config: ChatbotConfig, vectorstore: Chroma):
         if config.agentic is None:
             raise ValueError(
                 "AgenticChatbot requires config.agentic to be set. "
@@ -60,9 +63,10 @@ class AgenticChatbot:
         self.config = config
         self._agentic_cfg = config.agentic
         self._CodeAgent = CodeAgent
+        self._prompt_templates = _build_prompt_templates()
         self._OpenAIServerModel = OpenAIServerModel
         self._SearchPagesToolCls, self._ReadPageToolCls = _build_tool_classes(Tool)
-        self._prompt_templates = _build_prompt_templates()
+        self._vectorstore = vectorstore
 
         index_path = Path(self._agentic_cfg.page_index_path)
         if not index_path.is_absolute():
@@ -79,6 +83,9 @@ class AgenticChatbot:
             raise ValueError(f"Page index is not valid JSON: {e}")
 
         self._entry_by_filepath = {e['filepath']: e for e in self._page_index}
+        self._debug_writer = DebugTraceWriter(
+            debug_dir=getattr(self._agentic_cfg, "debug_dir", "debug_traces")
+        )
 
     def _build_model_kwargs(self, temperature: Optional[float], max_tokens: Optional[int]) -> dict:
         """
@@ -104,6 +111,7 @@ class AgenticChatbot:
             max_tokens: Optional[int] = None,
             temperature: Optional[float] = None,
             max_chars_per_page: Optional[int] = None,
+            debug: Optional[bool] = None,
             **kwargs) -> Dict[str, Any]:
         """
         Answer a question by letting a CodeAgent search the page index and read pages.
@@ -118,12 +126,16 @@ class AgenticChatbot:
         Returns:
             {answer, sources, filters, error}
         """
+
+        MAX_GROUNDING_RETRIES = 1
+
         cfg = self._agentic_cfg
         _max_steps = max_steps if max_steps is not None else cfg.max_steps
         _max_chars_per_page = max_chars_per_page if max_chars_per_page is not None else cfg.max_chars_per_page
+        _debug = debug if debug is not None else getattr(cfg, "debug", False)
 
         read_entries: List[dict] = []
-        search_tool = self._SearchPagesToolCls(self._page_index)
+        search_tool = self._SearchPagesToolCls(self._vectorstore, self._page_index)
         read_tool = self._ReadPageToolCls(self._entry_by_filepath, _max_chars_per_page, read_entries)
 
         model = self._OpenAIServerModel(
@@ -146,13 +158,26 @@ class AgenticChatbot:
             "Use the search_pages tool to find candidate documentation pages, then the "
             "read_page tool to read their content. You MUST call read_page at least once "
             "before answering — never answer from prior knowledge alone. Answer the "
-            "question strictly based on what you read.\n\n"
+            "question strictly based on what you read. Identify each distinct operation "
+            "required and search for each one separately. If a search returns no results, "
+            "you MUST retry with at least one alternative term before proceeding. Never "
+            "invent API calls, imports, or libraries that did not appear in retrieved "
+            "documentation - if you cannot find grounding, say so explicitly rather than "
+            "guessing. The code you produce is for the user to run in their own environment "
+            " - it will not run in your Python sandbox (the code modules aren't installed here)."
+            "Never attempt to import or execute external code yourself; always build it as a "
+            "string and return it via final_answer(...). Before calling final_answer, list every "
+            "function/API call your code uses and confirm each one appears in your read_page "
+            "observations. If any doesn't, go back and search/read again — do not call "
+            "final_answer until every call is grounded\n\n"
             f"Question: {question}"
         )
 
         try:
             raw_answer = agent.run(task)
         except Exception as e:
+            if _debug:
+                self._debug_writer.dump(agent, question, extra={"error": str(e)})            
             return {
                 "answer": None,
                 "sources": [],
@@ -161,6 +186,28 @@ class AgenticChatbot:
             }
 
         answer = str(raw_answer)
+
+        ungrounded_calls = check_grounding_llm(answer, agent, judge_model=model)
+        retries_used = 0
+        while ungrounded_calls and retries_used < MAX_GROUNDING_RETRIES:
+            retries_used += 1
+            complaints = "; ".join(
+                f"{c['call']} ({c['reason']})" for c in ungrounded_calls
+            )
+            retry_task = (
+                f"Your previous answer used these calls that don't match the "
+                f"documentation you already retrieved: {complaints}. "
+                f"Fix ONLY these calls using the exact signatures shown in the "
+                f"documentation above — do not invent new calls, do not re-search "
+                f"unless truly necessary. Provide the corrected code via final_answer(...)."
+            )
+            try:
+                raw_answer = agent.run(retry_task, reset=False)
+            except Exception:
+                break  # keep the last answer/ungrounded_calls, fall through to degraded handling
+
+            answer = str(raw_answer)
+            ungrounded_calls = check_grounding_llm(answer, agent, judge_model=model)
 
         seen = set()
         sources = []
@@ -179,9 +226,23 @@ class AgenticChatbot:
 
         steps_used = len(agent.memory.steps) if hasattr(agent, "memory") else None
 
-        degraded = bool(_LEAKED_CODE_PATTERN.search(answer))
+        degraded = bool(_LEAKED_CODE_PATTERN.search(answer)) or bool(ungrounded_calls)
         if degraded:
-            answer = _fallback_answer(sources)
+            reason = "ungrounded" if ungrounded_calls else "steps"
+            answer = _fallback_answer(sources, reason=reason)
+
+        steps_used = len(agent.memory.steps) if hasattr(agent, "memory") else None
+        if _debug:
+            self._debug_writer.dump(
+                agent,
+                question,
+                extra={"steps_used": steps_used,
+                "degraded_answer": degraded,
+                "grounded": bool(read_entries),
+                "ungrounded_calls": ungrounded_calls,
+                "grounding_retries_used": retries_used
+                },
+            )
 
         return {
             "answer": answer,
@@ -191,25 +252,34 @@ class AgenticChatbot:
                 "steps_used": steps_used,
                 "grounded": bool(read_entries),
                 "degraded_answer": degraded,
+                "ungrounded_calls": ungrounded_calls,
+                "grounding_retries_used": retries_used,
             },
             "error": None,
         }
 
 
-def _fallback_answer(sources: List[dict]) -> str:
-    """Honest stand-in when the model returned leaked code instead of prose."""
+def _fallback_answer(sources: List[dict], reason: str = "steps") -> str:
+    """Honest stand-in when the model's answer couldn't be trusted as-is."""
     if not sources:
         return (
             "I ran out of steps before reading any relevant documentation page "
             "and could not produce an answer. Try rephrasing the question."
         )
     titles = ", ".join(dict.fromkeys(s["title"] for s in sources))
+
+    if reason == "ungrounded":
+        return (
+            "I read the following page(s) but the code I generated didn't match "
+            f"the documented API, so I'm not returning it: {titles}. Try rephrasing "
+            "the question, or ask again — this can happen intermittently."
+        )
+
     return (
         "I read the following page(s) but ran out of steps before synthesizing a "
         f"complete answer: {titles}. Try rephrasing the question or increasing "
         "agentic.max_steps."
     )
-
 
 def _build_prompt_templates() -> dict:
     """
@@ -254,14 +324,15 @@ def _build_tool_classes(Tool):
         inputs = {"query": {"type": "string", "description": "Search terms describing what to look for."}}
         output_type = "string"
 
-        def __init__(self, page_index: List[dict]):
+        def __init__(self, vectorstore: Chroma, page_index: List[dict]):
             super().__init__()
+            self._vectorstore = vectorstore
             self._page_index = page_index
 
         def forward(self, query: str) -> str:
-            candidates = search_pages(self._page_index, query)
+            candidates = search_pages(self._vectorstore, self._page_index, query)
             if not candidates:
-                return "No matching pages found."
+                return "No matches for " + query + ". Try a broader or alternative term, or search a related feature category."
             return "\n".join(
                 f"- {e['filepath']} | {e['title']} | {e['module']}/{e['doc_category']}"
                 for e in candidates
