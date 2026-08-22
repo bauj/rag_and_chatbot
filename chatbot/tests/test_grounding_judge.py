@@ -163,6 +163,15 @@ def test_documented_arg_counts_no_occurrence_returns_empty_set():
     assert _documented_arg_counts("addBox", "nothing relevant here") == set()
 
 
+def test_documented_arg_counts_matches_newline_tokenized_html_text():
+    # read_page() extracts HTML via BeautifulSoup get_text(separator='\n'),
+    # so real retrieved doc text has every token — including "(" and "," —
+    # on its own line, not a contiguous "name(args)" string. A literal
+    # "name(" match would silently never fire against real documentation.
+    tokenized = "model\n.\naddBox\n(\nPart_doc\n,\n0\n,\n0\n,\n0\n,\n20\n,\n20\n,\n20\n)\n8\nmodel"
+    assert _documented_arg_counts("addBox", tokenized) == {7}
+
+
 # ---------------------------------------------------------------------------
 # check_grounding — overload ambiguity flag
 # ---------------------------------------------------------------------------

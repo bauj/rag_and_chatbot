@@ -101,14 +101,23 @@ def _extract_calls(language: str, code: str) -> List[str]:
 
 def _documented_arg_counts(name: str, observations: str) -> set:
     """
-    Scan `observations` for every literal occurrence of `name(...)` and
-    return the distinct argument counts found (top-level commas + 1,
-    respecting nested parentheses so a call passed as another call's
-    argument doesn't get miscounted). More than one distinct count means the
-    documentation shows multiple overloads/variants for this call name.
+    Scan `observations` for every occurrence of `name(...)` and return the
+    distinct argument counts found (top-level commas + 1, respecting nested
+    parentheses so a call passed as another call's argument doesn't get
+    miscounted). More than one distinct count means the documentation shows
+    multiple overloads/variants for this call name.
+
+    Matches name and "(" with optional whitespace between them, not just a
+    literal "name(" — this project's read_page() extracts HTML text with
+    BeautifulSoup's get_text(separator='\\n'), which puts each token
+    (including punctuation) on its own line, so real retrieved doc text
+    reads as "call\\n(\\narg1\\n,\\n..." rather than "call(arg1, ...)". A
+    literal "name(" match only ever fired against a model's own generated
+    code being echoed back through a print() observation, never against
+    actual documentation — silently defeating this check.
     """
     counts = set()
-    for m in re.finditer(re.escape(name) + r"\(", observations):
+    for m in re.finditer(re.escape(name) + r"\s*\(", observations):
         i = m.end()
         depth = 1
         while i < len(observations) and depth > 0:
