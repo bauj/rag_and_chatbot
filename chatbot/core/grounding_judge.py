@@ -11,14 +11,22 @@ weak model hits most often, silently disabling the safety net for the
 models it was meant to help. See project memory
 project-rag-agentic-reliability-wip for the full writeup.
 
-check_grounding() only verifies call *names* exist in the retrieved text -
-not argument count/order/kind, which the old LLM judge attempted but which
-needs real signature data (Doxygen memitem parsing or Sphinx autodoc, not
-free-text scanning) to check without guessing; that's a follow-up, not done
-here. Python code is parsed with `ast` for accurate call-name extraction;
-any other language (or unfenced/unparseable code) falls back to a regex
-scan for `identifier(`, which can't distinguish a call from a declaration or
-macro as reliably but is fully language-agnostic.
+check_grounding() verifies call *names* exist in the retrieved text, plus
+one narrow structural check: whether the documentation shows more than one
+argument-count for the same call name (i.e. multiple documented overloads).
+It does NOT check that a given call's specific argument values were assigned
+the right meaning within whichever overload was picked — a call can use a
+genuinely documented name with a genuinely documented argument count and
+still misinterpret what those arguments mean (e.g. treating a parameter
+documented as one thing as if it were something else), which matching name
+and arg count alone can't catch. Matching argument count doesn't guarantee
+matching argument semantics; that needs real signature/parameter-description
+data, not just counting, and is left as further follow-up — see project
+memory project_rag_reliability_review. Python code is parsed with `ast` for
+accurate call-name extraction; any
+other language (or unfenced/unparseable code) falls back to a regex scan for
+`identifier(`, which can't distinguish a call from a declaration or macro as
+reliably but is fully language-agnostic.
 """
 
 import ast
@@ -91,15 +99,59 @@ def _extract_calls(language: str, code: str) -> List[str]:
     return _CALL_RE.findall(code)
 
 
+def _documented_arg_counts(name: str, observations: str) -> set:
+    """
+    Scan `observations` for every literal occurrence of `name(...)` and
+    return the distinct argument counts found (top-level commas + 1,
+    respecting nested parentheses so a call passed as another call's
+    argument doesn't get miscounted). More than one distinct count means the
+    documentation shows multiple overloads/variants for this call name.
+    """
+    counts = set()
+    for m in re.finditer(re.escape(name) + r"\(", observations):
+        i = m.end()
+        depth = 1
+        while i < len(observations) and depth > 0:
+            if observations[i] == "(":
+                depth += 1
+            elif observations[i] == ")":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            continue  # unbalanced (truncated text etc.) — skip rather than guess
+        inner = observations[m.end():i - 1]
+        if not inner.strip():
+            counts.add(0)
+            continue
+        commas, nesting = 0, 0
+        for c in inner:
+            if c == "(":
+                nesting += 1
+            elif c == ")":
+                nesting -= 1
+            elif c == "," and nesting == 0:
+                commas += 1
+        counts.add(commas + 1)
+    return counts
+
+
 def check_grounding(
     answer: str,
     agent,
     llm_classify_fn: Optional[Callable[[str], bool]] = None,
 ) -> List[dict]:
     """
-    Extract call names from every code block in `answer` and flag any that
-    appear in neither the retrieved documentation nor a static builtin
-    allowlist. Returns [] if `answer` has no code blocks at all.
+    Extract call names from every code block in `answer` and flag two kinds
+    of issue: a name that appears in neither the retrieved documentation nor
+    a static builtin allowlist ("unknown name"), or a name that IS grounded
+    but whose documentation shows more than one distinct argument count —
+    i.e. multiple documented overloads for the same call name ("multiple
+    documented signatures"). The second case doesn't prove the code is
+    wrong, only that this call name is the kind that has burned a real run
+    before (see module docstring) — flagging it forces a re-check of which
+    variant applies and what each argument means, rather than trusting
+    whichever bare code example was skimmed first. Returns [] if `answer`
+    has no code blocks at all.
 
     llm_classify_fn: optional callable(name) -> bool, asked only about names
     that survive the static allowlist - a narrow "is this a language/stdlib
@@ -113,7 +165,8 @@ def check_grounding(
     if not blocks:
         return []
 
-    observations_lower = concatenated_observations(agent).lower()
+    observations = concatenated_observations(agent)
+    observations_lower = observations.lower()
 
     flagged = {}
     for language, code in blocks:
@@ -123,6 +176,12 @@ def check_grounding(
             if name in _BUILTIN_NAMES or name in _CPP_KEYWORDS:
                 continue
             if name.lower() in observations_lower:
+                if len(_documented_arg_counts(name, observations)) > 1:
+                    flagged[name] = {
+                        "call": name,
+                        "reason": "multiple documented signatures for this call — "
+                                  "verify which one applies and what each argument means",
+                    }
                 continue
             if llm_classify_fn is not None and llm_classify_fn(name):
                 continue

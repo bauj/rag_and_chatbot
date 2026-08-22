@@ -172,10 +172,7 @@ class AgenticChatbot:
             "guessing. The code you produce is for the user to run in their own environment "
             " - it will not run in your Python sandbox (the code modules aren't installed here)."
             "Never attempt to import or execute external code yourself; always build it as a "
-            "string and return it via final_answer(...). Before calling final_answer, list every "
-            "function/API call your code uses and confirm each one appears in your read_page "
-            "observations. If any doesn't, go back and search/read again — do not call "
-            "final_answer until every call is grounded\n\n"
+            "string and return it via final_answer(...).\n\n"
             f"Question: {question}"
         )
 
@@ -198,13 +195,16 @@ class AgenticChatbot:
         retries_used = 0
         while ungrounded_calls and retries_used < MAX_GROUNDING_RETRIES:
             retries_used += 1
-            complaints = "; ".join(c["call"] for c in ungrounded_calls)
+            complaints = "; ".join(f"{c['call']} ({c['reason']})" for c in ungrounded_calls)
             retry_task = (
-                f"Your previous answer used these call names, which don't appear "
-                f"anywhere in the documentation you already retrieved: {complaints}. "
-                f"Fix ONLY these calls — search/read again if you need the correct name "
-                f"or signature, do not invent a replacement. Provide the corrected code "
-                f"via final_answer(...)."
+                f"Your previous answer has issues with these calls: {complaints}. "
+                f"For any call not found in the documentation, search/read again to find "
+                f"the correct name or signature — do not invent a replacement. For any "
+                f"call flagged as having multiple documented signatures, re-read its "
+                f"documentation and confirm which variant you're using and what each "
+                f"argument actually means — do not assume from a bare code example "
+                f"alone. Fix ONLY these calls and provide the corrected code via "
+                f"final_answer(...)."
             )
             try:
                 raw_answer = agent.run(retry_task, reset=False)

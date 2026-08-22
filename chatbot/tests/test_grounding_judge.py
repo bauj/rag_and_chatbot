@@ -1,7 +1,12 @@
 # tests/test_grounding_judge.py
 from unittest.mock import MagicMock
 
-from core.grounding_judge import check_grounding, concatenated_observations, llm_builtin_classifier
+from core.grounding_judge import (
+    check_grounding,
+    concatenated_observations,
+    llm_builtin_classifier,
+    _documented_arg_counts,
+)
 
 
 def _agent_with_observations(*observations):
@@ -127,6 +132,82 @@ def test_check_grounding_llm_classify_fn_false_keeps_the_flag():
     answer = "```python\nfoo(1)\n```"
     result = check_grounding(answer, agent, llm_classify_fn=lambda name: False)
     assert [c["call"] for c in result] == ["foo"]
+
+
+# ---------------------------------------------------------------------------
+# _documented_arg_counts
+# ---------------------------------------------------------------------------
+
+def test_documented_arg_counts_single_signature():
+    obs = "model.addFeature(shape, name) is the call."
+    assert _documented_arg_counts("addFeature", obs) == {2}
+
+
+def test_documented_arg_counts_multiple_signatures():
+    obs = (
+        "model.addBox(Part_doc, DX, DY, DZ)\n"
+        "model.addBox(Part_doc, point1, point2)\n"
+        "model.addBox(Part_doc, OX, OY, OZ, DX, DY, DZ)\n"
+    )
+    assert _documented_arg_counts("addBox", obs) == {4, 3, 7}
+
+
+def test_documented_arg_counts_ignores_nested_parens():
+    obs = "model.addCylinder(Part_doc, model.selection(\"VERTEX\", \"Origin\"), axis, 20, 60)"
+    # 5 top-level args: Part_doc, selection(...), axis, 20, 60 — the nested
+    # selection(...) call's own comma must not inflate the count.
+    assert _documented_arg_counts("addCylinder", obs) == {5}
+
+
+def test_documented_arg_counts_no_occurrence_returns_empty_set():
+    assert _documented_arg_counts("addBox", "nothing relevant here") == set()
+
+
+# ---------------------------------------------------------------------------
+# check_grounding — overload ambiguity flag
+# ---------------------------------------------------------------------------
+
+def test_check_grounding_flags_grounded_call_with_multiple_documented_overloads():
+    observations = (
+        "model.addBox(Part_doc, DX, DY, DZ) — by dimensions.\n"
+        "model.addBox(Part_doc, OX, OY, OZ, DX, DY, DZ) — by point and dimensions, "
+        "where OX/OY/OZ is the center and DX/DY/DZ are half-lengths.\n"
+    )
+    agent = _agent_with_observations(observations)
+    answer = "```python\nBox_1 = model.addBox(doc, 0, 0, 60, 10, 10, 10)\n```"
+    result = check_grounding(answer, agent)
+    assert len(result) == 1
+    assert result[0]["call"] == "addBox"
+    assert "multiple documented signatures" in result[0]["reason"]
+
+
+def test_check_grounding_does_not_flag_grounded_call_with_one_signature():
+    observations = "model.addFeature(shape, name) is the only documented form."
+    agent = _agent_with_observations(observations)
+    answer = "```python\nmodel.addFeature(shape, 'x')\n```"
+    result = check_grounding(answer, agent)
+    assert result == []
+
+
+def test_check_grounding_overload_flag_not_offered_to_llm_classify_fn():
+    # Overload ambiguity is a structural fact about the docs, not a builtin
+    # question — the classify_fn layer (which only answers "is this a
+    # builtin") must never be consulted for it.
+    observations = (
+        "model.addBox(Part_doc, DX, DY, DZ)\n"
+        "model.addBox(Part_doc, OX, OY, OZ, DX, DY, DZ)\n"
+    )
+    agent = _agent_with_observations(observations)
+    answer = "```python\nBox_1 = model.addBox(doc, 0, 0, 60, 10, 10, 10)\n```"
+    calls_seen = []
+
+    def classify(name):
+        calls_seen.append(name)
+        return True  # would wave through if it were ever consulted
+
+    result = check_grounding(answer, agent, llm_classify_fn=classify)
+    assert len(result) == 1
+    assert calls_seen == []
 
 
 # ---------------------------------------------------------------------------
