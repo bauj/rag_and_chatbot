@@ -31,7 +31,7 @@ def test_load_from_json(tmp_path):
         "llm": {"model": "gpt-4o", "base_url": "https://api.openai.com/v1", "api_key": "sk-xxx"},
         "embedding": {"model": "text-embedding-3-small", "type": "api",
                       "base_url": "https://api.openai.com/v1", "api_key": "sk-xxx"},
-        "reranker": {"model": "BAAI/bge-reranker-v2-m3", "type": "local"},
+        "reranker": {"model": "BAAI/bge-reranker-v2-m3", "type": "cross_encoder"},
     }
     f = tmp_path / "config.json"
     f.write_text(json.dumps(config_data))

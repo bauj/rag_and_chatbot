@@ -1,6 +1,8 @@
 import json
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 # Gradio may not be installed in test environments; stub it out so WebUI can be imported
 if "gradio" not in sys.modules:
@@ -1110,3 +1112,101 @@ def test_terminal_print_answer_reports_the_context_size(capsys):
     })
     out = capsys.readouterr().out
     assert "12" in out and "48,000" in out
+
+
+# --- Late-interaction reranker (task #72) ---
+
+def test_reranker_config_rejects_unknown_type():
+    from core.config import RerankerConfig
+    with pytest.raises(ValueError, match="late_interaction"):
+        RerankerConfig(model="fake-model", type="something_else")
+
+
+def test_reranker_config_defaults_to_cross_encoder():
+    from core.config import RerankerConfig
+    assert RerankerConfig().type == "cross_encoder"
+
+
+def test_load_reranker_defaults_to_cross_encoder():
+    from core.rag_chatbot import DocumentationChatbot
+    from core.config import RerankerConfig
+
+    bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    bot.config = MagicMock(reranker=RerankerConfig(model="fake-cross-encoder"))
+
+    with patch("sentence_transformers.CrossEncoder") as mock_ce:
+        bot._load_reranker()
+        mock_ce.assert_called_once_with("fake-cross-encoder")
+
+
+def test_load_reranker_loads_multi_vector_encoder_for_late_interaction():
+    from core.rag_chatbot import DocumentationChatbot
+    from core.config import RerankerConfig
+
+    bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    bot.config = MagicMock(
+        reranker=RerankerConfig(model="fake-colbert", type="late_interaction")
+    )
+
+    with patch("sentence_transformers.MultiVectorEncoder") as mock_mve:
+        bot._load_reranker()
+        mock_mve.assert_called_once_with("fake-colbert")
+
+
+def test_load_reranker_raises_clear_error_when_multi_vector_encoder_missing(monkeypatch):
+    """Pre-v6.0 sentence-transformers lacks MultiVectorEncoder — fail with a clear message."""
+    from core.rag_chatbot import DocumentationChatbot
+    from core.config import RerankerConfig
+    import sentence_transformers
+
+    monkeypatch.delattr(sentence_transformers, "MultiVectorEncoder", raising=False)
+
+    bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    bot.config = MagicMock(
+        reranker=RerankerConfig(model="fake-colbert", type="late_interaction")
+    )
+
+    with pytest.raises(ImportError, match="sentence-transformers >= 6.0"):
+        bot._load_reranker()
+
+
+def test_order_by_late_interaction_sorts_by_maxsim_score_descending():
+    from core.rag_chatbot import DocumentationChatbot
+
+    bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    docs = [Document(page_content=f"doc {i}") for i in range(3)]
+
+    bot.reranker = MagicMock()
+    bot.reranker.encode_query = lambda queries: "query_emb"
+    bot.reranker.encode_document = lambda texts: "doc_embs"
+    # Middle doc scores highest, first doc lowest.
+    bot.reranker.similarity = lambda q, d: [[0.1, 0.9, 0.5]]
+
+    result = bot._order_by_late_interaction("q", docs)
+
+    assert [d.page_content for d in result] == ["doc 1", "doc 2", "doc 0"]
+
+
+def test_select_context_routes_to_late_interaction_when_configured():
+    from core.rag_chatbot import DocumentationChatbot
+    from core.config import RerankerConfig
+
+    bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    bot.config = MagicMock(
+        reranker=RerankerConfig(model="fake-colbert", type="late_interaction"),
+        top_n_after_rerank=15, expansion_char_budget=60000,
+        bm25_jsonl_path="/nonexistent/corpus.jsonl",
+    )
+    bot.bm25_index = None
+    bot.reranker = MagicMock()
+    bot.reranker.encode_query = lambda queries: "query_emb"
+    bot.reranker.encode_document = lambda texts: "doc_embs"
+    bot.reranker.similarity = lambda q, d: [[1.0, 2.0]]
+    # Cross-encoder path must not fire when late_interaction is configured.
+    bot.reranker.predict = MagicMock(side_effect=AssertionError("cross-encoder path used"))
+
+    docs = [Document(page_content="a", metadata={}), Document(page_content="b", metadata={})]
+    result = bot._select_context("q", docs)
+
+    assert [d.page_content for d in result] == ["b", "a"]
+    bot.reranker.predict.assert_not_called()

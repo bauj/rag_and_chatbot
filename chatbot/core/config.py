@@ -28,7 +28,18 @@ class EmbeddingConfig:
 @dataclass
 class RerankerConfig:
     model: str = "BAAI/bge-reranker-v2-m3"
-    type: str = "local"          # "local" only for now
+    # "cross_encoder" (default, sentence_transformers.CrossEncoder) or
+    # "late_interaction" (sentence_transformers.MultiVectorEncoder, ColBERT-style
+    # MaxSim scoring — requires sentence-transformers >= 6.0). Only one reranking
+    # method runs at a time, so this is a mode switch, not an opt-in flag alongside
+    # bm25_enabled/hyde_enabled/title_boost_enabled.
+    type: str = "cross_encoder"
+
+    def __post_init__(self):
+        if self.type not in ("cross_encoder", "late_interaction"):
+            raise ValueError(
+                f"reranker.type must be 'cross_encoder' or 'late_interaction', got {self.type!r}"
+            )
 
 
 @dataclass

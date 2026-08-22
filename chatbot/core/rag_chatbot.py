@@ -142,9 +142,33 @@ class DocumentationChatbot:
         return llm
 
     def _load_reranker(self):
-        """Load cross-encoder reranker if configured. Returns None when disabled."""
+        """
+        Load the configured reranker. Returns None when disabled.
+
+        reranker.type picks the scoring method: "cross_encoder" (default) loads
+        sentence_transformers.CrossEncoder; "late_interaction" loads
+        sentence_transformers.MultiVectorEncoder for ColBERT-style MaxSim scoring,
+        which requires sentence-transformers >= 6.0 (MultiVectorEncoder was added
+        in that release). _order_by_reranker vs. _order_by_late_interaction picks
+        the matching scoring call based on this same type.
+        """
         if self.config.reranker is None:
             return None
+
+        model = self.config.reranker.model
+
+        if self.config.reranker.type == "late_interaction":
+            try:
+                from sentence_transformers import MultiVectorEncoder
+            except ImportError:
+                raise ImportError(
+                    "reranker.type 'late_interaction' requires sentence-transformers >= 6.0 "
+                    "(MultiVectorEncoder was added in that release).\n"
+                    "Upgrade it: pip install -U sentence-transformers"
+                )
+            print(f"DEBUG : load late-interaction reranker ({model}) ...")
+            return MultiVectorEncoder(model)
+
         try:
             from sentence_transformers import CrossEncoder
         except ImportError:
@@ -152,7 +176,6 @@ class DocumentationChatbot:
                 "sentence-transformers is required for reranking.\n"
                 "Install it: pip install sentence-transformers"
             )
-        model = self.config.reranker.model
         print(f"DEBUG : load reranker ({model}) ...")
         return CrossEncoder(model)
 
@@ -448,6 +471,21 @@ Passage:"""
         return [doc for _score, doc in
                 sorted(zip(scores, docs), key=lambda x: float(x[0]), reverse=True)]
 
+    def _order_by_late_interaction(self, query: str, docs: List) -> List:
+        """
+        Sort docs by ColBERT-style late-interaction (MaxSim) relevance, best first.
+
+        Scores only the candidate pool already assembled by _hybrid_retrieve — this
+        is a reranker swap, not a new first-stage retrieval channel. encode_query/
+        encode_document are separate calls (not interchangeable: these models use
+        different prefixes/length caps per side), per MultiVectorEncoder's API.
+        """
+        query_emb = self.reranker.encode_query([query])
+        doc_embs = self.reranker.encode_document([doc.page_content for doc in docs])
+        scores = self.reranker.similarity(query_emb, doc_embs)[0]
+        return [doc for _score, doc in
+                sorted(zip(scores, docs), key=lambda x: float(x[0]), reverse=True)]
+
     def _pick_section_representatives(self, docs: List) -> List:
         """
         Keep one chunk per section_id, the first in the given order.
@@ -509,7 +547,10 @@ Passage:"""
         docs = self._dedup_symbol_copies(docs)
 
         if self.reranker is not None and reranker_enabled:
-            docs = self._order_by_reranker(query, docs)
+            if self.config.reranker is not None and self.config.reranker.type == "late_interaction":
+                docs = self._order_by_late_interaction(query, docs)
+            else:
+                docs = self._order_by_reranker(query, docs)
 
         docs = self._pick_section_representatives(docs)[:limit]
 

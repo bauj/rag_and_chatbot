@@ -24,7 +24,7 @@ langchain-openai==1.1.12        # OpenAI-compatible API (for LiteLLM)
 langchain-huggingface==1.2.1    # HuggingFace embeddings (replaces langchain-community)
 
 # Embeddings
-sentence-transformers==5.3.0    # Embedding models (all-MiniLM-L6-v2)
+sentence-transformers==6.0.0    # Embedding models (all-MiniLM-L6-v2); v6 adds MultiVectorEncoder for late-interaction reranking
 rank_bm25==0.2.2                # BM25 sparse retrieval (hybrid search)
 
 # Agentic-smol mode (optional — only needed if smol_enabled: true in config.json)
