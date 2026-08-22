@@ -36,6 +36,7 @@ class AgenticConfig:
     page_index_path: str           # required — path to page_index.json (relative or absolute)
     max_chars_per_page: int = 8000
     max_steps: int = 6             # CodeAgent step budget
+    debug: bool = False            # Debug mode
 
 
 @dataclass

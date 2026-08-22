@@ -339,7 +339,7 @@ Examples:
         try:
             from core import AgenticChatbot
             print("Loading agentic chatbot (smolagents)...")
-            agentic_chatbot = AgenticChatbot(config)
+            agentic_chatbot = AgenticChatbot(config, vectorstore=chatbot.vectorstore, bm25_index=chatbot.bm25_index)
             print("Agentic chatbot ready.")
         except ImportError as e:
             if args.mode == 'agentic':
@@ -416,7 +416,7 @@ Examples:
                 print(result['answer'] or result['error'])
         else:
             # Interactive mode
-            terminal_ui.run_interactive()
+            terminal_ui.run_interactive(initial_mode=args.mode)
 
 
 if __name__ == "__main__":

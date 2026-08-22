@@ -59,3 +59,6 @@ evaluator/optimizer/graphs/
 # Whole tree, not just */*_extracted/ subdirs: also covers the per-variant .lock files
 # extraction_cache.py creates alongside them (see evaluator/base/extraction_cache.py).
 evaluator/extraction_cache/
+
+# agentic debug traces
+chatbot/debug_traces/

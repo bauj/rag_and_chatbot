@@ -45,9 +45,9 @@ def _make_config(tmp_path, index_entries=None):
     )
 
 
-def _make_bot(tmp_path, index_entries=None):
+def _make_bot(tmp_path, index_entries=None, bm25_index=None):
     config = _make_config(tmp_path, index_entries)
-    return AgenticChatbot(config)
+    return AgenticChatbot(config, vectorstore=MagicMock(), bm25_index=bm25_index)
 
 
 class _FakeAgent:
@@ -58,7 +58,7 @@ class _FakeAgent:
         self.memory = MagicMock()
         self.memory.steps = [MagicMock() for _ in range(steps)]
 
-    def run(self, task):
+    def run(self, task, reset=True):
         return self._run_fn(task)
 
 
@@ -69,7 +69,7 @@ class _FakeAgent:
 def test_no_agentic_config_raises_at_construction(tmp_path):
     config = ChatbotConfig(project_name="test", chromadb_path=str(tmp_path))
     with pytest.raises(ValueError):
-        AgenticChatbot(config)
+        AgenticChatbot(config, vectorstore=MagicMock())
 
 
 def test_missing_page_index_raises_at_construction(tmp_path):
@@ -79,14 +79,14 @@ def test_missing_page_index_raises_at_construction(tmp_path):
         agentic=AgenticConfig(page_index_path=str(tmp_path / "missing.json")),
     )
     with pytest.raises(FileNotFoundError):
-        AgenticChatbot(config)
+        AgenticChatbot(config, vectorstore=MagicMock())
 
 
 def test_missing_smolagents_raises_importerror(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "smolagents", None)
     config = _make_config(tmp_path)
     with pytest.raises(ImportError):
-        AgenticChatbot(config)
+        AgenticChatbot(config, vectorstore=MagicMock())
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,13 @@ def test_missing_smolagents_raises_importerror(tmp_path, monkeypatch):
 
 def test_search_pages_tool_forward_returns_candidates(tmp_path):
     bot = _make_bot(tmp_path)
-    tool = bot._SearchPagesToolCls(bot._page_index)
+
+    class _FakeDoc:
+        def __init__(self, filename):
+            self.metadata = {"url": f"https://example.com/{filename}"}
+
+    bot._vectorstore.similarity_search = lambda query, k: [_FakeDoc("classModelAPI__Feature.html")]
+    tool = bot._SearchPagesToolCls(bot._vectorstore, bot._page_index)
     result = tool.forward("ModelAPI_Feature")
     assert "classModelAPI__Feature.html" in result
 
@@ -339,6 +345,45 @@ def test_ask_replaces_leaked_code_answer_with_fallback_when_no_sources_read(tmp_
     assert result["filters"]["grounded"] is False
 
 
+def test_ask_ambiguous_overload_flag_alone_does_not_degrade_after_retry(tmp_path, monkeypatch):
+    # An ambiguous_overload flag can never clear on its own (see
+    # grounding_judge.check_grounding's docstring) — it must not, by itself,
+    # cause an otherwise-good retried answer to be discarded.
+    bot = _make_bot(tmp_path)
+    calls = {"n": 0}
+
+    def fake_check_grounding(answer, agent, llm_classify_fn=None):
+        calls["n"] += 1
+        return [{"call": "addBox", "kind": "ambiguous_overload", "reason": "multiple documented signatures"}]
+
+    monkeypatch.setattr("core.agentic_chatbot.check_grounding", fake_check_grounding)
+    bot._CodeAgent = MagicMock(return_value=_FakeAgent(run_fn=lambda task: "corrected code answer"))
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
+
+    assert calls["n"] == 2  # initial check + one retry check
+    assert result["filters"]["degraded_answer"] is False
+    assert result["answer"] == "corrected code answer"
+    assert result["filters"]["grounding_retries_used"] == 1
+
+
+def test_ask_unknown_name_flag_surviving_retry_still_degrades(tmp_path, monkeypatch):
+    bot = _make_bot(tmp_path)
+
+    def fake_check_grounding(answer, agent, llm_classify_fn=None):
+        return [{"call": "invented", "kind": "unknown_name", "reason": "unknown name"}]
+
+    monkeypatch.setattr("core.agentic_chatbot.check_grounding", fake_check_grounding)
+    bot._CodeAgent = MagicMock(return_value=_FakeAgent(run_fn=lambda task: "still bad answer"))
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
+
+    assert result["filters"]["degraded_answer"] is True
+    assert result["answer"] != "still bad answer"
+
+
 def test_ask_normal_answer_is_not_flagged_degraded(tmp_path):
     bot = _make_bot(tmp_path)
     bot._CodeAgent = MagicMock(return_value=_FakeAgent(run_fn=lambda task: "A clean prose answer."))
@@ -394,7 +439,7 @@ def test_ask_defaults_temperature_and_max_tokens_from_config(tmp_path):
     config = _make_config(tmp_path)
     config.temperature = 0.3
     config.max_tokens = 999
-    bot = AgenticChatbot(config)
+    bot = AgenticChatbot(config, vectorstore=MagicMock())
     captured = {}
 
     def fake_openai_server_model(model_id, api_base, api_key, **kwargs):
@@ -429,7 +474,7 @@ def test_ask_wires_ssl_cert_file_into_client_kwargs(tmp_path):
 
     config = _make_config(tmp_path)
     config.llm.ssl_cert_file = str(cert_path)
-    bot = AgenticChatbot(config)
+    bot = AgenticChatbot(config, vectorstore=MagicMock())
     captured = {}
 
     def fake_openai_server_model(model_id, api_base, api_key, **kwargs):
@@ -451,7 +496,7 @@ def test_ask_wires_ssl_cert_file_into_client_kwargs(tmp_path):
 def test_ask_missing_ssl_cert_file_raises(tmp_path):
     config = _make_config(tmp_path)
     config.llm.ssl_cert_file = str(tmp_path / "missing_cert.pem")
-    bot = AgenticChatbot(config)
+    bot = AgenticChatbot(config, vectorstore=MagicMock())
     bot._CodeAgent = MagicMock()
     bot._OpenAIServerModel = MagicMock()
 

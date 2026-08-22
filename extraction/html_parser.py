@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from langchain_chroma import Chroma
 from bs4 import BeautifulSoup, NavigableString, Tag
 from markdownify import markdownify as _markdownify
 
@@ -352,49 +353,103 @@ def save_page_index(entries: List[Dict[str, Any]], output_path: str) -> None:
         json.dump(entries, f, ensure_ascii=False, indent=2)
 
 
+def _tokenize(text: str) -> Set[str]:
+    return {t.lower() for t in re.split(r'[\s_\-]+', text) if len(t) >= 3}
+
+
+def _channel_filenames(hits: List[Any]) -> List[str]:
+    """
+    Reduce a ranked list of Chroma/BM25 hits (langchain Documents) to a
+    deduped, order-preserving list of filenames — the raw trailing segment
+    of each hit's 'url' metadata, since that's the only field guaranteed to
+    join back to page_index across both dense and BM25 result shapes.
+    """
+    seen: Set[str] = set()
+    out = []
+    for doc in hits:
+        url = doc.metadata.get('url', '')
+        if not url:
+            continue
+        filename = url.split('/')[-1].split('#')[0]
+        if filename in seen:
+            continue
+        seen.add(filename)
+        out.append(filename)
+    return out
+
+
+def _rrf_fuse_filenames(ranked_filename_lists: List[List[str]], rrf_k: int = 60) -> List[str]:
+    """
+    Reciprocal rank fusion over filename-keyed channels. Deliberately a small
+    local reimplementation of chatbot/core/bm25_index.reciprocal_rank_fusion's
+    algorithm rather than an import of it — extraction/ stays independent of
+    chatbot/core so it keeps working standalone (e.g. from process_docs.py).
+    """
+    scores: Dict[str, float] = {}
+    order: List[str] = []
+    for ranked in ranked_filename_lists:
+        for rank, filename in enumerate(ranked):
+            if filename not in scores:
+                order.append(filename)
+            scores[filename] = scores.get(filename, 0.0) + 1.0 / (rrf_k + rank + 1)
+    return sorted(order, key=lambda f: scores[f], reverse=True)
+
+
 def search_pages(
+    vectorstore: Chroma,
     page_index: List[Dict[str, Any]],
     query: str,
+    k: int = 50,
     exclude_filepaths: Optional[Set[str]] = None,
+    bm25_index: Optional[Any] = None,
+    title_boost_enabled: bool = False,
 ) -> List[Dict[str, Any]]:
     """
-    Search the page index for entries matching the query.
+    Hybrid search over the RAG-mode retrieval channels, mapped back to
+    page_index entries so read_page(filepath=...) keeps working unchanged.
 
-    Two-stage token matching:
-    1. Filename tokens: for each query token, find pages whose filename contains it (case-insensitive)
-    2. Title tokens: for each remaining query token, find pages whose title contains it
+    Fuses up to three ranked channels via reciprocal rank fusion:
+    dense (always), BM25 body search and BM25 title search (both only when
+    bm25_index is given — a duck-typed object exposing .search(query, k) and
+    .search_titles(query, k), i.e. chatbot/core/bm25_index.BM25Index, passed
+    in rather than imported so this module doesn't depend on chatbot/core).
+    title_boost_enabled gates the title channel same as rag_chatbot.py's
+    _hybrid_retrieve — see [[project-rag-entity-lookup-lesson]]/task #93:
+    dense-only retrieval misses named-entity lookups, which the agentic
+    page-search tool is just as exposed to as the main RAG chain.
 
-    Deduplicates by filepath. Preserves insertion order (filename matches first).
-    exclude_filepaths: set of filepath strings to skip.
+    Chroma chunk metadata may hold a web URL instead of a local filepath
+    (extraction config-dependent), so the join to page_index is done via
+    filename — the raw, unmodified trailing segment of the URL — rather
+    than the url/filepath fields directly.
     """
-    if exclude_filepaths is None:
-        exclude_filepaths = set()
+    exclude_filepaths = exclude_filepaths or set()
+    by_filename = {e['filename']: e for e in page_index}
 
-    tokens = [t.lower() for t in re.split(r'[\s_\-]+', query) if len(t) >= 3]
-    if not tokens:
-        return []
+    fetch_k = k * 4  # over-fetch; dedup + join will shrink it
 
-    seen: Set[str] = set(exclude_filepaths)
+    channels = [_channel_filenames(vectorstore.similarity_search(query, k=fetch_k))]
+    if bm25_index is not None:
+        channels.append(_channel_filenames(bm25_index.search(query, fetch_k)))
+        if title_boost_enabled:
+            channels.append(_channel_filenames(bm25_index.search_titles(query, fetch_k)))
+
+    fused_filenames = channels[0] if len(channels) == 1 else _rrf_fuse_filenames(channels)
+
+    seen: Set[str] = set()
     result = []
+    for filename in fused_filenames:
+        entry = by_filename.get(filename)
+        if entry is None:
+            continue  # chunk has no matching page_index entry — skip rather than guess
 
-    # Stage 1: filename matches
-    for token in tokens:
-        for entry in page_index:
-            fp = entry['filepath']
-            if fp in seen:
-                continue
-            if token in entry['filename'].lower():
-                seen.add(fp)
-                result.append(entry)
+        filepath = entry['filepath']
+        if filepath in seen or filepath in exclude_filepaths:
+            continue
+        seen.add(filepath)
+        result.append(entry)
 
-    # Stage 2: title matches
-    for token in tokens:
-        for entry in page_index:
-            fp = entry['filepath']
-            if fp in seen:
-                continue
-            if token in entry['title'].lower():
-                seen.add(fp)
-                result.append(entry)
+        if len(result) >= k:
+            break
 
     return result
