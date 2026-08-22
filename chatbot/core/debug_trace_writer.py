@@ -43,11 +43,15 @@ class DebugTraceWriter:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         out_path = self.debug_dir / f"trace_{ts}.json"
 
+        steps = [self._serialize_step(i, step) for i, step in enumerate(agent.memory.steps)]
+
         record = {
             "timestamp": ts,
             "question": question,
             "metadata": extra or {},
-            "steps": [self._serialize_step(i, step) for i, step in enumerate(agent.memory.steps)],
+            "total_duration_seconds": self._total_duration(steps),
+            "total_tokens": self._total_tokens(steps),
+            "steps": steps,
         }
 
         with open(out_path, "w", encoding="utf-8") as f:
@@ -85,13 +89,34 @@ class DebugTraceWriter:
         if plan:
             entry["plan"] = plan
 
-        # Token/timing info if smolagents populated it on this step
-        for attr in ("input_token_count", "output_token_count", "duration"):
-            val = getattr(step, attr, None)
-            if val is not None:
-                entry[attr] = val
+        # smolagents' ActionStep carries timing as a Timing object (.start_time/
+        # .end_time/.duration), not flat attrs on the step itself — earlier
+        # versions of this method looked for input_token_count/output_token_count/
+        # duration directly on the step, which never existed, so every trace
+        # silently recorded no timing/token data at all.
+        timing = getattr(step, "timing", None)
+        if timing is not None:
+            entry["start_time"] = timing.start_time
+            entry["end_time"] = timing.end_time
+            entry["duration_seconds"] = timing.duration
+
+        token_usage = getattr(step, "token_usage", None)
+        if token_usage is not None:
+            entry["input_tokens"] = token_usage.input_tokens
+            entry["output_tokens"] = token_usage.output_tokens
+            entry["total_tokens"] = token_usage.total_tokens
 
         return entry
+
+    @staticmethod
+    def _total_duration(steps: List[Dict[str, Any]]) -> Optional[float]:
+        durations = [s["duration_seconds"] for s in steps if s.get("duration_seconds") is not None]
+        return sum(durations) if durations else None
+
+    @staticmethod
+    def _total_tokens(steps: List[Dict[str, Any]]) -> Optional[int]:
+        totals = [s["total_tokens"] for s in steps if s.get("total_tokens") is not None]
+        return sum(totals) if totals else None
 
 
 def load_traces(debug_dir: str | Path) -> List[Dict[str, Any]]:

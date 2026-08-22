@@ -1,17 +1,17 @@
 """
-grounding_judge — deterministic check that code in an agentic answer only
+grounding_judge - deterministic check that code in an agentic answer only
 calls names that actually appear in the documentation the agent retrieved.
 
 Replaces an earlier version that asked the *same* weak/small LLM that wrote
 the code to also judge whether it was grounded. Two problems with that:
 literature on self-verification shows LLMs exhibit self-preference bias
 judging their own output, and the judge failed open (returned "grounded")
-whenever its own JSON response didn't parse — exactly the failure mode a
+whenever its own JSON response didn't parse - exactly the failure mode a
 weak model hits most often, silently disabling the safety net for the
 models it was meant to help. See project memory
 project-rag-agentic-reliability-wip for the full writeup.
 
-check_grounding() only verifies call *names* exist in the retrieved text —
+check_grounding() only verifies call *names* exist in the retrieved text -
 not argument count/order/kind, which the old LLM judge attempted but which
 needs real signature data (Doxygen memitem parsing or Sphinx autodoc, not
 free-text scanning) to check without guessing; that's a follow-up, not done
@@ -56,7 +56,7 @@ def _find_code_blocks(answer: str) -> List[Tuple[str, str]]:
     Return (language, code) pairs for every fenced code block in `answer`.
     Falls back to treating the whole answer as one Python block if it has no
     fences but parses as valid standalone Python (English prose essentially
-    never does) — covers a model that wrote code without wrapping it in
+    never does) - covers a model that wrote code without wrapping it in
     markdown fences.
     """
     fenced = _CODE_FENCE_RE.findall(answer)
@@ -102,7 +102,7 @@ def check_grounding(
     allowlist. Returns [] if `answer` has no code blocks at all.
 
     llm_classify_fn: optional callable(name) -> bool, asked only about names
-    that survive the static allowlist — a narrow "is this a language/stdlib
+    that survive the static allowlist - a narrow "is this a language/stdlib
     builtin" question, not a grounding verifier. It can only shrink the
     result (filter a false positive), never wave through a name that
     genuinely doesn't appear in the docs, so a truly hallucinated project
@@ -134,14 +134,14 @@ def check_grounding(
 def llm_builtin_classifier(judge_model) -> Callable[[str], bool]:
     """
     Build a classify(name) -> bool function that asks `judge_model` a single
-    narrow yes/no question — "is this a language/stdlib builtin" — for names
+    narrow yes/no question - "is this a language/stdlib builtin" - for names
     the static allowlist in check_grounding() didn't recognize (e.g. C++
     std:: members, less-common Python builtins). See check_grounding's
     llm_classify_fn docstring for why this is safe even with a weak model:
     it only filters, never grounds.
 
     Fails CLOSED (returns False, i.e. "not a builtin", keeping the flag) on
-    any classify error — the opposite of the old judge's fail-open, since
+    any classify error - the opposite of the old judge's fail-open, since
     there's no longer a second full-grounding LLM call whose failure should
     default to trusting the answer.
     """
