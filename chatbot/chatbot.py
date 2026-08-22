@@ -416,7 +416,7 @@ Examples:
                 print(result['answer'] or result['error'])
         else:
             # Interactive mode
-            terminal_ui.run_interactive()
+            terminal_ui.run_interactive(initial_mode=args.mode)
 
 
 if __name__ == "__main__":

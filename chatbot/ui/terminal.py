@@ -169,11 +169,23 @@ class TerminalUI:
 
         print("="*70 + "\n")
 
-    def run_interactive(self):
-        """Run interactive chat session"""
+    def run_interactive(self, initial_mode: str = "rag"):
+        """
+        Run interactive chat session.
+
+        initial_mode: "rag" or "agentic" — typically the --mode CLI flag, so
+        launching with --mode agentic actually starts in agentic mode instead
+        of silently defaulting to rag until the user types mode:agentic.
+        """
         self._print_header()
 
         current_mode = "rag"        # "rag" or "agentic"
+        if initial_mode == "agentic":
+            if self.agentic_chatbot is None:
+                print("Warning: Agentic mode is not configured (add 'agentic' block to config.json) "
+                      "— starting in RAG mode instead.\n")
+            else:
+                current_mode = "agentic"
         current_module = None
         current_type = None
         deep_dive_mode = False
