@@ -356,16 +356,67 @@ def save_page_index(entries: List[Dict[str, Any]], output_path: str) -> None:
 def _tokenize(text: str) -> Set[str]:
     return {t.lower() for t in re.split(r'[\s_\-]+', text) if len(t) >= 3}
 
+
+def _channel_filenames(hits: List[Any]) -> List[str]:
+    """
+    Reduce a ranked list of Chroma/BM25 hits (langchain Documents) to a
+    deduped, order-preserving list of filenames — the raw trailing segment
+    of each hit's 'url' metadata, since that's the only field guaranteed to
+    join back to page_index across both dense and BM25 result shapes.
+    """
+    seen: Set[str] = set()
+    out = []
+    for doc in hits:
+        url = doc.metadata.get('url', '')
+        if not url:
+            continue
+        filename = url.split('/')[-1].split('#')[0]
+        if filename in seen:
+            continue
+        seen.add(filename)
+        out.append(filename)
+    return out
+
+
+def _rrf_fuse_filenames(ranked_filename_lists: List[List[str]], rrf_k: int = 60) -> List[str]:
+    """
+    Reciprocal rank fusion over filename-keyed channels. Deliberately a small
+    local reimplementation of chatbot/core/bm25_index.reciprocal_rank_fusion's
+    algorithm rather than an import of it — extraction/ stays independent of
+    chatbot/core so it keeps working standalone (e.g. from process_docs.py).
+    """
+    scores: Dict[str, float] = {}
+    order: List[str] = []
+    for ranked in ranked_filename_lists:
+        for rank, filename in enumerate(ranked):
+            if filename not in scores:
+                order.append(filename)
+            scores[filename] = scores.get(filename, 0.0) + 1.0 / (rrf_k + rank + 1)
+    return sorted(order, key=lambda f: scores[f], reverse=True)
+
+
 def search_pages(
     vectorstore: Chroma,
     page_index: List[Dict[str, Any]],
     query: str,
     k: int = 50,
     exclude_filepaths: Optional[Set[str]] = None,
+    bm25_index: Optional[Any] = None,
+    title_boost_enabled: bool = False,
 ) -> List[Dict[str, Any]]:
     """
-    Dense semantic search over the RAG-mode ChromaDB, mapped back to
+    Hybrid search over the RAG-mode retrieval channels, mapped back to
     page_index entries so read_page(filepath=...) keeps working unchanged.
+
+    Fuses up to three ranked channels via reciprocal rank fusion:
+    dense (always), BM25 body search and BM25 title search (both only when
+    bm25_index is given — a duck-typed object exposing .search(query, k) and
+    .search_titles(query, k), i.e. chatbot/core/bm25_index.BM25Index, passed
+    in rather than imported so this module doesn't depend on chatbot/core).
+    title_boost_enabled gates the title channel same as rag_chatbot.py's
+    _hybrid_retrieve — see [[project-rag-entity-lookup-lesson]]/task #93:
+    dense-only retrieval misses named-entity lookups, which the agentic
+    page-search tool is just as exposed to as the main RAG chain.
 
     Chroma chunk metadata may hold a web URL instead of a local filepath
     (extraction config-dependent), so the join to page_index is done via
@@ -375,16 +426,19 @@ def search_pages(
     exclude_filepaths = exclude_filepaths or set()
     by_filename = {e['filename']: e for e in page_index}
 
-    hits = vectorstore.similarity_search(query, k=k * 4)  # over-fetch; dedup + join will shrink it
+    fetch_k = k * 4  # over-fetch; dedup + join will shrink it
+
+    channels = [_channel_filenames(vectorstore.similarity_search(query, k=fetch_k))]
+    if bm25_index is not None:
+        channels.append(_channel_filenames(bm25_index.search(query, fetch_k)))
+        if title_boost_enabled:
+            channels.append(_channel_filenames(bm25_index.search_titles(query, fetch_k)))
+
+    fused_filenames = channels[0] if len(channels) == 1 else _rrf_fuse_filenames(channels)
 
     seen: Set[str] = set()
     result = []
-    for doc in hits:
-        url = doc.metadata.get('url', '')
-        if not url:
-            continue
-        filename = url.split('/')[-1].split('#')[0]
-
+    for filename in fused_filenames:
         entry = by_filename.get(filename)
         if entry is None:
             continue  # chunk has no matching page_index entry — skip rather than guess

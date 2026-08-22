@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from langchain_chroma import Chroma
+from .bm25_index import BM25Index
 from .config import ChatbotConfig
 from .debug_trace_writer import DebugTraceWriter
 from .grounding_judge import check_grounding_llm
@@ -45,7 +46,7 @@ class AgenticChatbot:
     Requires config.agentic to be set and the smolagents package to be installed.
     """
 
-    def __init__(self, config: ChatbotConfig, vectorstore: Chroma):
+    def __init__(self, config: ChatbotConfig, vectorstore: Chroma, bm25_index: Optional[BM25Index] = None):
         if config.agentic is None:
             raise ValueError(
                 "AgenticChatbot requires config.agentic to be set. "
@@ -67,6 +68,7 @@ class AgenticChatbot:
         self._OpenAIServerModel = OpenAIServerModel
         self._SearchPagesToolCls, self._ReadPageToolCls = _build_tool_classes(Tool)
         self._vectorstore = vectorstore
+        self._bm25_index = bm25_index
 
         index_path = Path(self._agentic_cfg.page_index_path)
         if not index_path.is_absolute():
@@ -135,7 +137,11 @@ class AgenticChatbot:
         _debug = debug if debug is not None else getattr(cfg, "debug", False)
 
         read_entries: List[dict] = []
-        search_tool = self._SearchPagesToolCls(self._vectorstore, self._page_index)
+        search_tool = self._SearchPagesToolCls(
+            self._vectorstore, self._page_index,
+            bm25_index=self._bm25_index,
+            title_boost_enabled=self.config.title_boost_enabled,
+        )
         read_tool = self._ReadPageToolCls(self._entry_by_filepath, _max_chars_per_page, read_entries)
 
         model = self._OpenAIServerModel(
@@ -324,13 +330,20 @@ def _build_tool_classes(Tool):
         inputs = {"query": {"type": "string", "description": "Search terms describing what to look for."}}
         output_type = "string"
 
-        def __init__(self, vectorstore: Chroma, page_index: List[dict]):
+        def __init__(self, vectorstore: Chroma, page_index: List[dict],
+                     bm25_index: Optional[BM25Index] = None, title_boost_enabled: bool = False):
             super().__init__()
             self._vectorstore = vectorstore
             self._page_index = page_index
+            self._bm25_index = bm25_index
+            self._title_boost_enabled = title_boost_enabled
 
         def forward(self, query: str) -> str:
-            candidates = search_pages(self._vectorstore, self._page_index, query)
+            candidates = search_pages(
+                self._vectorstore, self._page_index, query,
+                bm25_index=self._bm25_index,
+                title_boost_enabled=self._title_boost_enabled,
+            )
             if not candidates:
                 return "No matches for " + query + ". Try a broader or alternative term, or search a related feature category."
             return "\n".join(

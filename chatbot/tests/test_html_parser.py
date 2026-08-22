@@ -115,40 +115,104 @@ def _make_index():
     ]
 
 
-def test_search_pages_finds_by_filename_token(dummy=None):
+class _FakeDoc:
+    """Stand-in for a langchain Document — only .metadata['url'] is read by search_pages."""
+
+    def __init__(self, filename):
+        self.metadata = {"url": f"https://example.com/{filename}"}
+
+
+class _FakeVectorStore:
+    """similarity_search returns a fixed ranked list of filenames, regardless of query/k."""
+
+    def __init__(self, ranked_filenames):
+        self._ranked_filenames = ranked_filenames
+
+    def similarity_search(self, query, k):
+        return [_FakeDoc(f) for f in self._ranked_filenames[:k]]
+
+
+class _FakeBM25Index:
+    """search()/search_titles() each return a fixed ranked list of filenames."""
+
+    def __init__(self, body_ranked=(), title_ranked=()):
+        self._body_ranked = list(body_ranked)
+        self._title_ranked = list(title_ranked)
+
+    def search(self, query, k):
+        return [_FakeDoc(f) for f in self._body_ranked[:k]]
+
+    def search_titles(self, query, k):
+        return [_FakeDoc(f) for f in self._title_ranked[:k]]
+
+
+def test_search_pages_finds_dense_hit(dummy=None):
     idx = _make_index()
-    results = search_pages(idx, "ModelAPI_Feature")
+    vs = _FakeVectorStore(["classModelAPI__Feature.html"])
+    results = search_pages(vs, idx, "ModelAPI_Feature")
     filenames = [r["filename"] for r in results]
     assert "classModelAPI__Feature.html" in filenames
 
 
-def test_search_pages_finds_by_title_token():
-    idx = _make_index()
-    results = search_pages(idx, "mesh tutorial")
-    filenames = [r["filename"] for r in results]
-    assert "tutorial_mesh.html" in filenames
-
-
 def test_search_pages_no_match_returns_empty():
     idx = _make_index()
-    results = search_pages(idx, "zzznomatchzzz")
+    vs = _FakeVectorStore([])
+    results = search_pages(vs, idx, "zzznomatchzzz")
     assert results == []
 
 
-def test_search_pages_deduplicates():
+def test_search_pages_skips_hits_with_no_matching_page_index_entry():
     idx = _make_index()
-    # Query that matches same page via filename AND title
-    results = search_pages(idx, "ModelAPI Feature class reference")
-    filepaths = [r["filepath"] for r in results]
-    assert len(filepaths) == len(set(filepaths))
+    vs = _FakeVectorStore(["unknown_page.html", "tutorial_mesh.html"])
+    results = search_pages(vs, idx, "mesh")
+    filenames = [r["filename"] for r in results]
+    assert filenames == ["tutorial_mesh.html"]
 
 
 def test_search_pages_exclude_filepaths():
     idx = _make_index()
+    vs = _FakeVectorStore(["classModelAPI__Feature.html", "group__ModelAPI.html"])
     excluded = {"/docs/classModelAPI__Feature.html"}
-    results = search_pages(idx, "ModelAPI", exclude_filepaths=excluded)
+    results = search_pages(vs, idx, "ModelAPI", exclude_filepaths=excluded)
     filepaths = {r["filepath"] for r in results}
     assert "/docs/classModelAPI__Feature.html" not in filepaths
+
+
+def test_search_pages_fuses_bm25_body_channel_when_index_given():
+    idx = _make_index()
+    # Dense channel finds nothing useful; BM25 body channel does.
+    vs = _FakeVectorStore([])
+    bm25 = _FakeBM25Index(body_ranked=["tutorial_mesh.html"])
+    results = search_pages(vs, idx, "mesh tutorial", bm25_index=bm25)
+    filenames = [r["filename"] for r in results]
+    assert "tutorial_mesh.html" in filenames
+
+
+def test_search_pages_ignores_title_channel_when_not_boosted():
+    idx = _make_index()
+    vs = _FakeVectorStore([])
+    bm25 = _FakeBM25Index(title_ranked=["group__ModelAPI.html"])
+    results = search_pages(vs, idx, "ModelAPI", bm25_index=bm25, title_boost_enabled=False)
+    assert results == []
+
+
+def test_search_pages_fuses_title_channel_when_boosted():
+    idx = _make_index()
+    vs = _FakeVectorStore([])
+    bm25 = _FakeBM25Index(title_ranked=["group__ModelAPI.html"])
+    results = search_pages(vs, idx, "ModelAPI", bm25_index=bm25, title_boost_enabled=True)
+    filenames = [r["filename"] for r in results]
+    assert "group__ModelAPI.html" in filenames
+
+
+def test_search_pages_deduplicates_across_channels():
+    idx = _make_index()
+    # Same page ranked in both the dense and BM25 channels — must appear once.
+    vs = _FakeVectorStore(["classModelAPI__Feature.html"])
+    bm25 = _FakeBM25Index(body_ranked=["classModelAPI__Feature.html"])
+    results = search_pages(vs, idx, "ModelAPI Feature class reference", bm25_index=bm25)
+    filepaths = [r["filepath"] for r in results]
+    assert len(filepaths) == len(set(filepaths))
 
 
 # ---------------------------------------------------------------------------

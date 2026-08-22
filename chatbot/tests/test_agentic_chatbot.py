@@ -45,9 +45,9 @@ def _make_config(tmp_path, index_entries=None):
     )
 
 
-def _make_bot(tmp_path, index_entries=None):
+def _make_bot(tmp_path, index_entries=None, bm25_index=None):
     config = _make_config(tmp_path, index_entries)
-    return AgenticChatbot(config)
+    return AgenticChatbot(config, vectorstore=MagicMock(), bm25_index=bm25_index)
 
 
 class _FakeAgent:
@@ -69,7 +69,7 @@ class _FakeAgent:
 def test_no_agentic_config_raises_at_construction(tmp_path):
     config = ChatbotConfig(project_name="test", chromadb_path=str(tmp_path))
     with pytest.raises(ValueError):
-        AgenticChatbot(config)
+        AgenticChatbot(config, vectorstore=MagicMock())
 
 
 def test_missing_page_index_raises_at_construction(tmp_path):
@@ -79,14 +79,14 @@ def test_missing_page_index_raises_at_construction(tmp_path):
         agentic=AgenticConfig(page_index_path=str(tmp_path / "missing.json")),
     )
     with pytest.raises(FileNotFoundError):
-        AgenticChatbot(config)
+        AgenticChatbot(config, vectorstore=MagicMock())
 
 
 def test_missing_smolagents_raises_importerror(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "smolagents", None)
     config = _make_config(tmp_path)
     with pytest.raises(ImportError):
-        AgenticChatbot(config)
+        AgenticChatbot(config, vectorstore=MagicMock())
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,13 @@ def test_missing_smolagents_raises_importerror(tmp_path, monkeypatch):
 
 def test_search_pages_tool_forward_returns_candidates(tmp_path):
     bot = _make_bot(tmp_path)
-    tool = bot._SearchPagesToolCls(bot._page_index)
+
+    class _FakeDoc:
+        def __init__(self, filename):
+            self.metadata = {"url": f"https://example.com/{filename}"}
+
+    bot._vectorstore.similarity_search = lambda query, k: [_FakeDoc("classModelAPI__Feature.html")]
+    tool = bot._SearchPagesToolCls(bot._vectorstore, bot._page_index)
     result = tool.forward("ModelAPI_Feature")
     assert "classModelAPI__Feature.html" in result
 
@@ -394,7 +400,7 @@ def test_ask_defaults_temperature_and_max_tokens_from_config(tmp_path):
     config = _make_config(tmp_path)
     config.temperature = 0.3
     config.max_tokens = 999
-    bot = AgenticChatbot(config)
+    bot = AgenticChatbot(config, vectorstore=MagicMock())
     captured = {}
 
     def fake_openai_server_model(model_id, api_base, api_key, **kwargs):
@@ -429,7 +435,7 @@ def test_ask_wires_ssl_cert_file_into_client_kwargs(tmp_path):
 
     config = _make_config(tmp_path)
     config.llm.ssl_cert_file = str(cert_path)
-    bot = AgenticChatbot(config)
+    bot = AgenticChatbot(config, vectorstore=MagicMock())
     captured = {}
 
     def fake_openai_server_model(model_id, api_base, api_key, **kwargs):
@@ -451,7 +457,7 @@ def test_ask_wires_ssl_cert_file_into_client_kwargs(tmp_path):
 def test_ask_missing_ssl_cert_file_raises(tmp_path):
     config = _make_config(tmp_path)
     config.llm.ssl_cert_file = str(tmp_path / "missing_cert.pem")
-    bot = AgenticChatbot(config)
+    bot = AgenticChatbot(config, vectorstore=MagicMock())
     bot._CodeAgent = MagicMock()
     bot._OpenAIServerModel = MagicMock()
 
