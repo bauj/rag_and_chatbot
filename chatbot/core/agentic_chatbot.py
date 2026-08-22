@@ -18,7 +18,7 @@ from langchain_chroma import Chroma
 from .bm25_index import BM25Index
 from .config import ChatbotConfig
 from .debug_trace_writer import DebugTraceWriter
-from .grounding_judge import check_grounding_llm
+from .grounding_judge import check_grounding, llm_builtin_classifier
 
 # Matches code the model wrote instead of prose when forced to answer at max_steps
 # (smolagents' default code_block_tags is literally "<code>"/"</code>") — see
@@ -193,19 +193,18 @@ class AgenticChatbot:
 
         answer = str(raw_answer)
 
-        ungrounded_calls = check_grounding_llm(answer, agent, judge_model=model)
+        classify_builtin = llm_builtin_classifier(model)
+        ungrounded_calls = check_grounding(answer, agent, llm_classify_fn=classify_builtin)
         retries_used = 0
         while ungrounded_calls and retries_used < MAX_GROUNDING_RETRIES:
             retries_used += 1
-            complaints = "; ".join(
-                f"{c['call']} ({c['reason']})" for c in ungrounded_calls
-            )
+            complaints = "; ".join(c["call"] for c in ungrounded_calls)
             retry_task = (
-                f"Your previous answer used these calls that don't match the "
-                f"documentation you already retrieved: {complaints}. "
-                f"Fix ONLY these calls using the exact signatures shown in the "
-                f"documentation above — do not invent new calls, do not re-search "
-                f"unless truly necessary. Provide the corrected code via final_answer(...)."
+                f"Your previous answer used these call names, which don't appear "
+                f"anywhere in the documentation you already retrieved: {complaints}. "
+                f"Fix ONLY these calls — search/read again if you need the correct name "
+                f"or signature, do not invent a replacement. Provide the corrected code "
+                f"via final_answer(...)."
             )
             try:
                 raw_answer = agent.run(retry_task, reset=False)
@@ -213,7 +212,7 @@ class AgenticChatbot:
                 break  # keep the last answer/ungrounded_calls, fall through to degraded handling
 
             answer = str(raw_answer)
-            ungrounded_calls = check_grounding_llm(answer, agent, judge_model=model)
+            ungrounded_calls = check_grounding(answer, agent, llm_classify_fn=classify_builtin)
 
         seen = set()
         sources = []
