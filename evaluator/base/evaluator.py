@@ -297,7 +297,7 @@ def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
     - both modes: temperature, max_tokens, model, base_url, api_key
     - rag mode: k, k_standard, k_deep_dive, reranker_enabled, top_n, deep_dive,
       hyde_enabled, bm25_enabled, title_boost_enabled, k_retrieve,
-      deep_dive_batch_size, expansion_char_budget, reranker_model
+      deep_dive_batch_size, expansion_char_budget, reranker_model, reranker_type
     - agentic mode: max_steps, max_chars_per_page
 
     `chatbot_config_path`, if given, is passed as chatbot.py's --config — used
@@ -331,6 +331,8 @@ def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
             cmd.extend(["--api-key", str(config["api_key"])])
         if config.get("reranker_model") is not None:
             cmd.extend(["--reranker-model", str(config["reranker_model"])])
+        if config.get("reranker_type") is not None:
+            cmd.extend(["--reranker-type", str(config["reranker_type"])])
         if config.get("top_n") is not None:
             cmd.extend(["--top-n", str(config["top_n"])])
         if config.get("reranker_enabled") is False:

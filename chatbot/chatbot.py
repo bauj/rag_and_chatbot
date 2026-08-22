@@ -94,7 +94,16 @@ Examples:
     parser.add_argument(
         '--reranker-model',
         dest='reranker_model',
-        help='Cross-encoder reranker model (overrides config; enables reranking even if '
+        help='Reranker model (overrides config; enables reranking even if '
+             'disabled in config, rag mode only, terminal single-question mode)'
+    )
+    parser.add_argument(
+        '--reranker-type',
+        dest='reranker_type',
+        choices=['cross_encoder', 'late_interaction'],
+        help='Reranker scoring method: cross_encoder (default) or late_interaction '
+             '(ColBERT-style MaxSim via sentence_transformers.MultiVectorEncoder, requires '
+             'sentence-transformers >= 6.0) (overrides config; enables reranking even if '
              'disabled in config, rag mode only, terminal single-question mode)'
     )
 
@@ -275,15 +284,23 @@ Examples:
             config.llm.model = args.model
         if args.api_key:
             config.llm.api_key = args.api_key
-        if args.reranker_model:
+        if args.reranker_model or args.reranker_type:
             # Lets a trial opt into reranking purely via CLI even if config.json has
             # it disabled (config.reranker is None) — same spirit as the boolean
             # runtime toggles (--no-rerank etc.) already supported for the rest of
             # the retrieval pipeline.
             if config.reranker is None:
-                config.reranker = RerankerConfig(model=args.reranker_model)
+                kwargs = {}
+                if args.reranker_model:
+                    kwargs['model'] = args.reranker_model
+                if args.reranker_type:
+                    kwargs['type'] = args.reranker_type
+                config.reranker = RerankerConfig(**kwargs)
             else:
-                config.reranker.model = args.reranker_model
+                if args.reranker_model:
+                    config.reranker.model = args.reranker_model
+                if args.reranker_type:
+                    config.reranker.type = args.reranker_type
         if args.k_standard is not None:
             config.k_standard = args.k_standard
         if args.k_deep_dive is not None:
@@ -331,11 +348,12 @@ Examples:
                     or args.no_hyde or args.no_bm25 or args.no_title_boost
                     or args.k_retrieve is not None or args.deep_dive_batch_size is not None
                     or args.expansion_char_budget is not None or args.reranker_model is not None
+                    or args.reranker_type is not None
                     or args.k_standard is not None or args.k_deep_dive is not None):
                 print("Warning: --k, --k-standard, --k-deep-dive, --top-n, --no-rerank, --no-hyde, "
                       "--no-bm25, --no-title-boost, --k-retrieve, --deep-dive-batch-size, "
-                      "--expansion-char-budget and --reranker-model are not supported in agentic "
-                      "mode and will be ignored.", file=sys.stderr)
+                      "--expansion-char-budget, --reranker-model and --reranker-type are not "
+                      "supported in agentic mode and will be ignored.", file=sys.stderr)
         try:
             from core import AgenticChatbot
             print("Loading agentic chatbot (smolagents)...")

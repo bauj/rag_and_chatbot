@@ -11,6 +11,7 @@
       "max_tokens": {"type": "int", "low": 500, "high": 4000},
       "reranker_enabled": {"type": "bool"},
       "reranker_model": {"type": "categorical", "choices": ["BAAI/bge-reranker-v2-m3"]},
+      "reranker_type": {"type": "categorical", "choices": ["cross_encoder"]},
       "deep_dive": {"type": "bool"},
       "hyde_enabled": {"type": "bool"},
       "bm25_enabled": {"type": "bool"},
@@ -19,7 +20,7 @@
       "deep_dive_batch_size": {"type": "int", "low": 5, "high": 20},
       "expansion_char_budget": {"type": "int", "low": 10000, "high": 100000}
     },
-    "_comment_rag": "Full list of rag fields: k_standard, k_deep_dive, top_n, temperature, max_tokens, reranker_enabled, reranker_model, deep_dive, hyde_enabled, bm25_enabled, title_boost_enabled, k_retrieve, deep_dive_batch_size, expansion_char_budget. k_standard/k_deep_dive replace the single 'k' CLI override (chatbot.py --k still exists for a flat override, but isn't used here since only ONE of k_standard/k_deep_dive actually applies per trial anyway, picked by that trial's own deep_dive value — see chatbot/core/rag_chatbot.py). k_retrieve is ignored in deep dive mode; deep_dive_batch_size only applies when deep_dive is true — both are harmless, just inert, on trials where they don't apply (TPE learns this on its own). reranker_model only has an effect when reranker_enabled is true.",
+    "_comment_rag": "Full list of rag fields: k_standard, k_deep_dive, top_n, temperature, max_tokens, reranker_enabled, reranker_model, reranker_type, deep_dive, hyde_enabled, bm25_enabled, title_boost_enabled, k_retrieve, deep_dive_batch_size, expansion_char_budget. k_standard/k_deep_dive replace the single 'k' CLI override (chatbot.py --k still exists for a flat override, but isn't used here since only ONE of k_standard/k_deep_dive actually applies per trial anyway, picked by that trial's own deep_dive value — see chatbot/core/rag_chatbot.py). k_retrieve is ignored in deep dive mode; deep_dive_batch_size only applies when deep_dive is true — both are harmless, just inert, on trials where they don't apply (TPE learns this on its own). reranker_model and reranker_type only have an effect when reranker_enabled is true. WARNING: reranker_model and reranker_type are sampled INDEPENDENTLY, unlike k_retrieve/deep_dive_batch_size which are merely inert when mismatched — pairing reranker_type: late_interaction with a cross-encoder checkpoint name (or vice versa) is an invalid combination that errors at trial runtime (a ColBERT checkpoint isn't a valid CrossEncoder and vice versa). Do not list more than one reranker_model choice while reranker_type has more than one choice; run separate optimizer studies per reranker_type (each with its own single-choice reranker_model) instead of sweeping both together.",
 
     "agentic": {
       "temperature": {"type": "float", "low": 0.0, "high": 1.0},
