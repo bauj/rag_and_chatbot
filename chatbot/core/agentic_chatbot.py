@@ -231,9 +231,16 @@ class AgenticChatbot:
 
         steps_used = len(agent.memory.steps) if hasattr(agent, "memory") else None
 
-        degraded = bool(_LEAKED_CODE_PATTERN.search(answer)) or bool(ungrounded_calls)
+        # An ambiguous_overload flag can never clear on its own — the documentation
+        # having multiple signatures for a call is a fixed fact, not something the
+        # retry resolves — so it will flag the exact same call again even when the
+        # retry's argument values are now correct. Only a still-unknown name after
+        # the retry is real evidence the answer isn't grounded; don't discard an
+        # otherwise-good answer over a flag that already got its one nudge.
+        blocking_calls = [c for c in ungrounded_calls if c.get("kind") != "ambiguous_overload"]
+        degraded = bool(_LEAKED_CODE_PATTERN.search(answer)) or bool(blocking_calls)
         if degraded:
-            reason = "ungrounded" if ungrounded_calls else "steps"
+            reason = "ungrounded" if blocking_calls else "steps"
             answer = _fallback_answer(sources, reason=reason)
 
         steps_used = len(agent.memory.steps) if hasattr(agent, "memory") else None

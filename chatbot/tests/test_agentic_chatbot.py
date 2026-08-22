@@ -58,7 +58,7 @@ class _FakeAgent:
         self.memory = MagicMock()
         self.memory.steps = [MagicMock() for _ in range(steps)]
 
-    def run(self, task):
+    def run(self, task, reset=True):
         return self._run_fn(task)
 
 
@@ -343,6 +343,45 @@ def test_ask_replaces_leaked_code_answer_with_fallback_when_no_sources_read(tmp_
     assert "Calling tools:" not in result["answer"]
     assert result["filters"]["degraded_answer"] is True
     assert result["filters"]["grounded"] is False
+
+
+def test_ask_ambiguous_overload_flag_alone_does_not_degrade_after_retry(tmp_path, monkeypatch):
+    # An ambiguous_overload flag can never clear on its own (see
+    # grounding_judge.check_grounding's docstring) — it must not, by itself,
+    # cause an otherwise-good retried answer to be discarded.
+    bot = _make_bot(tmp_path)
+    calls = {"n": 0}
+
+    def fake_check_grounding(answer, agent, llm_classify_fn=None):
+        calls["n"] += 1
+        return [{"call": "addBox", "kind": "ambiguous_overload", "reason": "multiple documented signatures"}]
+
+    monkeypatch.setattr("core.agentic_chatbot.check_grounding", fake_check_grounding)
+    bot._CodeAgent = MagicMock(return_value=_FakeAgent(run_fn=lambda task: "corrected code answer"))
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
+
+    assert calls["n"] == 2  # initial check + one retry check
+    assert result["filters"]["degraded_answer"] is False
+    assert result["answer"] == "corrected code answer"
+    assert result["filters"]["grounding_retries_used"] == 1
+
+
+def test_ask_unknown_name_flag_surviving_retry_still_degrades(tmp_path, monkeypatch):
+    bot = _make_bot(tmp_path)
+
+    def fake_check_grounding(answer, agent, llm_classify_fn=None):
+        return [{"call": "invented", "kind": "unknown_name", "reason": "unknown name"}]
+
+    monkeypatch.setattr("core.agentic_chatbot.check_grounding", fake_check_grounding)
+    bot._CodeAgent = MagicMock(return_value=_FakeAgent(run_fn=lambda task: "still bad answer"))
+    bot._OpenAIServerModel = MagicMock()
+
+    result = bot.ask("question")
+
+    assert result["filters"]["degraded_answer"] is True
+    assert result["answer"] != "still bad answer"
 
 
 def test_ask_normal_answer_is_not_flagged_degraded(tmp_path):

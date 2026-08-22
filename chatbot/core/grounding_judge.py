@@ -151,16 +151,23 @@ def check_grounding(
 ) -> List[dict]:
     """
     Extract call names from every code block in `answer` and flag two kinds
-    of issue: a name that appears in neither the retrieved documentation nor
-    a static builtin allowlist ("unknown name"), or a name that IS grounded
-    but whose documentation shows more than one distinct argument count —
-    i.e. multiple documented overloads for the same call name ("multiple
-    documented signatures"). The second case doesn't prove the code is
+    of issue, distinguished by each result dict's "kind" field: a name that
+    appears in neither the retrieved documentation nor a static builtin
+    allowlist (kind="unknown_name"), or a name that IS grounded but whose
+    documentation shows more than one distinct argument count — i.e.
+    multiple documented overloads for the same call name
+    (kind="ambiguous_overload"). The second case doesn't prove the code is
     wrong, only that this call name is the kind that has burned a real run
     before (see module docstring) — flagging it forces a re-check of which
     variant applies and what each argument means, rather than trusting
-    whichever bare code example was skimmed first. Returns [] if `answer`
-    has no code blocks at all.
+    whichever bare code example was skimmed first. Callers should treat the
+    two kinds differently for anything stronger than a one-time nudge: an
+    ambiguous_overload flag can never clear on its own (the documentation's
+    ambiguity is a fixed fact, not something a retry resolves), so re-running
+    this check after a retry will flag the exact same call again even if its
+    argument values are now correct — don't use a surviving
+    ambiguous_overload flag alone as a reason to discard an otherwise-good
+    answer. Returns [] if `answer` has no code blocks at all.
 
     llm_classify_fn: optional callable(name) -> bool, asked only about names
     that survive the static allowlist - a narrow "is this a language/stdlib
@@ -188,13 +195,14 @@ def check_grounding(
                 if len(_documented_arg_counts(name, observations)) > 1:
                     flagged[name] = {
                         "call": name,
+                        "kind": "ambiguous_overload",
                         "reason": "multiple documented signatures for this call — "
                                   "verify which one applies and what each argument means",
                     }
                 continue
             if llm_classify_fn is not None and llm_classify_fn(name):
                 continue
-            flagged[name] = {"call": name, "reason": "unknown name"}
+            flagged[name] = {"call": name, "kind": "unknown_name", "reason": "unknown name"}
 
     return list(flagged.values())
 
