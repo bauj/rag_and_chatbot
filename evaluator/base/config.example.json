@@ -21,7 +21,9 @@
 
   "evaluator_options":
   {
+    "mode": "rag",
+    "_comment_mode": "'rag' (default), 'agentic', or 'no-rag' (no retrieval — answers from the LLM's own training knowledge, a baseline to isolate how much of a normal answer's score comes from retrieval; correctness/relevance are graded, groundedness/retrieval_relevance are skipped since there are no retrieved documents). Takes priority over agentic_mode below if both are set.",
     "agentic_mode": true,
-    "_comment_agentic_mode": "If true, the evaluator will use an agentic approach. Otherwise, RAG evaluation will be done."
+    "_comment_agentic_mode": "Older boolean-only knob, kept for backwards compatibility: if true (and mode is unset), the evaluator will use an agentic approach. Otherwise, RAG evaluation will be done."
   }
 }

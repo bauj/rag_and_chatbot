@@ -228,10 +228,12 @@ Examples:
 
     parser.add_argument(
         '--mode',
-        choices=['rag', 'agentic'],
+        choices=['rag', 'agentic', 'no-rag'],
         default='rag',
-        help='Chatbot mode: rag (default) or agentic (smolagents CodeAgent, '
-             'multi-hop page browsing)'
+        help='Chatbot mode: rag (default), agentic (smolagents CodeAgent, '
+             'multi-hop page browsing), or no-rag (no retrieval — answers from the '
+             "LLM's own training knowledge, a baseline to isolate RAG's contribution; "
+             'terminal single-question mode only)'
     )
 
     # Web options
@@ -258,6 +260,21 @@ Examples:
     if args.mode == 'rag' and (args.max_steps is not None or args.max_chars_per_page is not None):
         print("Warning: --max-steps and --max-chars-per-page are not "
               "supported in rag mode and will be ignored.", file=sys.stderr)
+
+    if args.mode == 'no-rag':
+        if args.web:
+            parser.error("--mode no-rag is not supported in web mode")
+        if not args.question:
+            parser.error("--mode no-rag requires --question (terminal single-question mode only)")
+        if (args.module or args.doc_type or args.deep_dive or args.k is not None
+                or args.top_n is not None or args.no_rerank or args.no_hyde or args.no_bm25
+                or args.no_title_boost or args.k_retrieve is not None
+                or args.deep_dive_batch_size is not None or args.expansion_char_budget is not None
+                or args.reranker_model is not None or args.reranker_type is not None
+                or args.k_standard is not None or args.k_deep_dive is not None
+                or args.max_steps is not None or args.max_chars_per_page is not None):
+            print("Warning: retrieval/reranker/agentic flags are not supported in "
+                  "no-rag mode and will be ignored.", file=sys.stderr)
 
     # In JSON mode stdout must contain the JSON document and nothing else, so
     # point sys.stdout at stderr for the whole run. Every existing print() —
@@ -306,9 +323,10 @@ Examples:
         if args.k_deep_dive is not None:
             config.k_deep_dive = args.k_deep_dive
 
-        # Initialize core chatbot
+        # Initialize core chatbot. no-rag mode never touches the reranker, so
+        # skip loading it — pure per-question subprocess startup cost otherwise.
         print("Loading documentation database...")
-        chatbot = DocumentationChatbot(config)
+        chatbot = DocumentationChatbot(config, skip_reranker=(args.mode == 'no-rag'))
 
         print(f"  Loaded {chatbot.get_chunk_count()} documentation chunks")
         print(f"  Modules: {', '.join(chatbot.available_modules)}")
@@ -385,6 +403,16 @@ Examples:
                     max_steps=args.max_steps,
                     max_chars_per_page=args.max_chars_per_page,
                 )
+            elif args.mode == 'no-rag':
+                result = chatbot.ask_no_rag(
+                    args.question,
+                    temperature=args.temperature,
+                    max_tokens=args.max_tokens,
+                )
+                if not args.json_output:
+                    print(f"Question: {args.question}\n")
+                    print(f"Answer: {result['answer']}\n" if result['error'] is None
+                          else f"Error: {result['error']}\n")
             elif args.json_output:
                 # run_single_question() only prints, so ask directly to get the dict.
                 result = chatbot.ask(

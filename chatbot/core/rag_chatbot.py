@@ -39,7 +39,12 @@ class DocumentationChatbot:
     Returns structured data that UI layers can format as needed.
     """
 
-    def __init__(self, config: ChatbotConfig):
+    def __init__(self, config: ChatbotConfig, skip_reranker: bool = False):
+        """
+        skip_reranker: skip loading the configured reranker model. no-rag mode
+        never touches self.reranker, so loading it (e.g. a ColBERT
+        MultiVectorEncoder) would be pure per-question startup cost for no benefit.
+        """
         self.config = config
         print("DEBUG : load vector store ...")
         self.vectorstore = self._load_vectorstore()
@@ -49,9 +54,10 @@ class DocumentationChatbot:
         self.llm = self._initialize_llm()
         print("DEBUG : create prompt ...")
         self.base_prompt = self._create_prompt()
-        self.reranker = self._load_reranker()
+        self.reranker = None if skip_reranker else self._load_reranker()
         self.bm25_index = self._load_bm25_index()
         self.hyde_llm = self._initialize_llm(temperature=0.0) if config.hyde_enabled else None
+        self.no_rag_prompt = self._create_no_rag_prompt()
 
     def _load_vectorstore(self) -> Chroma:
         """Load ChromaDB vector store"""
@@ -586,6 +592,41 @@ Question: {{question}}
 
 Answer (based strictly on the documentation above):"""
         return PromptTemplate.from_template(template)
+
+    def _create_no_rag_prompt(self) -> PromptTemplate:
+        """Prompt for the no-retrieval baseline — no context block, no module list,
+        so the answer can only come from the LLM's own training knowledge."""
+        template = f"""You are an expert assistant for {self.config.project_name}.
+
+CRITICAL INSTRUCTIONS:
+1. Answer using your own knowledge of {self.config.project_name} from your training data.
+2. If you are not confident in the answer, explicitly say "I don't have enough information to answer this question confidently."
+3. If the question is not related to {self.config.project_name}, politely decline to answer.
+
+Question: {{question}}
+
+Answer:"""
+        return PromptTemplate.from_template(template)
+
+    def ask_no_rag(self, question: str,
+                    temperature: Optional[float] = None,
+                    max_tokens: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Ask a question with no retrieval — isolates how much of a normal RAG
+        answer's correctness comes from retrieval vs. the LLM's own training
+        knowledge of the corpus's subject matter.
+
+        Returns the same {answer, sources, filters, error} shape as ask(),
+        with sources always empty and filters always {"mode": "no-rag"}.
+        """
+        llm = self.llm if temperature is None and max_tokens is None \
+            else self._initialize_llm(temperature=temperature, max_tokens=max_tokens)
+        chain = self.no_rag_prompt | llm | StrOutputParser()
+        try:
+            answer = chain.invoke({"question": question})
+            return {"answer": answer, "sources": [], "filters": {"mode": "no-rag"}, "error": None}
+        except Exception as e:
+            return {"answer": None, "sources": [], "filters": {"mode": "no-rag"}, "error": str(e)}
 
     def _create_chain(self,
                      module_filter: Optional[str] = None,

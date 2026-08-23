@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from typing_extensions import Annotated, TypedDict, get_args
 import requests
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, List
 
 ############################################################################################
 ### Load configuration from evaluator/config.json with fallback on environment variables ###
@@ -72,6 +72,16 @@ def _validate_config() -> None:
 evaluator_options = evaluator_config.get("evaluator_options", {})
 
 AGENTIC_MODE = bool(evaluator_options.get("agentic_mode", False))
+
+# "mode" is the general form ("rag", "agentic", "no-rag" — anything chatbot.py's
+# --mode accepts); "agentic_mode" is the older boolean-only knob, kept for
+# backwards compatibility with existing evaluator_options.json files.
+EVAL_MODE = evaluator_options.get("mode") or ("agentic" if AGENTIC_MODE else "rag")
+
+# groundedness/retrieval_relevance grade the retrieved documents, which
+# no-rag mode never has — skip them rather than spend two judge calls per
+# question grading "no documents" every time.
+EVAL_METRICS_FOR_MODE = ["correctness", "relevance"] if EVAL_MODE == "no-rag" else None
 
 # Grading calls go straight over HTTP with no subprocess involved, so unlike
 # the chatbot subprocess call (bounded by --timeout) a stalled connection here would
@@ -439,8 +449,17 @@ def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
             "request_time": elapsed,
         }
 
-def run_evaluation(question: str, answer_dict: Dict, reference_answer: str, executor: Optional[ThreadPoolExecutor] = None) -> Dict[str, Dict]:
-    """Run all evaluators on a single answer."""
+def run_evaluation(question: str, answer_dict: Dict, reference_answer: str,
+                    executor: Optional[ThreadPoolExecutor] = None,
+                    metrics: Optional[List[str]] = None) -> Dict[str, Dict]:
+    """Run the given evaluators (default: all of EVAL_METRICS) on a single answer.
+
+    `metrics` lets a caller skip metrics that are meaningless for a given
+    answer — e.g. no-rag mode has no retrieved documents, so grading
+    groundedness/retrieval_relevance would just judge "no documents" every
+    time, at the cost of two judge calls per question for nothing.
+    """
+    metrics = metrics if metrics is not None else EVAL_METRICS
     evaluations = {}
     inputs = {"question": question}
 
@@ -464,16 +483,16 @@ def run_evaluation(question: str, answer_dict: Dict, reference_answer: str, exec
     if executor is not None:
         futures = {
             executor.submit(_eval_metric, metric): metric
-            for metric in EVAL_METRICS
+            for metric in metrics
         }
         raw_results = {}
         for future in as_completed(futures):
             metric_name = futures[future]
             raw_results[metric_name] = future.result()
-        for metric in EVAL_METRICS:
+        for metric in metrics:
             evaluations[metric] = raw_results.get(metric, {"score": 0.0, "explanation": "No result returned."})
     else:
-        for metric in EVAL_METRICS:
+        for metric in metrics:
             evaluations[metric] = _eval_metric(metric)
 
     return evaluations
@@ -708,16 +727,21 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
         q = example['inputs']['question']
         print(f"[{example_index}/{total}] Calling chatbot: {q[:80]}{'...' if len(q) > 80 else ''}", flush=True)
         start = time.perf_counter()
-        output = _call_chatbot(q, "agentic" if AGENTIC_MODE else None, timeout_seconds)
+        output = _call_chatbot(q, None if EVAL_MODE == "rag" else EVAL_MODE, timeout_seconds)
         elapsed = time.perf_counter() - start
-        print(f"[{example_index}/{total}] Chatbot answered in {elapsed:.1f}s — grading...", flush=True)
+        # Grading starts immediately only in parallel mode (grade futures are submitted
+        # as each answer future completes). In sequential mode (num_workers=1, the
+        # default) fetch_chatbot runs for ALL questions before evaluate_example runs for
+        # any — so "— grading..." there would be a lie about what happens next.
+        suffix = " — grading..." if num_workers > 1 else ""
+        print(f"[{example_index}/{total}] Chatbot answered in {elapsed:.1f}s{suffix}", flush=True)
         return example_index, example, output
 
     def evaluate_example(example_index: int, example: dict, output: dict) -> dict:
         q = example['inputs']['question']
         expected = example['outputs']['answer']
         grade_start = time.perf_counter()
-        evaluations = run_evaluation(q, output, expected)
+        evaluations = run_evaluation(q, output, expected, metrics=EVAL_METRICS_FOR_MODE)
         grade_elapsed = time.perf_counter() - grade_start
         print(f"[{example_index}/{total}] Graded in {grade_elapsed:.1f}s", flush=True)
         request_time = output.get("request_time", 0.0) if isinstance(output, dict) else 0.0
@@ -757,6 +781,8 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
                 results.append(result)
                 _print_example_result(len(results), result)
     else:
+        print(f"Fetching all {total} answers first, then grading — expect grading progress "
+              f"only after the [{total}/{total}] answer lands.", flush=True)
         chatbot_results = [fetch_chatbot(i, example) for i, example in enumerate(examples, 1)]
         for idx, example, output in chatbot_results:
             result = evaluate_example(idx, example, output)
@@ -768,22 +794,22 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
     # are stable and comparable across runs.
     results.sort(key=lambda r: r["index"])
 
-    # Calculate average scores
+    # Calculate average scores, only over metrics that were actually graded
+    # this run (EVAL_METRICS_FOR_MODE — e.g. no-rag skips groundedness/
+    # retrieval_relevance since there are no retrieved documents to grade).
     summary = None
     if results:
-        avg_correctness = sum(r["evaluations"]["correctness"].get("score", 0.0) for r in results) / len(results)
-        avg_relevance = sum(r["evaluations"]["relevance"].get("score", 0.0) for r in results) / len(results)
-        avg_groundedness = sum(r["evaluations"]["groundedness"].get("score", 0.0) for r in results) / len(results)
-        avg_retrieval_relevance = sum(r["evaluations"]["retrieval_relevance"].get("score", 0.0) for r in results) / len(results)
+        graded_metrics = EVAL_METRICS_FOR_MODE if EVAL_METRICS_FOR_MODE is not None else EVAL_METRICS
+        avg_by_metric = {
+            metric: sum(r["evaluations"][metric].get("score", 0.0) for r in results) / len(results)
+            for metric in graded_metrics
+        }
         avg_request_time = sum(r.get("request_time", 0.0) for r in results) / len(results)
-        avg_overall = (avg_correctness + avg_relevance + avg_groundedness + avg_retrieval_relevance) / 4
+        avg_overall = sum(avg_by_metric.values()) / len(avg_by_metric)
 
         summary = {
             "total_examples": len(results),
-            "correctness": avg_correctness,
-            "relevance": avg_relevance,
-            "groundedness": avg_groundedness,
-            "retrieval_relevance": avg_retrieval_relevance,
+            **avg_by_metric,
             "overall_average": avg_overall,
             "average_request_time_seconds": avg_request_time,
         }
@@ -804,8 +830,10 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
         print(f"Total examples evaluated: {summary['total_examples']}\n")
         print(f"Correctness:         {summary['correctness']:.1f}/10")
         print(f"Relevance:           {summary['relevance']:.1f}/10")
-        print(f"Groundedness:        {summary['groundedness']:.1f}/10")
-        print(f"Retrieval Relevance: {summary['retrieval_relevance']:.1f}/10")
+        if "groundedness" in summary:
+            print(f"Groundedness:        {summary['groundedness']:.1f}/10")
+        if "retrieval_relevance" in summary:
+            print(f"Retrieval Relevance: {summary['retrieval_relevance']:.1f}/10")
         print(f"Average Chatbot Request Time: {summary['average_request_time_seconds']:.3f} seconds")
         print(f"\nOverall Average:     {summary['overall_average']:.1f}/10")
 

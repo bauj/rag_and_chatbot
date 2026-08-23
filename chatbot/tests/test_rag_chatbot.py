@@ -1210,3 +1210,89 @@ def test_select_context_routes_to_late_interaction_when_configured():
 
     assert [d.page_content for d in result] == ["b", "a"]
     bot.reranker.predict.assert_not_called()
+
+
+def _patch_init_dependencies(monkeypatch, DocumentationChatbot):
+    monkeypatch.setattr(DocumentationChatbot, "_load_vectorstore", lambda self: MagicMock())
+    monkeypatch.setattr(DocumentationChatbot, "_detect_modules", lambda self: [])
+    monkeypatch.setattr(DocumentationChatbot, "_initialize_llm",
+                         lambda self, temperature=None, max_tokens=None: MagicMock())
+    monkeypatch.setattr(DocumentationChatbot, "_create_prompt", lambda self: MagicMock())
+    monkeypatch.setattr(DocumentationChatbot, "_load_bm25_index", lambda self: None)
+    monkeypatch.setattr(DocumentationChatbot, "_create_no_rag_prompt", lambda self: MagicMock())
+
+
+def test_init_skips_loading_reranker_when_skip_reranker_true(monkeypatch):
+    """
+    no-rag mode never touches self.reranker — loading it (currently a 33M-param
+    ColBERT model) is pure per-question subprocess startup cost with zero benefit.
+    """
+    from core.rag_chatbot import DocumentationChatbot
+    _patch_init_dependencies(monkeypatch, DocumentationChatbot)
+    reranker_loader = MagicMock()
+    monkeypatch.setattr(DocumentationChatbot, "_load_reranker", reranker_loader)
+
+    config = MagicMock(hyde_enabled=False)
+    bot = DocumentationChatbot(config, skip_reranker=True)
+
+    reranker_loader.assert_not_called()
+    assert bot.reranker is None
+
+
+def test_init_loads_reranker_by_default(monkeypatch):
+    from core.rag_chatbot import DocumentationChatbot
+    _patch_init_dependencies(monkeypatch, DocumentationChatbot)
+    reranker_sentinel = MagicMock()
+    monkeypatch.setattr(DocumentationChatbot, "_load_reranker", MagicMock(return_value=reranker_sentinel))
+
+    config = MagicMock(hyde_enabled=False)
+    bot = DocumentationChatbot(config)
+
+    assert bot.reranker is reranker_sentinel
+
+
+def test_create_no_rag_prompt_excludes_context_and_module_list():
+    from core.rag_chatbot import DocumentationChatbot
+    bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    bot.config = MagicMock(project_name="ShaperDocs")
+
+    prompt = bot._create_no_rag_prompt()
+    rendered = prompt.format(question="What is a Sketch?")
+
+    assert "ShaperDocs" in rendered
+    assert "What is a Sketch?" in rendered
+    assert "{context}" not in rendered
+    assert "Available modules" not in rendered
+
+
+def test_ask_no_rag_returns_answer_with_empty_sources_and_no_rag_filter():
+    from core.rag_chatbot import DocumentationChatbot
+    bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    bot.config = MagicMock(project_name="ShaperDocs")
+    bot.no_rag_prompt = bot._create_no_rag_prompt()
+    bot.llm = RunnableLambda(lambda _: "A sketch is a 2D profile.")
+
+    result = bot.ask_no_rag("What is a Sketch?")
+
+    assert result["answer"] == "A sketch is a 2D profile."
+    assert result["sources"] == []
+    assert result["filters"] == {"mode": "no-rag"}
+    assert result["error"] is None
+
+
+def test_ask_no_rag_returns_error_on_llm_failure():
+    from core.rag_chatbot import DocumentationChatbot
+    bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    bot.config = MagicMock(project_name="ShaperDocs")
+    bot.no_rag_prompt = bot._create_no_rag_prompt()
+
+    def _raise(_):
+        raise RuntimeError("endpoint down")
+    bot.llm = RunnableLambda(_raise)
+
+    result = bot.ask_no_rag("What is a Sketch?")
+
+    assert result["answer"] is None
+    assert result["sources"] == []
+    assert result["filters"] == {"mode": "no-rag"}
+    assert result["error"] == "endpoint down"
