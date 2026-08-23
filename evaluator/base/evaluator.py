@@ -729,7 +729,12 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
         start = time.perf_counter()
         output = _call_chatbot(q, None if EVAL_MODE == "rag" else EVAL_MODE, timeout_seconds)
         elapsed = time.perf_counter() - start
-        print(f"[{example_index}/{total}] Chatbot answered in {elapsed:.1f}s — grading...", flush=True)
+        # Grading starts immediately only in parallel mode (grade futures are submitted
+        # as each answer future completes). In sequential mode (num_workers=1, the
+        # default) fetch_chatbot runs for ALL questions before evaluate_example runs for
+        # any — so "— grading..." there would be a lie about what happens next.
+        suffix = " — grading..." if num_workers > 1 else ""
+        print(f"[{example_index}/{total}] Chatbot answered in {elapsed:.1f}s{suffix}", flush=True)
         return example_index, example, output
 
     def evaluate_example(example_index: int, example: dict, output: dict) -> dict:
@@ -776,6 +781,8 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
                 results.append(result)
                 _print_example_result(len(results), result)
     else:
+        print(f"Fetching all {total} answers first, then grading — expect grading progress "
+              f"only after the [{total}/{total}] answer lands.", flush=True)
         chatbot_results = [fetch_chatbot(i, example) for i, example in enumerate(examples, 1)]
         for idx, example, output in chatbot_results:
             result = evaluate_example(idx, example, output)
