@@ -2,7 +2,7 @@
 
 Chatbot with two retrieval modes and clean separation between business logic and UI.
 
-- **RAG mode** — queries a ChromaDB vector database, with optional cross-encoder reranking, optional BM25 keyword hybrid retrieval, and optional HyDE
+- **RAG mode** — queries a ChromaDB vector database, with optional reranking (cross-encoder or late-interaction), optional BM25 keyword hybrid retrieval, and optional HyDE
 - **Agentic mode** — searches a page index via a smolagents `CodeAgent`, which decides for itself how many search/read cycles to run (bounded by `agentic.max_steps`); no vector retrieval at query time
 
 ## Architecture
@@ -38,11 +38,11 @@ cp config.example.json config.json
 | `llm.api_key` | `"dummy"` | Use `"dummy"` for local models |
 | `embedding.model` | `"all-MiniLM-L6-v2"` | Must match extraction config |
 | `embedding.type` | `"local"` | `"local"` or `"api"` |
-| `reranker` | `null` | Set to `null` to disable. Enable with `{"model": "BAAI/bge-reranker-v2-m3", "type": "local"}` |
+| `reranker` | `null` | Set to `null` to disable. `type: "cross_encoder"` (default, e.g. `{"model": "BAAI/bge-reranker-v2-m3", "type": "cross_encoder"}`) or `type: "late_interaction"` (ColBERT-style MaxSim, e.g. `{"model": "answerdotai/answerai-colbert-small-v1", "type": "late_interaction"}`, requires `sentence-transformers >= 6.0`) |
 | `agentic` | `null` | Set to `null` to disable. Enable with `{"page_index_path": "...", ...}` (see below) |
 | `k_standard` | `40` | Chunks retrieved in standard mode (RAG). Web UI search-depth slider defaults to this. |
 | `k_deep_dive` | `60` | Chunks retrieved in deep dive mode (RAG). Web UI search-depth slider switches to this when Deep Dive is enabled. |
-| `top_n_after_rerank` | `15` | Docs kept after cross-encoder reranking. Web UI top-N slider defaults to this. |
+| `top_n_after_rerank` | `15` | Docs kept after reranking. Web UI top-N slider defaults to this. |
 | `temperature` | `0.0` | LLM temperature. Used directly in the terminal; in the web UI, select the "Config default" response style to apply it (the other styles override it). |
 | `max_tokens` | `2000` | Max tokens per response. Web UI answer-length slider defaults to this. |
 | `bm25_enabled` | `false` | Opt-in BM25 keyword search fused with vector search via Reciprocal Rank Fusion (RAG standard mode only). Requires `{project_name}_docs.jsonl` next to `chromadb_path`. |
@@ -105,7 +105,7 @@ module:MODULE_A      - Filter by module (RAG only)
 type:dev             - Filter developer docs only (RAG only)
 type:user            - Filter user docs only (RAG only)
 deep                 - Toggle Deep Dive mode (RAG only)
-reranker             - Toggle cross-encoder reranker on/off (RAG only)
+reranker             - Toggle configured reranker on/off (RAG only)
 topn:<n>             - Set top-N docs kept after rerank (RAG only)
 hyde                 - Toggle HyDE on/off (RAG only)
 bm25                 - Toggle BM25 hybrid retrieval on/off (RAG only)

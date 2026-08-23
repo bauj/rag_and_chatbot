@@ -13,7 +13,7 @@ A chatbot for any project with HTML documentation (Sphinx, Doxygen). Point it at
 - Multi-module support — query across multiple doc sets simultaneously
 - Two chatbot modes: **RAG** (vector retrieval + reranking) and **Agentic** (smolagents `CodeAgent`, multi-hop page browsing)
 - Token-aware chunking (prevents embedding truncation)
-- Cross-encoder reranking (`BAAI/bge-reranker-v2-m3`) for better result ranking
+- Reranking for better result ranking — cross-encoder (`BAAI/bge-reranker-v2-m3`, default) or opt-in late-interaction/ColBERT-style (`answerdotai/answerai-colbert-small-v1`, lower latency)
 - Optional BM25 keyword hybrid retrieval (opt-in, fused with vector search via Reciprocal Rank Fusion)
 - Optional HyDE retrieval (opt-in — an LLM-written hypothetical passage steers the vector search instead of the raw question)
 - Quality scoring (filters low-value content)
@@ -87,7 +87,8 @@ python download_models.py
 
 This downloads to `~/.cache/huggingface/hub`:
 - `all-MiniLM-L6-v2` — embedding model (required for local embeddings)
-- `BAAI/bge-reranker-v2-m3` — reranker model (required if `reranker` is enabled in chatbot config)
+- `BAAI/bge-reranker-v2-m3` — cross-encoder reranker model (required if `reranker.type: "cross_encoder"` is enabled in chatbot config)
+- `answerdotai/answerai-colbert-small-v1` — late-interaction reranker model (required if `reranker.type: "late_interaction"` is enabled instead)
 
 > **Offline use:** the chatbot runs with `HF_HUB_OFFLINE=1` by default, so models must be downloaded before first use. Skip this step only if you are using API-based embeddings and no reranker.
 
@@ -202,7 +203,7 @@ python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type 
 
   "reranker": {
     "model": "BAAI/bge-reranker-v2-m3",
-    "type": "local"
+    "type": "cross_encoder"
   },
 
   "agentic": {
@@ -225,7 +226,7 @@ python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type 
 | Mistral | `https://api.mistral.ai/v1` | your key |
 | Any OpenAI-compatible | your endpoint | your key |
 
-**Reranker:** set to `null` or remove the block to disable reranking (faster, lower quality).
+**Reranker:** set to `null` or remove the block to disable reranking (faster, lower quality). Two `type`s: `cross_encoder` (default, `BAAI/bge-reranker-v2-m3`) or `late_interaction` (ColBERT-style MaxSim scoring via `sentence-transformers` `MultiVectorEncoder`, e.g. `answerdotai/answerai-colbert-small-v1` — requires `sentence-transformers >= 6.0`). Measured on the SHAPER eval set: quality is a wash between the two, `late_interaction` cuts average answer latency roughly in half (see `notes/late_interaction_reranker_eval_230826.md`).
 
 **Agentic mode:** set `agentic` to `null` or remove the block to disable. When enabled, the web UI and `--mode agentic` CLI flag become available. Requires `page_index.json` produced by the extractor, and the `smolagents` package (`pip install smolagents`, included in `requirements.txt`). Uses [smolagents](https://github.com/huggingface/smolagents)' `CodeAgent`: the LLM decides for itself how many search/read cycles to run, bounded by `agentic.max_steps` (default `6`).
 
@@ -313,7 +314,7 @@ Commands in interactive mode:
   type:dev             - Filter developer docs only (RAG only)
   type:user            - Filter user docs only (RAG only)
   deep                 - Toggle Deep Dive mode (RAG only)
-  reranker             - Toggle cross-encoder reranker on/off (RAG only)
+  reranker             - Toggle configured reranker on/off (RAG only)
   topn:<n>             - Set top-N docs kept after rerank (RAG only)
   hyde                 - Toggle HyDE on/off (RAG only)
   agentic:chars:<n>    - Set max chars read per page (Agentic only)
@@ -658,10 +659,10 @@ See [requirements.txt](requirements.txt) for exact versions.
 
 | | RAG (no reranker) | RAG (+ reranker) | Agentic |
 |---|---|---|---|
-| **Retrieval** | Vector similarity search | Vector search + cross-encoder (+ optional BM25/HyDE) | Keyword search, agent-directed |
+| **Retrieval** | Vector similarity search | Vector search + reranker (+ optional BM25/HyDE) | Keyword search, agent-directed |
 | **Context** | Chunks (sub-page fragments) | Chunks, re-scored and expanded | Full pages, read across as many hops as the agent decides |
 | **LLM calls** | 1 (+1 if HyDE enabled) | 1 (+1 if HyDE enabled) | Variable, bounded by `max_steps` (default 6) |
-| **Local inference** | Embeddings only | Embeddings + reranker (slow) | None beyond the LLM |
+| **Local inference** | Embeddings only | Embeddings + reranker (slow with `cross_encoder`, ~2x faster with `late_interaction`) | None beyond the LLM |
 | **Latency** | Fast | Can be slower than Agentic | Variable, less predictable than RAG |
 | **Maturity** | Established | Established | Established |
 
