@@ -688,17 +688,28 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
     examples = _load_examples()
     if limit_questions is not None:
         examples = examples[:limit_questions]
+    total = len(examples)
     results = []
 
+    # print(..., flush=True) here so progress is visible live even when stdout is
+    # piped through something that fully buffers non-tty output (e.g. `| tee log`),
+    # instead of only appearing once the whole run finishes.
     def fetch_chatbot(example_index: int, example: dict) -> tuple[int, dict, dict]:
         q = example['inputs']['question']
+        print(f"[{example_index}/{total}] Calling chatbot: {q[:80]}{'...' if len(q) > 80 else ''}", flush=True)
+        start = time.perf_counter()
         output = _call_chatbot(q, "agentic" if AGENTIC_MODE else None, timeout_seconds)
+        elapsed = time.perf_counter() - start
+        print(f"[{example_index}/{total}] Chatbot answered in {elapsed:.1f}s — grading...", flush=True)
         return example_index, example, output
 
     def evaluate_example(example_index: int, example: dict, output: dict) -> dict:
         q = example['inputs']['question']
         expected = example['outputs']['answer']
+        grade_start = time.perf_counter()
         evaluations = run_evaluation(q, output, expected)
+        grade_elapsed = time.perf_counter() - grade_start
+        print(f"[{example_index}/{total}] Graded in {grade_elapsed:.1f}s", flush=True)
         request_time = output.get("request_time", 0.0) if isinstance(output, dict) else 0.0
         rag_answer = output.get('answer') if isinstance(output, dict) else str(output)
         documents = output.get("documents", [])
