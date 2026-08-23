@@ -39,7 +39,12 @@ class DocumentationChatbot:
     Returns structured data that UI layers can format as needed.
     """
 
-    def __init__(self, config: ChatbotConfig):
+    def __init__(self, config: ChatbotConfig, skip_reranker: bool = False):
+        """
+        skip_reranker: skip loading the configured reranker model. no-rag mode
+        never touches self.reranker, so loading it (e.g. a ColBERT
+        MultiVectorEncoder) would be pure per-question startup cost for no benefit.
+        """
         self.config = config
         print("DEBUG : load vector store ...")
         self.vectorstore = self._load_vectorstore()
@@ -49,7 +54,7 @@ class DocumentationChatbot:
         self.llm = self._initialize_llm()
         print("DEBUG : create prompt ...")
         self.base_prompt = self._create_prompt()
-        self.reranker = self._load_reranker()
+        self.reranker = None if skip_reranker else self._load_reranker()
         self.bm25_index = self._load_bm25_index()
         self.hyde_llm = self._initialize_llm(temperature=0.0) if config.hyde_enabled else None
         self.no_rag_prompt = self._create_no_rag_prompt()

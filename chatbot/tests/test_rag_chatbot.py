@@ -1212,6 +1212,45 @@ def test_select_context_routes_to_late_interaction_when_configured():
     bot.reranker.predict.assert_not_called()
 
 
+def _patch_init_dependencies(monkeypatch, DocumentationChatbot):
+    monkeypatch.setattr(DocumentationChatbot, "_load_vectorstore", lambda self: MagicMock())
+    monkeypatch.setattr(DocumentationChatbot, "_detect_modules", lambda self: [])
+    monkeypatch.setattr(DocumentationChatbot, "_initialize_llm",
+                         lambda self, temperature=None, max_tokens=None: MagicMock())
+    monkeypatch.setattr(DocumentationChatbot, "_create_prompt", lambda self: MagicMock())
+    monkeypatch.setattr(DocumentationChatbot, "_load_bm25_index", lambda self: None)
+    monkeypatch.setattr(DocumentationChatbot, "_create_no_rag_prompt", lambda self: MagicMock())
+
+
+def test_init_skips_loading_reranker_when_skip_reranker_true(monkeypatch):
+    """
+    no-rag mode never touches self.reranker — loading it (currently a 33M-param
+    ColBERT model) is pure per-question subprocess startup cost with zero benefit.
+    """
+    from core.rag_chatbot import DocumentationChatbot
+    _patch_init_dependencies(monkeypatch, DocumentationChatbot)
+    reranker_loader = MagicMock()
+    monkeypatch.setattr(DocumentationChatbot, "_load_reranker", reranker_loader)
+
+    config = MagicMock(hyde_enabled=False)
+    bot = DocumentationChatbot(config, skip_reranker=True)
+
+    reranker_loader.assert_not_called()
+    assert bot.reranker is None
+
+
+def test_init_loads_reranker_by_default(monkeypatch):
+    from core.rag_chatbot import DocumentationChatbot
+    _patch_init_dependencies(monkeypatch, DocumentationChatbot)
+    reranker_sentinel = MagicMock()
+    monkeypatch.setattr(DocumentationChatbot, "_load_reranker", MagicMock(return_value=reranker_sentinel))
+
+    config = MagicMock(hyde_enabled=False)
+    bot = DocumentationChatbot(config)
+
+    assert bot.reranker is reranker_sentinel
+
+
 def test_create_no_rag_prompt_excludes_context_and_module_list():
     from core.rag_chatbot import DocumentationChatbot
     bot = DocumentationChatbot.__new__(DocumentationChatbot)
