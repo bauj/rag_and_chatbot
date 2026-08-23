@@ -211,6 +211,16 @@ class MistralLLM:
                     return json.loads(fenced.group(1))
                 except json.JSONDecodeError:
                     pass
+            # Some judge responses drop the opening quote on the "explanation"
+            # value (e.g. `"explanation":The text...` instead of
+            # `"explanation":"The text...`), which is otherwise valid JSON.
+            # Patch that one known glitch and retry before giving up (task #144).
+            repaired = re.sub(r'"explanation"\s*:\s*(?!")', '"explanation": "', content, count=1)
+            if repaired != content:
+                try:
+                    return json.loads(repaired)
+                except json.JSONDecodeError:
+                    pass
             return {"content": content}
 
         # Return a simple object with content attribute for compatibility
