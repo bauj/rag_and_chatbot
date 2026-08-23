@@ -1210,3 +1210,50 @@ def test_select_context_routes_to_late_interaction_when_configured():
 
     assert [d.page_content for d in result] == ["b", "a"]
     bot.reranker.predict.assert_not_called()
+
+
+def test_create_no_rag_prompt_excludes_context_and_module_list():
+    from core.rag_chatbot import DocumentationChatbot
+    bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    bot.config = MagicMock(project_name="ShaperDocs")
+
+    prompt = bot._create_no_rag_prompt()
+    rendered = prompt.format(question="What is a Sketch?")
+
+    assert "ShaperDocs" in rendered
+    assert "What is a Sketch?" in rendered
+    assert "{context}" not in rendered
+    assert "Available modules" not in rendered
+
+
+def test_ask_no_rag_returns_answer_with_empty_sources_and_no_rag_filter():
+    from core.rag_chatbot import DocumentationChatbot
+    bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    bot.config = MagicMock(project_name="ShaperDocs")
+    bot.no_rag_prompt = bot._create_no_rag_prompt()
+    bot.llm = RunnableLambda(lambda _: "A sketch is a 2D profile.")
+
+    result = bot.ask_no_rag("What is a Sketch?")
+
+    assert result["answer"] == "A sketch is a 2D profile."
+    assert result["sources"] == []
+    assert result["filters"] == {"mode": "no-rag"}
+    assert result["error"] is None
+
+
+def test_ask_no_rag_returns_error_on_llm_failure():
+    from core.rag_chatbot import DocumentationChatbot
+    bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    bot.config = MagicMock(project_name="ShaperDocs")
+    bot.no_rag_prompt = bot._create_no_rag_prompt()
+
+    def _raise(_):
+        raise RuntimeError("endpoint down")
+    bot.llm = RunnableLambda(_raise)
+
+    result = bot.ask_no_rag("What is a Sketch?")
+
+    assert result["answer"] is None
+    assert result["sources"] == []
+    assert result["filters"] == {"mode": "no-rag"}
+    assert result["error"] == "endpoint down"
