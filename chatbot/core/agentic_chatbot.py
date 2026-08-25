@@ -266,9 +266,34 @@ class AgenticChatbot:
                 "degraded_answer": degraded,
                 "ungrounded_calls": ungrounded_calls,
                 "grounding_retries_used": retries_used,
+                "token_usage": _sum_token_usage(agent),
             },
             "error": None,
         }
+
+
+def _sum_token_usage(agent) -> Optional[Dict[str, int]]:
+    """Sum per-step token_usage across agent.memory.steps (smolagents' ActionStep
+    carries it; TaskStep/PlanningStep don't). None if the model backend never
+    reported usage for this run."""
+    if not hasattr(agent, "memory"):
+        return None
+    input_tokens = output_tokens = 0
+    seen_any = False
+    for step in agent.memory.steps:
+        usage = getattr(step, "token_usage", None)
+        if usage is None:
+            continue
+        seen_any = True
+        input_tokens += usage.input_tokens
+        output_tokens += usage.output_tokens
+    if not seen_any:
+        return None
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
 
 
 def _fallback_answer(sources: List[dict], reason: str = "steps") -> str:

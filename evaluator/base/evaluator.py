@@ -365,6 +365,7 @@ def _ask_chatbot_inprocess(question: str, timeout_seconds: Optional[int] = None)
         "answer": result.get("answer", "No answer returned"),
         "documents": _build_documents(_normalize_sources(result.get("sources", []))),
         "request_time": elapsed,
+        "filters": result.get("filters", {}),
     }
 
 
@@ -524,6 +525,7 @@ def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
             "answer": answer,
             "documents": _build_documents(sources),
             "request_time": elapsed,
+            "filters": chatbot_result.get("filters", {}),
         }
 
     except (json.JSONDecodeError, ValueError) as e:
@@ -847,6 +849,7 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
         request_time = output.get("request_time", 0.0) if isinstance(output, dict) else 0.0
         rag_answer = output.get('answer') if isinstance(output, dict) else str(output)
         documents = output.get("documents", [])
+        filters = output.get("filters", {}) if isinstance(output, dict) else {}
         # Serialize documents for JSON
         serialized_documents = [
             {"content": doc.page_content, "metadata": doc.metadata}
@@ -860,6 +863,10 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
             "evaluations": evaluations,
             "documents": serialized_documents,
             "index": example_index,
+            # None for modes that don't report them (rag mode today) rather than
+            # omitted, so downstream aggregation can tell "no data" from "zero".
+            "steps_used": filters.get("steps_used"),
+            "token_usage": filters.get("token_usage"),
         }
 
     if num_workers > 1:
@@ -914,6 +921,17 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
             "average_request_time_seconds": avg_request_time,
         }
 
+        # Only agentic/deepagents modes report these (rag mode's filters is
+        # currently empty) — skip the averages entirely rather than average
+        # in a bunch of Nones as zeros.
+        steps_values = [r["steps_used"] for r in results if r.get("steps_used") is not None]
+        if steps_values:
+            summary["average_steps_used"] = sum(steps_values) / len(steps_values)
+
+        token_totals = [r["token_usage"]["total_tokens"] for r in results if r.get("token_usage")]
+        if token_totals:
+            summary["average_total_tokens"] = sum(token_totals) / len(token_totals)
+
     # Save results, with the summary first so it's readable at the top of the file
     results_file = "evaluation_results.json"
     with open(results_file, "w", encoding="utf-8") as rf:
@@ -935,6 +953,10 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
         if "retrieval_relevance" in summary:
             print(f"Retrieval Relevance: {summary['retrieval_relevance']:.1f}/10")
         print(f"Average Chatbot Request Time: {summary['average_request_time_seconds']:.3f} seconds")
+        if "average_steps_used" in summary:
+            print(f"Average Steps Used:  {summary['average_steps_used']:.1f}")
+        if "average_total_tokens" in summary:
+            print(f"Average Total Tokens: {summary['average_total_tokens']:.0f}")
         print(f"\nOverall Average:     {summary['overall_average']:.1f}/10")
 
 if __name__ == "__main__":
