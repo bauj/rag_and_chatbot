@@ -323,10 +323,11 @@ Examples:
         if args.k_deep_dive is not None:
             config.k_deep_dive = args.k_deep_dive
 
-        # Initialize core chatbot. no-rag mode never touches the reranker, so
-        # skip loading it — pure per-question subprocess startup cost otherwise.
+        # Initialize core chatbot. no-rag and agentic modes never touch the
+        # reranker (agentic's search_pages/read_page tools bypass it entirely),
+        # so skip loading it — pure per-question subprocess startup cost otherwise.
         print("Loading documentation database...")
-        chatbot = DocumentationChatbot(config, skip_reranker=(args.mode == 'no-rag'))
+        chatbot = DocumentationChatbot(config, skip_reranker=(args.mode in ('no-rag', 'agentic')))
 
         print(f"  Loaded {chatbot.get_chunk_count()} documentation chunks")
         print(f"  Modules: {', '.join(chatbot.available_modules)}")
