@@ -228,12 +228,13 @@ Examples:
 
     parser.add_argument(
         '--mode',
-        choices=['rag', 'agentic', 'no-rag'],
+        choices=['rag', 'agentic', 'deepagents', 'no-rag'],
         default='rag',
         help='Chatbot mode: rag (default), agentic (smolagents CodeAgent, '
-             'multi-hop page browsing), or no-rag (no retrieval — answers from the '
-             "LLM's own training knowledge, a baseline to isolate RAG's contribution; "
-             'terminal single-question mode only)'
+             'multi-hop page browsing), deepagents (LangChain deepagents harness, '
+             'spike comparison — see notes/), or no-rag (no retrieval — answers from '
+             "the LLM's own training knowledge, a baseline to isolate RAG's "
+             'contribution; terminal single-question mode only)'
     )
 
     # Web options
@@ -349,9 +350,10 @@ Examples:
         print("  3. Config file is valid JSON (if using --config)")
         sys.exit(1)
 
-    # Initialize agentic chatbot if requested
+    # Initialize agentic chatbot if requested. Excludes deepagents mode — it has
+    # its own DeepAgentsChatbot below and doesn't need a smolagents instance too.
     agentic_chatbot = None
-    if args.mode == 'agentic' or config.agentic is not None:
+    if args.mode == 'agentic' or (config.agentic is not None and args.mode != 'deepagents'):
         if config.agentic is None:
             print(f"\nError: --mode {args.mode} requires an 'agentic' block in config.json")
             sys.exit(1)
@@ -384,6 +386,21 @@ Examples:
                 sys.exit(1)
             print(f"Warning: agentic mode unavailable ({e}). Continuing without it.", file=sys.stderr)
 
+    # Initialize deepagents chatbot if requested (spike: --mode deepagents, see notes/)
+    deepagents_chatbot = None
+    if args.mode == 'deepagents':
+        if config.agentic is None:
+            print(f"\nError: --mode {args.mode} requires an 'agentic' block in config.json")
+            sys.exit(1)
+        try:
+            from core import DeepAgentsChatbot
+            print("Loading deepagents chatbot...")
+            deepagents_chatbot = DeepAgentsChatbot(config, vectorstore=chatbot.vectorstore, bm25_index=chatbot.bm25_index)
+            print("Deepagents chatbot ready.")
+        except ImportError as e:
+            print(f"\nError: --mode deepagents requires the deepagents package. {e}")
+            sys.exit(1)
+
     # Route to appropriate interface
     if args.web:
         from ui import WebUI
@@ -398,6 +415,14 @@ Examples:
         if args.question:
             if args.mode == 'agentic':
                 result = agentic_chatbot.ask(
+                    args.question,
+                    temperature=args.temperature,
+                    max_tokens=args.max_tokens,
+                    max_steps=args.max_steps,
+                    max_chars_per_page=args.max_chars_per_page,
+                )
+            elif args.mode == 'deepagents':
+                result = deepagents_chatbot.ask(
                     args.question,
                     temperature=args.temperature,
                     max_tokens=args.max_tokens,

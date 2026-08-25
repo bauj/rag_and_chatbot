@@ -290,6 +290,7 @@ def _normalize_sources(raw_sources: list) -> list:
 
 _inprocess_chatbot = None
 _inprocess_agentic_chatbot = None
+_inprocess_deepagents_chatbot = None
 
 
 def _init_inprocess_chatbot() -> None:
@@ -303,7 +304,7 @@ def _init_inprocess_chatbot() -> None:
     No state carries between questions: ask()/ask_no_rag() are called fresh
     each time, exactly as before.
     """
-    global _inprocess_chatbot, _inprocess_agentic_chatbot
+    global _inprocess_chatbot, _inprocess_agentic_chatbot, _inprocess_deepagents_chatbot
 
     sys.path.insert(0, CHATBOT_DIR)
     from core import ChatbotConfig, DocumentationChatbot
@@ -311,15 +312,22 @@ def _init_inprocess_chatbot() -> None:
     config_path = os.path.join(CHATBOT_DIR, "config.json")
     config = ChatbotConfig.load(config_path if os.path.exists(config_path) else None)
 
-    # agentic mode never touches the reranker (its search_pages/read_page tools
-    # bypass it) — same rule as chatbot.py's own skip_reranker.
-    skip_reranker = EVAL_MODE in ("no-rag", "agentic")
+    # agentic/deepagents modes never touch the reranker (their search_pages/
+    # read_page tools bypass it) — same rule as chatbot.py's own skip_reranker.
+    skip_reranker = EVAL_MODE in ("no-rag", "agentic", "deepagents")
     print(f"Loading chatbot once for the whole run (mode={EVAL_MODE})...")
     _inprocess_chatbot = DocumentationChatbot(config, skip_reranker=skip_reranker)
 
     if EVAL_MODE == "agentic":
         from core import AgenticChatbot
         _inprocess_agentic_chatbot = AgenticChatbot(
+            config,
+            vectorstore=_inprocess_chatbot.vectorstore,
+            bm25_index=_inprocess_chatbot.bm25_index,
+        )
+    elif EVAL_MODE == "deepagents":
+        from core import DeepAgentsChatbot
+        _inprocess_deepagents_chatbot = DeepAgentsChatbot(
             config,
             vectorstore=_inprocess_chatbot.vectorstore,
             bm25_index=_inprocess_chatbot.bm25_index,
@@ -343,6 +351,8 @@ def _ask_chatbot_inprocess(question: str, timeout_seconds: Optional[int] = None)
         try:
             if EVAL_MODE == "agentic":
                 outcome["result"] = _inprocess_agentic_chatbot.ask(question)
+            elif EVAL_MODE == "deepagents":
+                outcome["result"] = _inprocess_deepagents_chatbot.ask(question)
             elif EVAL_MODE == "no-rag":
                 outcome["result"] = _inprocess_chatbot.ask_no_rag(question)
             else:
@@ -800,7 +810,8 @@ def _print_example_result(display_index: int, result: dict) -> None:
     print(f"{'=' * 80}")
     print(f"\nQuestion: {result['question']}\n")
     print(f"Expected Answer: {result['expected_answer']}\n")
-    rag_answer_preview = result['rag_answer'][:100] + "..." if len(result['rag_answer']) > 100 else result['rag_answer']
+    rag_answer = result['rag_answer'] or f"[no answer — error: {result.get('error') or 'unknown'}]"
+    rag_answer_preview = rag_answer[:100] + "..." if len(rag_answer) > 100 else rag_answer
     print(f"RAG Answer (preview): {rag_answer_preview}\n")
     print("-" * 80)
     print("EVALUATION SCORES:")
@@ -848,6 +859,7 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
         print(f"[{example_index}/{total}] Graded in {grade_elapsed:.1f}s", flush=True)
         request_time = output.get("request_time", 0.0) if isinstance(output, dict) else 0.0
         rag_answer = output.get('answer') if isinstance(output, dict) else str(output)
+        error = output.get("error") if isinstance(output, dict) else None
         documents = output.get("documents", [])
         filters = output.get("filters", {}) if isinstance(output, dict) else {}
         # Serialize documents for JSON
@@ -859,6 +871,7 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
             "question": q,
             "expected_answer": expected,
             "rag_answer": rag_answer,
+            "error": error,
             "request_time": request_time,
             "evaluations": evaluations,
             "documents": serialized_documents,
