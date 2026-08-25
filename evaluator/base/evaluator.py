@@ -4,6 +4,7 @@ import sys
 import json
 import os
 import signal
+import threading
 import time
 import argparse
 from pathlib import Path
@@ -268,6 +269,104 @@ def _run_structured_eval(llm: MistralLLM, instructions: str, content: str):
         return {"score": score, "explanation": explanation_text}
     except Exception as e:
         return {"score": 0.0, "explanation": f"Grading error (not an actual score of 0): {e}"}
+
+def _normalize_sources(raw_sources: list) -> list:
+    """Match chatbot.py's _emit_json field mapping, so in-process results are
+    shaped identically to what the subprocess path used to return via parsed
+    JSON — full_content (untruncated) wins over the 200-char content preview
+    that DocumentationChatbot.ask() also puts in 'content'."""
+    return [
+        {
+            "title": s.get("title"),
+            "module": s.get("module"),
+            "doc_category": s.get("doc_category"),
+            "doc_type": s.get("doc_type"),
+            "url": s.get("url"),
+            "content": s.get("full_content") or s.get("content"),
+        }
+        for s in raw_sources
+    ]
+
+
+_inprocess_chatbot = None
+_inprocess_agentic_chatbot = None
+
+
+def _init_inprocess_chatbot() -> None:
+    """Load the chatbot core once for the whole evaluation run instead of once
+    per question (main()'s dataset loop only — benchmark.py/optimizer.py still
+    use _call_chatbot's subprocess path since they vary config per trial).
+
+    Mirrors chatbot.py's own init sequence — same default config resolution,
+    same skip_reranker rule for modes that don't use it — so answers are
+    unchanged; only the per-question subprocess spawn + model reload goes away.
+    No state carries between questions: ask()/ask_no_rag() are called fresh
+    each time, exactly as before.
+    """
+    global _inprocess_chatbot, _inprocess_agentic_chatbot
+
+    sys.path.insert(0, CHATBOT_DIR)
+    from core import ChatbotConfig, DocumentationChatbot
+
+    config_path = os.path.join(CHATBOT_DIR, "config.json")
+    config = ChatbotConfig.load(config_path if os.path.exists(config_path) else None)
+
+    # agentic mode never touches the reranker (its search_pages/read_page tools
+    # bypass it) — same rule as chatbot.py's own skip_reranker.
+    skip_reranker = EVAL_MODE in ("no-rag", "agentic")
+    print(f"Loading chatbot once for the whole run (mode={EVAL_MODE})...")
+    _inprocess_chatbot = DocumentationChatbot(config, skip_reranker=skip_reranker)
+
+    if EVAL_MODE == "agentic":
+        from core import AgenticChatbot
+        _inprocess_agentic_chatbot = AgenticChatbot(
+            config,
+            vectorstore=_inprocess_chatbot.vectorstore,
+            bm25_index=_inprocess_chatbot.bm25_index,
+        )
+    print("Chatbot ready — reused for every question in this run.")
+
+
+def _ask_chatbot_inprocess(question: str, timeout_seconds: Optional[int] = None) -> dict:
+    """In-process replacement for _call_chatbot, used only by main()'s dataset
+    run once _init_inprocess_chatbot() has loaded the model.
+
+    Runs the call in a thread with a soft join(timeout): unlike the subprocess
+    path (which can hard-kill a hung process tree) this can't force-kill a
+    stuck call — a timed-out question is reported as such and its thread is
+    left to finish or die on its own in the background.
+    """
+    start_time = time.perf_counter()
+    outcome: Dict[str, Any] = {}
+
+    def run():
+        try:
+            if EVAL_MODE == "agentic":
+                outcome["result"] = _inprocess_agentic_chatbot.ask(question)
+            elif EVAL_MODE == "no-rag":
+                outcome["result"] = _inprocess_chatbot.ask_no_rag(question)
+            else:
+                outcome["result"] = _inprocess_chatbot.ask(question)
+        except Exception as e:
+            outcome["error"] = str(e)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    elapsed = time.perf_counter() - start_time
+
+    if thread.is_alive():
+        return {"answer": "Chatbot request timed out", "documents": [], "request_time": elapsed}
+    if "error" in outcome:
+        return {"answer": f"Error: {outcome['error']}", "documents": [], "request_time": elapsed}
+
+    result = outcome["result"]
+    return {
+        "answer": result.get("answer", "No answer returned"),
+        "documents": _build_documents(_normalize_sources(result.get("sources", []))),
+        "request_time": elapsed,
+    }
+
 
 def _build_documents(sources: list) -> list:
     """Convert raw source dicts into document-like objects."""
@@ -710,6 +809,7 @@ def _print_example_result(display_index: int, result: dict) -> None:
 
 def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int = None):
     _validate_config()
+    _init_inprocess_chatbot()
 
     print("Testing Chatbot...")
     print("=" * 80)
@@ -727,7 +827,7 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
         q = example['inputs']['question']
         print(f"[{example_index}/{total}] Calling chatbot: {q[:80]}{'...' if len(q) > 80 else ''}", flush=True)
         start = time.perf_counter()
-        output = _call_chatbot(q, None if EVAL_MODE == "rag" else EVAL_MODE, timeout_seconds)
+        output = _ask_chatbot_inprocess(q, timeout_seconds)
         elapsed = time.perf_counter() - start
         # Grading starts immediately only in parallel mode (grade futures are submitted
         # as each answer future completes). In sequential mode (num_workers=1, the
