@@ -99,6 +99,7 @@ def test_search_pages_tool_forward_returns_candidates(tmp_path):
     class _FakeDoc:
         def __init__(self, filename):
             self.metadata = {"url": f"https://example.com/{filename}"}
+            self.page_content = filename
 
     bot._vectorstore.similarity_search = lambda query, k: [_FakeDoc("classModelAPI__Feature.html")]
     tool = bot._SearchPagesToolCls(bot._vectorstore, bot._page_index)
@@ -106,10 +107,92 @@ def test_search_pages_tool_forward_returns_candidates(tmp_path):
     assert "classModelAPI__Feature.html" in result
 
 
-def test_read_page_tool_rejects_unknown_filepath(tmp_path):
+def test_constructor_stores_reranker_score_fn(tmp_path):
+    score_fn = MagicMock()
+    config = _make_config(tmp_path)
+    bot = AgenticChatbot(config, vectorstore=MagicMock(), reranker_score_fn=score_fn)
+    assert bot._reranker_score_fn is score_fn
+
+
+def test_search_pages_tool_forward_passes_rerank_fn_through(tmp_path, monkeypatch):
+    bot = _make_bot(tmp_path)
+    score_fn = MagicMock()
+
+    captured = {}
+
+    def fake_search_pages(*args, **kwargs):
+        captured["rerank_fn"] = kwargs.get("rerank_fn")
+        return []
+
+    import core.agentic_chatbot as agentic_chatbot_module
+    monkeypatch.setattr(agentic_chatbot_module, "search_pages", fake_search_pages)
+
+    tool = bot._SearchPagesToolCls(bot._vectorstore, bot._page_index, rerank_fn=score_fn)
+    tool.forward("ModelAPI_Feature")
+    assert captured["rerank_fn"] is score_fn
+
+
+def test_search_pages_tool_forward_passes_k_15(tmp_path, monkeypatch):
+    bot = _make_bot(tmp_path)
+
+    captured = {}
+
+    def fake_search_pages(*args, **kwargs):
+        captured["k"] = kwargs.get("k")
+        return []
+
+    import core.agentic_chatbot as agentic_chatbot_module
+    monkeypatch.setattr(agentic_chatbot_module, "search_pages", fake_search_pages)
+
+    tool = bot._SearchPagesToolCls(bot._vectorstore, bot._page_index)
+    tool.forward("ModelAPI_Feature")
+    assert captured["k"] == 15
+
+
+def test_ask_passes_reranker_score_fn_to_search_tool(tmp_path, monkeypatch):
+    score_fn = MagicMock()
+    config = _make_config(tmp_path)
+    bot = AgenticChatbot(config, vectorstore=MagicMock(), reranker_score_fn=score_fn)
+
+    captured = {}
+    original_cls = bot._SearchPagesToolCls
+
+    def capturing_cls(*args, **kwargs):
+        captured["rerank_fn"] = kwargs.get("rerank_fn")
+        return original_cls(*args, **kwargs)
+
+    bot._SearchPagesToolCls = capturing_cls
+    bot._OpenAIServerModel = MagicMock()
+    bot._CodeAgent = lambda **kwargs: _FakeAgent(lambda task: "answer")
+
+    bot.ask("What is a Sketch?")
+    assert captured["rerank_fn"] is score_fn
+
+
+def test_search_pages_tool_forward_omits_full_filepath(tmp_path):
+    """Candidate lines show filename, not the full absolute filepath — the
+    filepath is what was bloating search_pages_tool's output (task: cut
+    agentic mode's per-turn token cost)."""
+    bot = _make_bot(tmp_path)
+
+    class _FakeDoc:
+        def __init__(self, filename):
+            self.metadata = {"url": f"https://example.com/{filename}"}
+            self.page_content = filename
+
+    bot._vectorstore.similarity_search = lambda query, k: [_FakeDoc("classModelAPI__Feature.html")]
+    tool = bot._SearchPagesToolCls(bot._vectorstore, bot._page_index)
+    result = tool.forward("ModelAPI_Feature")
+
+    full_filepath = bot._page_index[0]["filepath"]
+    assert full_filepath not in result
+    assert "classModelAPI__Feature.html" in result
+
+
+def test_read_page_tool_rejects_unknown_filename(tmp_path):
     bot = _make_bot(tmp_path)
     read_entries = []
-    tool = bot._ReadPageToolCls(bot._entry_by_filepath, 8000, read_entries)
+    tool = bot._ReadPageToolCls(bot._entry_by_filename, 8000, read_entries)
     result = tool.forward("/etc/passwd", "dev")
     assert "not a known documentation page" in result.lower() or "error" in result.lower()
     assert read_entries == []
@@ -118,33 +201,33 @@ def test_read_page_tool_rejects_unknown_filepath(tmp_path):
 def test_read_page_tool_records_entry_and_returns_content(tmp_path, monkeypatch):
     bot = _make_bot(tmp_path)
     read_entries = []
-    tool = bot._ReadPageToolCls(bot._entry_by_filepath, 8000, read_entries)
+    tool = bot._ReadPageToolCls(bot._entry_by_filename, 8000, read_entries)
 
-    known_filepath = bot._page_index[0]["filepath"]
+    known_filename = bot._page_index[0]["filename"]
     monkeypatch.setattr(
         "core.agentic_chatbot.parse_page",
         lambda filepath, doc_category, max_chars=8000: "The parsed content.",
     )
-    result = tool.forward(known_filepath, "dev")
+    result = tool.forward(known_filename, "dev")
 
     assert result == "The parsed content."
     assert len(read_entries) == 1
-    assert read_entries[0]["filepath"] == known_filepath
+    assert read_entries[0]["filename"] == known_filename
     assert read_entries[0]["title"] == "ModelAPI_Feature Class Reference"
 
 
 def test_read_page_tool_handles_file_not_found(tmp_path, monkeypatch):
     bot = _make_bot(tmp_path)
     read_entries = []
-    tool = bot._ReadPageToolCls(bot._entry_by_filepath, 8000, read_entries)
+    tool = bot._ReadPageToolCls(bot._entry_by_filename, 8000, read_entries)
 
-    known_filepath = bot._page_index[0]["filepath"]
+    known_filename = bot._page_index[0]["filename"]
 
     def fake_parse(filepath, doc_category, max_chars=8000):
         raise FileNotFoundError(f"not found: {filepath}")
 
     monkeypatch.setattr("core.agentic_chatbot.parse_page", fake_parse)
-    result = tool.forward(known_filepath, "dev")
+    result = tool.forward(known_filename, "dev")
 
     assert "error" in result.lower() or "not found" in result.lower()
     assert read_entries == []
@@ -171,7 +254,7 @@ def test_ask_returns_error_dict_on_agent_exception(tmp_path):
 
 def test_ask_builds_sources_and_grounded_true_when_pages_read(tmp_path, monkeypatch):
     bot = _make_bot(tmp_path)
-    known_filepath = bot._page_index[0]["filepath"]
+    known_filename = bot._page_index[0]["filename"]
     monkeypatch.setattr(
         "core.agentic_chatbot.parse_page",
         lambda filepath, doc_category, max_chars=8000: "page text",
@@ -183,7 +266,7 @@ def test_ask_builds_sources_and_grounded_true_when_pages_read(tmp_path, monkeypa
         # Simulate the agent calling read_page during its loop.
         for tool in captured_tools["tools"]:
             if tool.name == "read_page":
-                tool.forward(known_filepath, "dev")
+                tool.forward(known_filename, "dev")
         return "The final answer."
 
     def fake_code_agent(tools, model, max_steps, **kwargs):
@@ -198,7 +281,7 @@ def test_ask_builds_sources_and_grounded_true_when_pages_read(tmp_path, monkeypa
     assert result["error"] is None
     assert result["answer"] == "The final answer."
     assert len(result["sources"]) == 1
-    assert result["sources"][0]["filepath"] == known_filepath
+    assert result["sources"][0]["filename"] == known_filename
     assert result["filters"]["grounded"] is True
     assert result["filters"]["steps_used"] == 4
 
@@ -210,7 +293,7 @@ def test_ask_sources_carry_the_parsed_page_content(tmp_path, monkeypatch):
     answer looks ungrounded regardless of how good the retrieval was.
     """
     bot = _make_bot(tmp_path)
-    known_filepath = bot._page_index[0]["filepath"]
+    known_filename = bot._page_index[0]["filename"]
     monkeypatch.setattr(
         "core.agentic_chatbot.parse_page",
         lambda filepath, doc_category, max_chars=8000: "The actual page text the agent read.",
@@ -221,7 +304,7 @@ def test_ask_sources_carry_the_parsed_page_content(tmp_path, monkeypatch):
     def run_fn(task):
         for tool in captured_tools["tools"]:
             if tool.name == "read_page":
-                tool.forward(known_filepath, "dev")
+                tool.forward(known_filename, "dev")
         return "The final answer."
 
     def fake_code_agent(tools, model, max_steps, **kwargs):
@@ -297,7 +380,7 @@ def test_ask_uses_config_max_steps_by_default(tmp_path):
 
 def test_ask_replaces_leaked_code_answer_with_fallback_when_sources_read(tmp_path, monkeypatch):
     bot = _make_bot(tmp_path)
-    known_filepath = bot._page_index[0]["filepath"]
+    known_filename = bot._page_index[0]["filename"]
     monkeypatch.setattr(
         "core.agentic_chatbot.parse_page",
         lambda filepath, doc_category, max_chars=8000: "page text",
@@ -308,7 +391,7 @@ def test_ask_replaces_leaked_code_answer_with_fallback_when_sources_read(tmp_pat
     def run_fn(task):
         for tool in captured_tools["tools"]:
             if tool.name == "read_page":
-                tool.forward(known_filepath, "dev")
+                tool.forward(known_filename, "dev")
         return '<code>\nread_page(filepath="foo.html", doc_category="dev")\n</code>'
 
     def fake_code_agent(tools, model, max_steps, **kwargs):

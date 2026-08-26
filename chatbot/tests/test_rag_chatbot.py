@@ -1064,6 +1064,66 @@ def test_no_reranker_configured_takes_the_same_path_as_the_toggle():
     assert result[0].metadata["anchor_id"] == "a1"
 
 
+def test_sum_usage_metadata_aggregates_across_models():
+    from core.rag_chatbot import _sum_usage_metadata
+
+    usage = {
+        "gpt-main": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+        "gpt-hyde": {"input_tokens": 30, "output_tokens": 10, "total_tokens": 40},
+    }
+    assert _sum_usage_metadata(usage) == {
+        "input_tokens": 130, "output_tokens": 30, "total_tokens": 160,
+    }
+
+
+def test_sum_usage_metadata_returns_none_when_empty():
+    from core.rag_chatbot import _sum_usage_metadata
+    assert _sum_usage_metadata({}) is None
+
+
+def test_ask_reports_token_usage_none_when_no_llm_usage_recorded():
+    """A MagicMock chain never drives the real UsageMetadataCallbackHandler,
+    so token_usage must come back None rather than KeyError/crash."""
+    bot = _bare_chatbot()
+    bot.config = MagicMock(top_n_after_rerank=15, title_boost_enabled=False)
+    bot.reranker = None
+    bot.hyde_llm = None
+    bot.bm25_index = None
+    bot.available_modules = ["M"]
+
+    chain = MagicMock()
+    chain.invoke.return_value = "the answer"
+    bot._create_chain = MagicMock(return_value=(chain, MagicMock(), []))
+
+    from core.rag_chatbot import DocumentationChatbot
+    result = DocumentationChatbot.ask(bot, "q")
+
+    assert result["filters"]["token_usage"] is None
+
+
+def test_ask_passes_usage_callback_into_create_chain_and_chain_invoke():
+    bot = _bare_chatbot()
+    bot.config = MagicMock(top_n_after_rerank=15, title_boost_enabled=False)
+    bot.reranker = None
+    bot.hyde_llm = None
+    bot.bm25_index = None
+    bot.available_modules = ["M"]
+
+    chain = MagicMock()
+    chain.invoke.return_value = "the answer"
+    bot._create_chain = MagicMock(return_value=(chain, MagicMock(), []))
+
+    from core.rag_chatbot import DocumentationChatbot
+    DocumentationChatbot.ask(bot, "q")
+
+    _, create_chain_kwargs = bot._create_chain.call_args
+    invoke_args, invoke_kwargs = chain.invoke.call_args
+
+    assert "usage_callback" in create_chain_kwargs
+    passed_callback = create_chain_kwargs["usage_callback"]
+    assert invoke_kwargs["config"]["callbacks"] == [passed_callback]
+
+
 def test_ask_reports_the_context_size_it_actually_sent():
     """Pool size and expansion both move context size; the payload must record it."""
     docs = [Document(page_content="x" * 100, metadata={"title": "T", "url": "u"}),
@@ -1170,10 +1230,12 @@ def test_load_reranker_raises_clear_error_when_multi_vector_encoder_missing(monk
         bot._load_reranker()
 
 
-def test_order_by_late_interaction_sorts_by_maxsim_score_descending():
+def test_score_against_query_late_interaction_scores_by_maxsim():
     from core.rag_chatbot import DocumentationChatbot
+    from core.config import RerankerConfig
 
     bot = DocumentationChatbot.__new__(DocumentationChatbot)
+    bot.config = MagicMock(reranker=RerankerConfig(model="fake-colbert", type="late_interaction"))
     docs = [Document(page_content=f"doc {i}") for i in range(3)]
 
     bot.reranker = MagicMock()
@@ -1182,9 +1244,11 @@ def test_order_by_late_interaction_sorts_by_maxsim_score_descending():
     # Middle doc scores highest, first doc lowest.
     bot.reranker.similarity = lambda q, d: [[0.1, 0.9, 0.5]]
 
-    result = bot._order_by_late_interaction("q", docs)
+    scores = bot.score_against_query("q", docs)
 
-    assert [d.page_content for d in result] == ["doc 1", "doc 2", "doc 0"]
+    assert list(scores) == [0.1, 0.9, 0.5]
+    ordered = [d for _s, d in sorted(zip(scores, docs), key=lambda x: float(x[0]), reverse=True)]
+    assert [d.page_content for d in ordered] == ["doc 1", "doc 2", "doc 0"]
 
 
 def test_select_context_routes_to_late_interaction_when_configured():

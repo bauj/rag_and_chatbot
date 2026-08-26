@@ -324,11 +324,13 @@ Examples:
         if args.k_deep_dive is not None:
             config.k_deep_dive = args.k_deep_dive
 
-        # Initialize core chatbot. no-rag and agentic modes never touch the
-        # reranker (agentic's search_pages/read_page tools bypass it entirely),
-        # so skip loading it — pure per-question subprocess startup cost otherwise.
+        # Initialize core chatbot. no-rag mode never touches the reranker, so
+        # skip loading it there — pure per-question subprocess startup cost
+        # otherwise. Agentic/deepagents modes DO use it now, to rank their
+        # search_pages_tool candidates (loaded once here, reused per search call).
         print("Loading documentation database...")
-        chatbot = DocumentationChatbot(config, skip_reranker=(args.mode in ('no-rag', 'agentic')))
+        chatbot = DocumentationChatbot(config, skip_reranker=(args.mode == 'no-rag'))
+        reranker_score_fn = chatbot.score_against_query if chatbot.reranker is not None else None
 
         print(f"  Loaded {chatbot.get_chunk_count()} documentation chunks")
         print(f"  Modules: {', '.join(chatbot.available_modules)}")
@@ -378,7 +380,8 @@ Examples:
         try:
             from core import AgenticChatbot
             print("Loading agentic chatbot (smolagents)...")
-            agentic_chatbot = AgenticChatbot(config, vectorstore=chatbot.vectorstore, bm25_index=chatbot.bm25_index)
+            agentic_chatbot = AgenticChatbot(config, vectorstore=chatbot.vectorstore, bm25_index=chatbot.bm25_index,
+                                              reranker_score_fn=reranker_score_fn)
             print("Agentic chatbot ready.")
         except ImportError as e:
             if args.mode == 'agentic':
@@ -395,7 +398,8 @@ Examples:
         try:
             from core import DeepAgentsChatbot
             print("Loading deepagents chatbot...")
-            deepagents_chatbot = DeepAgentsChatbot(config, vectorstore=chatbot.vectorstore, bm25_index=chatbot.bm25_index)
+            deepagents_chatbot = DeepAgentsChatbot(config, vectorstore=chatbot.vectorstore, bm25_index=chatbot.bm25_index,
+                                                    reranker_score_fn=reranker_score_fn)
             print("Deepagents chatbot ready.")
         except ImportError as e:
             print(f"\nError: --mode deepagents requires the deepagents package. {e}")

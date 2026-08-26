@@ -4,10 +4,11 @@ Shared HTML parsing utilities used by:
   - chatbot/core/agentic_chatbot.py  (at query time)
 """
 
+import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from langchain_chroma import Chroma
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -357,42 +358,93 @@ def _tokenize(text: str) -> Set[str]:
     return {t.lower() for t in re.split(r'[\s_\-]+', text) if len(t) >= 3}
 
 
-def _channel_filenames(hits: List[Any]) -> List[str]:
-    """
-    Reduce a ranked list of Chroma/BM25 hits (langchain Documents) to a
-    deduped, order-preserving list of filenames — the raw trailing segment
-    of each hit's 'url' metadata, since that's the only field guaranteed to
-    join back to page_index across both dense and BM25 result shapes.
-    """
-    seen: Set[str] = set()
-    out = []
-    for doc in hits:
-        url = doc.metadata.get('url', '')
-        if not url:
-            continue
-        filename = url.split('/')[-1].split('#')[0]
-        if filename in seen:
-            continue
-        seen.add(filename)
-        out.append(filename)
-    return out
+def _chunk_fusion_key(doc: Any) -> tuple:
+    """Identity a chunk shares across vector and BM25 result sets. Mirrors
+    chatbot/core/bm25_index._fusion_key exactly — reimplemented locally so
+    extraction/ stays independent of chatbot/core (it keeps working
+    standalone, e.g. from process_docs.py)."""
+    m = doc.metadata
+    return (m.get('url', ''), m.get('section_id', ''), m.get('chunk_position', ''))
 
 
-def _rrf_fuse_filenames(ranked_filename_lists: List[List[str]], rrf_k: int = 60) -> List[str]:
+def _rrf_fuse_chunks(ranked_lists: List[List[Any]], rrf_k: int = 60) -> List[Any]:
     """
-    Reciprocal rank fusion over filename-keyed channels. Deliberately a small
-    local reimplementation of chatbot/core/bm25_index.reciprocal_rank_fusion's
-    algorithm rather than an import of it — extraction/ stays independent of
-    chatbot/core so it keeps working standalone (e.g. from process_docs.py).
+    Reciprocal rank fusion over chunk-level Document lists — same algorithm
+    and dedup-by-fusion-key as chatbot/core/bm25_index.reciprocal_rank_fusion,
+    reimplemented locally for the same independence reason as
+    _chunk_fusion_key above.
+
+    Chunk-level (not filename-level) so a page's score reflects every one of
+    its chunks that scored well, matching how RAG mode's own hybrid_retrieve
+    fuses — and so a later dedup pass sees every candidate chunk per page,
+    not just whichever one a channel happened to rank first.
     """
-    scores: Dict[str, float] = {}
-    order: List[str] = []
-    for ranked in ranked_filename_lists:
-        for rank, filename in enumerate(ranked):
-            if filename not in scores:
-                order.append(filename)
-            scores[filename] = scores.get(filename, 0.0) + 1.0 / (rrf_k + rank + 1)
-    return sorted(order, key=lambda f: scores[f], reverse=True)
+    scores: Dict[tuple, float] = {}
+    doc_by_key: Dict[tuple, Any] = {}
+    order: List[tuple] = []
+    for ranked in ranked_lists:
+        for rank, doc in enumerate(ranked):
+            key = _chunk_fusion_key(doc)
+            if key not in doc_by_key:
+                order.append(key)
+                doc_by_key[key] = doc
+            scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)
+    return [doc_by_key[key] for key in sorted(order, key=lambda k: scores[k], reverse=True)]
+
+
+def _declaring_page_names(hierarchy: str) -> set:
+    """
+    Doxygen page names that would hold the declaration of a qualified symbol.
+
+    'std::shared_ptr< ModelAPI_Result > ModelAPI_Feature::lastResult' yields
+    {'classModelAPI__Feature.html', 'structModelAPI__Feature.html',
+     'interfaceModelAPI__Feature.html'}. Mirrors
+    chatbot/core/rag_chatbot.py's DocumentationChatbot._declaring_page_names
+    exactly — reimplemented locally for the same independence reason as
+    _chunk_fusion_key above.
+
+    Returns an empty set when no qualified name can be read out of hierarchy.
+    """
+    match = re.search(r'([A-Za-z_]\w*)::~?[A-Za-z_]\w*\s*$', hierarchy or '')
+    if not match:
+        return set()
+    escaped = match.group(1).replace('_', '__')
+    return {f"{kind}{escaped}.html" for kind in ('class', 'struct', 'interface')}
+
+
+def _dedup_symbol_copies(docs: List[Any]) -> List[Any]:
+    """
+    Collapse duplicate copies of the same documented symbol (Doxygen's
+    INLINE_INHERITED_MEMB copies one inherited member's docs onto every
+    subclass page — left alone, a single inherited method can fill a whole
+    result set and crowd out the page the question was actually about).
+
+    Mirrors chatbot/core/rag_chatbot.py's DocumentationChatbot._dedup_symbol_copies
+    exactly — same anchor_id key, same declaring-class-wins tie-break, same
+    content-hash fallback for chunks with no anchor — reimplemented locally
+    for the same independence reason as _chunk_fusion_key above. Must run
+    before any collapse to one candidate per page: a page's chunk that
+    happens to rank first in a channel is not necessarily the chunk carrying
+    the shared anchor_id, so deduping after that collapse would miss most
+    duplicates. Input order is preserved.
+    """
+    best: Dict[str, int] = {}
+    result: List[Any] = []
+
+    for doc in docs:
+        anchor = doc.metadata.get('anchor_id', '')
+        key = f"a:{anchor}" if anchor else f"c:{hashlib.sha1(doc.page_content.encode('utf-8')).hexdigest()}"
+
+        page = doc.metadata.get('url', '').split('#')[0].rsplit('/', 1)[-1]
+        is_declaring = page in _declaring_page_names(doc.metadata.get('hierarchy', ''))
+
+        if key not in best:
+            best[key] = len(result)
+            result.append(doc)
+        elif is_declaring:
+            result[best[key]] = doc
+
+    return result
 
 
 def search_pages(
@@ -403,12 +455,13 @@ def search_pages(
     exclude_filepaths: Optional[Set[str]] = None,
     bm25_index: Optional[Any] = None,
     title_boost_enabled: bool = False,
+    rerank_fn: Optional[Callable[[str, List[Any]], List[float]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Hybrid search over the RAG-mode retrieval channels, mapped back to
     page_index entries so read_page(filepath=...) keeps working unchanged.
 
-    Fuses up to three ranked channels via reciprocal rank fusion:
+    Fuses up to three ranked CHUNK-level channels via reciprocal rank fusion:
     dense (always), BM25 body search and BM25 title search (both only when
     bm25_index is given — a duck-typed object exposing .search(query, k) and
     .search_titles(query, k), i.e. chatbot/core/bm25_index.BM25Index, passed
@@ -418,6 +471,21 @@ def search_pages(
     dense-only retrieval misses named-entity lookups, which the agentic
     page-search tool is just as exposed to as the main RAG chain.
 
+    Mirrors RAG mode's own _hybrid_retrieve + _dedup_symbol_copies pipeline:
+    fuse at chunk level, THEN dedup duplicate symbol copies (Doxygen's
+    INLINE_INHERITED_MEMB defect — see _dedup_symbol_copies), THEN collapse to
+    one candidate per page. Doing it in this order — not collapsing to pages
+    first — means dedup sees every chunk of every page, not just whichever
+    chunk a channel happened to rank first; collapsing first can miss a
+    duplicate entirely if that page's first-ranked chunk isn't the one
+    carrying the shared anchor_id.
+
+    rerank_fn, if given, is a duck-typed callable(query, docs) -> scores —
+    i.e. chatbot/core/rag_chatbot.py's DocumentationChatbot.score_against_query,
+    injected the same way bm25_index is — that reorders the final ≤k page
+    candidates by score instead of fusion rank, using each page's chosen
+    representative chunk (the one that survived dedup and collapse below).
+
     Chroma chunk metadata may hold a web URL instead of a local filepath
     (extraction config-dependent), so the join to page_index is done via
     filename — the raw, unmodified trailing segment of the URL — rather
@@ -426,19 +494,25 @@ def search_pages(
     exclude_filepaths = exclude_filepaths or set()
     by_filename = {e['filename']: e for e in page_index}
 
-    fetch_k = k * 4  # over-fetch; dedup + join will shrink it
+    fetch_k = k * 4  # over-fetch; dedup + collapse-to-page + join will shrink it
 
-    channels = [_channel_filenames(vectorstore.similarity_search(query, k=fetch_k))]
+    channels = [vectorstore.similarity_search(query, k=fetch_k)]
     if bm25_index is not None:
-        channels.append(_channel_filenames(bm25_index.search(query, fetch_k)))
+        channels.append(bm25_index.search(query, fetch_k))
         if title_boost_enabled:
-            channels.append(_channel_filenames(bm25_index.search_titles(query, fetch_k)))
+            channels.append(bm25_index.search_titles(query, fetch_k))
 
-    fused_filenames = channels[0] if len(channels) == 1 else _rrf_fuse_filenames(channels)
+    fused_chunks = channels[0] if len(channels) == 1 else _rrf_fuse_chunks(channels)
+    deduped_chunks = _dedup_symbol_copies(fused_chunks)
 
     seen: Set[str] = set()
-    result = []
-    for filename in fused_filenames:
+    result_filenames: List[str] = []
+    filename_to_doc: Dict[str, Any] = {}
+    for doc in deduped_chunks:
+        url = doc.metadata.get('url', '')
+        if not url:
+            continue
+        filename = url.split('/')[-1].split('#')[0]
         entry = by_filename.get(filename)
         if entry is None:
             continue  # chunk has no matching page_index entry — skip rather than guess
@@ -447,9 +521,16 @@ def search_pages(
         if filepath in seen or filepath in exclude_filepaths:
             continue
         seen.add(filepath)
-        result.append(entry)
+        result_filenames.append(filename)
+        filename_to_doc[filename] = doc
 
-        if len(result) >= k:
+        if len(result_filenames) >= k:
             break
 
-    return result
+    if rerank_fn is not None and result_filenames:
+        scored_docs = [filename_to_doc[f] for f in result_filenames]
+        scores = rerank_fn(query, scored_docs)
+        result_filenames = [f for _score, f in
+                             sorted(zip(scores, result_filenames), key=lambda x: float(x[0]), reverse=True)]
+
+    return [by_filename[f] for f in result_filenames]

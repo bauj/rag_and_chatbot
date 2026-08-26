@@ -876,8 +876,9 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
             "evaluations": evaluations,
             "documents": serialized_documents,
             "index": example_index,
-            # None for modes that don't report them (rag mode today) rather than
-            # omitted, so downstream aggregation can tell "no data" from "zero".
+            # None for modes/endpoints that don't report them (e.g. an LLM backend
+            # that never returns usage_metadata) rather than omitted, so downstream
+            # aggregation can tell "no data" from "zero".
             "steps_used": filters.get("steps_used"),
             "token_usage": filters.get("token_usage"),
         }

@@ -18,7 +18,7 @@ from langchain_chroma import Chroma
 from .bm25_index import BM25Index
 from .config import ChatbotConfig
 from .debug_trace_writer import DebugTraceWriter
-from .grounding_judge import check_grounding, llm_builtin_classifier
+from .grounding_judge import check_grounding, concatenated_observations, llm_builtin_classifier
 
 # Matches code the model wrote instead of prose when forced to answer at max_steps
 # (smolagents' default code_block_tags is literally "<code>"/"</code>") — see
@@ -46,7 +46,8 @@ class AgenticChatbot:
     Requires config.agentic to be set and the smolagents package to be installed.
     """
 
-    def __init__(self, config: ChatbotConfig, vectorstore: Chroma, bm25_index: Optional[BM25Index] = None):
+    def __init__(self, config: ChatbotConfig, vectorstore: Chroma, bm25_index: Optional[BM25Index] = None,
+                 reranker_score_fn: Optional[Any] = None):
         if config.agentic is None:
             raise ValueError(
                 "AgenticChatbot requires config.agentic to be set. "
@@ -69,6 +70,7 @@ class AgenticChatbot:
         self._SearchPagesToolCls, self._ReadPageToolCls = _build_tool_classes(Tool)
         self._vectorstore = vectorstore
         self._bm25_index = bm25_index
+        self._reranker_score_fn = reranker_score_fn
 
         index_path = Path(self._agentic_cfg.page_index_path)
         if not index_path.is_absolute():
@@ -84,7 +86,7 @@ class AgenticChatbot:
         except json.JSONDecodeError as e:
             raise ValueError(f"Page index is not valid JSON: {e}")
 
-        self._entry_by_filepath = {e['filepath']: e for e in self._page_index}
+        self._entry_by_filename = {e['filename']: e for e in self._page_index}
         self._debug_writer = DebugTraceWriter(
             debug_dir=getattr(self._agentic_cfg, "debug_dir", "debug_traces")
         )
@@ -141,8 +143,10 @@ class AgenticChatbot:
             self._vectorstore, self._page_index,
             bm25_index=self._bm25_index,
             title_boost_enabled=self.config.title_boost_enabled,
+            rerank_fn=self._reranker_score_fn,
+            k=15,
         )
-        read_tool = self._ReadPageToolCls(self._entry_by_filepath, _max_chars_per_page, read_entries)
+        read_tool = self._ReadPageToolCls(self._entry_by_filename, _max_chars_per_page, read_entries)
 
         model = self._OpenAIServerModel(
             model_id=self.config.llm.model,
@@ -191,7 +195,8 @@ class AgenticChatbot:
         answer = str(raw_answer)
 
         classify_builtin = llm_builtin_classifier(model)
-        ungrounded_calls = check_grounding(answer, agent, llm_classify_fn=classify_builtin)
+        observations = concatenated_observations(agent)
+        ungrounded_calls = check_grounding(answer, observations, llm_classify_fn=classify_builtin)
         retries_used = 0
         while ungrounded_calls and retries_used < MAX_GROUNDING_RETRIES:
             retries_used += 1
@@ -212,7 +217,8 @@ class AgenticChatbot:
                 break  # keep the last answer/ungrounded_calls, fall through to degraded handling
 
             answer = str(raw_answer)
-            ungrounded_calls = check_grounding(answer, agent, llm_classify_fn=classify_builtin)
+            observations = concatenated_observations(agent)
+            ungrounded_calls = check_grounding(answer, observations, llm_classify_fn=classify_builtin)
 
         seen = set()
         sources = []
@@ -356,61 +362,66 @@ def _build_tool_classes(Tool):
         name = "search_pages"
         description = (
             "Search the documentation page index for pages matching a query. "
-            "Returns candidate pages with their filepath, title, module, and doc_category."
+            "Returns candidate pages with their filename, title, module, and doc_category."
         )
         inputs = {"query": {"type": "string", "description": "Search terms describing what to look for."}}
         output_type = "string"
 
         def __init__(self, vectorstore: Chroma, page_index: List[dict],
-                     bm25_index: Optional[BM25Index] = None, title_boost_enabled: bool = False):
+                     bm25_index: Optional[BM25Index] = None, title_boost_enabled: bool = False,
+                     rerank_fn: Optional[Any] = None, k: int = 15):
             super().__init__()
             self._vectorstore = vectorstore
             self._page_index = page_index
             self._bm25_index = bm25_index
             self._title_boost_enabled = title_boost_enabled
+            self._rerank_fn = rerank_fn
+            self._k = k
 
         def forward(self, query: str) -> str:
             candidates = search_pages(
                 self._vectorstore, self._page_index, query,
                 bm25_index=self._bm25_index,
                 title_boost_enabled=self._title_boost_enabled,
+                rerank_fn=self._rerank_fn,
+                k=self._k,
             )
             if not candidates:
                 return "No matches for " + query + ". Try a broader or alternative term, or search a related feature category."
             return "\n".join(
-                f"- {e['filepath']} | {e['title']} | {e['module']}/{e['doc_category']}"
+                f"- {e['filename']} | {e['title']} | {e['module']}/{e['doc_category']}"
                 for e in candidates
             )
 
     class ReadPageTool(Tool):
         name = "read_page"
         description = (
-            "Read and return the text content of a documentation page. The filepath "
-            "must be one returned by search_pages — other filepaths are rejected."
+            "Read and return the text content of a documentation page. The filename "
+            "must be one returned by search_pages — other filenames are rejected."
         )
         inputs = {
-            "filepath": {"type": "string", "description": "Exact filepath as returned by search_pages."},
+            "filename": {"type": "string", "description": "Exact filename as returned by search_pages."},
             "doc_category": {"type": "string", "description": "The page's doc_category (dev or user), as returned by search_pages."},
         }
         output_type = "string"
 
-        def __init__(self, entry_by_filepath: Dict[str, dict], max_chars: int, read_entries: List[dict]):
+        def __init__(self, entry_by_filename: Dict[str, dict], max_chars: int, read_entries: List[dict]):
             super().__init__()
-            self._entry_by_filepath = entry_by_filepath
+            self._entry_by_filename = entry_by_filename
             self._max_chars = max_chars
             self._read_entries = read_entries
 
-        def forward(self, filepath: str, doc_category: str) -> str:
-            entry = self._entry_by_filepath.get(filepath)
+        def forward(self, filename: str, doc_category: str) -> str:
+            entry = self._entry_by_filename.get(filename)
             if entry is None:
                 return (
-                    f"Error: {filepath!r} is not a known documentation page. "
-                    "Only use filepaths returned by search_pages."
+                    f"Error: {filename!r} is not a known documentation page. "
+                    "Only use filenames returned by search_pages."
                 )
             try:
-                content = parse_page(filepath, doc_category, max_chars=self._max_chars)
+                content = parse_page(entry['filepath'], doc_category, max_chars=self._max_chars)
             except FileNotFoundError:
-                return f"Error: page file not found on disk: {filepath}"
+                return f"Error: page file not found on disk: {entry['filepath']}"
             self._read_entries.append({**entry, "content": content})
             return content
 

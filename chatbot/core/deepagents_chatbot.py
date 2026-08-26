@@ -6,20 +6,31 @@ tool-calling loop against smolagents' code-execution loop (AgenticChatbot)
 on the same search_pages/read_page tools, same page_index, same config.agentic
 block. Not meant to be merged as-is — see notes/ for the eval writeup.
 
+Ported from AgenticChatbot: the deterministic grounding_judge.check_grounding
+retry loop (was missing here — self-reported "grounded" was previously just
+bool(read_entries), i.e. true as soon as any page was read, with no check
+that generated calls actually appear in what was read).
+
+Back to the full-page-dump design (read_page_tool returns page text directly)
+after the custom grep_page_tool variant (results_17q_deepagents_grep.json)
+regressed on every metric — see project memory project_rag_deepagents_spike.
+grep_page_tool's GraphRecursionError crash mode (agent confuses page_id with
+filename, burns steps, hits the hard recursion limit with no graceful
+degradation) is left as a possible later task, not fixed here.
+
 Returns the same {answer, sources, filters, error} dict as AgenticChatbot.ask()
 so it drops into the same evaluator harness via --mode deepagents.
 """
 
-import re
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from langchain_chroma import Chroma
+from .agentic_chatbot import _fallback_answer
 from .bm25_index import BM25Index
 from .config import ChatbotConfig
+from .grounding_judge import check_grounding, llm_builtin_classifier
 
 _EXTRACTION_DIR = Path(__file__).parent.parent.parent / "extraction"
 if str(_EXTRACTION_DIR) not in sys.path:
@@ -52,23 +63,15 @@ def _sum_token_usage(messages) -> Optional[Dict[str, int]]:
 
 _SYSTEM_PROMPT = (
     "You are an expert assistant for {project_name} documentation. "
-    "Use the search_pages_tool to find candidate documentation pages, then "
-    "read_page_tool to fetch one. read_page_tool does NOT return the page text — "
-    "it returns a page_id. You MUST then call grep_page_tool with that EXACT "
-    "page_id (not the filepath you searched with) and a specific search term (a "
-    "method/class name, or a few keywords from the question) to find the relevant "
-    "excerpt. Do not use the generic read_file or grep tools on these pages — "
-    "grep_page_tool is the one built for this and returns proper surrounding "
-    "context. Only call read_file on the page_id.txt path as a last resort if "
-    "grep_page_tool finds nothing after trying a couple of different terms. "
-    "You MUST read at least one page's content before answering — never answer "
-    "from prior knowledge alone. Answer the question strictly based on what you "
-    "read. Identify each distinct operation required and search for each one "
-    "separately. If a search returns no results, you MUST retry with at least "
-    "one alternative term before proceeding. Never invent API calls, imports, or "
-    "libraries that did not appear in retrieved documentation — if you cannot "
-    "find grounding, say so explicitly rather than guessing. Answer in plain "
-    "prose; do not run shell commands."
+    "Use the search_pages_tool to find candidate documentation pages, then the "
+    "read_page_tool to read their content. You MUST call read_page_tool at least "
+    "once before answering — never answer from prior knowledge alone. Answer the "
+    "question strictly based on what you read. Identify each distinct operation "
+    "required and search for each one separately. If a search returns no results, "
+    "you MUST retry with at least one alternative term before proceeding. Never "
+    "invent API calls, imports, or libraries that did not appear in retrieved "
+    "documentation — if you cannot find grounding, say so explicitly rather than "
+    "guessing. Answer in plain prose; do not run shell commands."
 )
 
 
@@ -79,7 +82,8 @@ class DeepAgentsChatbot:
     eval comparison against smolagents.
     """
 
-    def __init__(self, config: ChatbotConfig, vectorstore: Chroma, bm25_index: Optional[BM25Index] = None):
+    def __init__(self, config: ChatbotConfig, vectorstore: Chroma, bm25_index: Optional[BM25Index] = None,
+                 reranker_score_fn: Optional[Any] = None):
         if config.agentic is None:
             raise ValueError(
                 "DeepAgentsChatbot requires config.agentic to be set. "
@@ -88,7 +92,6 @@ class DeepAgentsChatbot:
 
         try:
             from deepagents import create_deep_agent
-            from deepagents.backends import FilesystemBackend
             from langchain_core.tools import tool
             from langchain_openai import ChatOpenAI
         except ImportError as e:
@@ -100,11 +103,11 @@ class DeepAgentsChatbot:
         self.config = config
         self._agentic_cfg = config.agentic
         self._create_deep_agent = create_deep_agent
-        self._FilesystemBackend = FilesystemBackend
         self._tool_decorator = tool
         self._ChatOpenAI = ChatOpenAI
         self._vectorstore = vectorstore
         self._bm25_index = bm25_index
+        self._reranker_score_fn = reranker_score_fn
 
         index_path = Path(self._agentic_cfg.page_index_path)
         if not index_path.is_absolute():
@@ -121,7 +124,7 @@ class DeepAgentsChatbot:
         except json.JSONDecodeError as e:
             raise ValueError(f"Page index is not valid JSON: {e}")
 
-        self._entry_by_filepath = {e['filepath']: e for e in self._page_index}
+        self._entry_by_filename = {e['filename']: e for e in self._page_index}
 
     def _build_model(self, temperature: Optional[float], max_tokens: Optional[int]):
         llm_cfg = self.config.llm
@@ -140,90 +143,54 @@ class DeepAgentsChatbot:
             kwargs["http_client"] = httpx.Client(verify=str(cert_path))
         return self._ChatOpenAI(**kwargs)
 
-    def _build_tools(self, max_chars_per_page: int, read_entries: List[dict], backend):
+    def _build_tools(self, max_chars_per_page: int, read_entries: List[dict]):
         title_boost_enabled = self.config.title_boost_enabled
         vectorstore = self._vectorstore
         page_index = self._page_index
         bm25_index = self._bm25_index
-        entry_by_filepath = self._entry_by_filepath
-        pages_by_id: Dict[str, str] = {}
+        entry_by_filename = self._entry_by_filename
+        rerank_fn = self._reranker_score_fn
 
         @self._tool_decorator
         def search_pages_tool(query: str) -> str:
             """Search the documentation page index for pages matching a query.
-            Returns candidate pages with their filepath, title, module, and doc_category."""
+            Returns candidate pages with their filename, title, module, and doc_category."""
             candidates = search_pages(
                 vectorstore, page_index, query,
                 bm25_index=bm25_index,
                 title_boost_enabled=title_boost_enabled,
+                rerank_fn=rerank_fn,
+                k=15,
             )
             if not candidates:
                 return "No matches for " + query + ". Try a broader or alternative term, or search a related feature category."
             return "\n".join(
-                f"- {e['filepath']} | {e['title']} | {e['module']}/{e['doc_category']}"
+                f"- {e['filename']} | {e['title']} | {e['module']}/{e['doc_category']}"
                 for e in candidates
             )
 
         @self._tool_decorator
-        def read_page_tool(filepath: str, doc_category: str) -> str:
-            """Fetch a documentation page. The filepath must be one returned by
-            search_pages_tool — other filepaths are rejected. Does NOT return the
-            page text — returns a page_id. Pass that EXACT page_id (not the
-            filepath you searched with) to grep_page_tool with a specific search
-            term to find the relevant excerpt, rather than reading the whole page."""
-            entry = entry_by_filepath.get(filepath)
+        def read_page_tool(filename: str, doc_category: str) -> str:
+            """Read and return the text content of a documentation page. The
+            filename must be one returned by search_pages_tool — other
+            filenames are rejected."""
+            entry = entry_by_filename.get(filename)
             if entry is None:
                 return (
-                    f"Error: {filepath!r} is not a known documentation page. "
-                    "Only use filepaths returned by search_pages_tool."
+                    f"Error: {filename!r} is not a known documentation page. "
+                    "Only use filenames returned by search_pages_tool."
                 )
             try:
-                # Full, untruncated text to search — max_chars_per_page only
-                # bounds what ends up in sources/grading, not what's searchable.
-                # parse_page compares len(text) > max_chars, so a plain None would
-                # TypeError; use a sentinel large enough no real page hits it.
-                content = parse_page(filepath, doc_category, max_chars=10**9)
+                content = parse_page(entry['filepath'], doc_category, max_chars=max_chars_per_page)
             except FileNotFoundError:
-                return f"Error: page file not found on disk: {filepath}"
-            read_entries.append({**entry, "content": content[:max_chars_per_page]})
+                return f"Error: page file not found on disk: {entry['filepath']}"
+            read_entries.append({**entry, "content": content})
+            return content
 
-            page_id = re.sub(r"[^\w.-]", "_", f"{doc_category}_{entry['filename']}")
-            pages_by_id[page_id] = content
-            backend.write(page_id + ".txt", content)  # fallback: glob/read_file can still browse it
-            return (
-                f'page_id="{page_id}" ({len(content)} chars). Next call: '
-                f'grep_page_tool(page_id="{page_id}", pattern=<specific term>).'
-            )
-
-        @self._tool_decorator
-        def grep_page_tool(page_id: str, pattern: str, context_lines: int = 15) -> str:
-            """Search a page fetched via read_page_tool for a literal substring
-            (case-insensitive) and return matching lines with surrounding context
-            — use this instead of reading the whole page. page_id must be exactly
-            the value read_page_tool returned, not the original filepath."""
-            content = pages_by_id.get(page_id)
-            if content is None:
-                return (
-                    f"Error: no page with page_id={page_id!r}. Use the exact "
-                    "page_id string read_page_tool returned, not the filepath."
-                )
-            lines = content.split("\n")
-            pattern_lower = pattern.lower()
-            hit_indices = [i for i, line in enumerate(lines) if pattern_lower in line.lower()]
-            if not hit_indices:
-                return f"No matches for {pattern!r} in {page_id}. Try a different or broader term."
-
-            excerpts = []
-            for i in hit_indices[:5]:  # cap so a very common term doesn't dump the whole page anyway
-                start = max(0, i - context_lines)
-                end = min(len(lines), i + context_lines + 1)
-                excerpts.append("\n".join(lines[start:end]))
-            return "\n\n---\n\n".join(excerpts)
-
-        return [search_pages_tool, read_page_tool, grep_page_tool]
+        return [search_pages_tool, read_page_tool]
 
     @staticmethod
-    def _run_streaming(agent, question: str, recursion_limit: int) -> dict:
+    def _run_streaming(agent, input_messages: List[dict], recursion_limit: int) -> dict:
         """
         Live step trace to stderr — stream_mode="updates" yields one chunk per
         graph node (model call or tool call), so each search_pages/read_page
@@ -235,7 +202,7 @@ class DeepAgentsChatbot:
         # reconstructs the same message log agent.invoke() would return.
         all_messages: List[Any] = []
         for chunk in agent.stream(
-            {"messages": [{"role": "user", "content": f"Question: {question}"}]},
+            {"messages": input_messages},
             config={"recursion_limit": recursion_limit},
             stream_mode="updates",
         ):
@@ -269,6 +236,8 @@ class DeepAgentsChatbot:
         Answer a question by letting a deepagents tool-calling agent search the
         page index and read pages. Returns {answer, sources, filters, error}.
         """
+        MAX_GROUNDING_RETRIES = 1
+
         cfg = self._agentic_cfg
         _max_steps = max_steps if max_steps is not None else cfg.max_steps
         _max_chars_per_page = max_chars_per_page if max_chars_per_page is not None else cfg.max_chars_per_page
@@ -276,47 +245,71 @@ class DeepAgentsChatbot:
 
         read_entries: List[dict] = []
         model = self._build_model(temperature, max_tokens)
+        tools = self._build_tools(_max_chars_per_page, read_entries)
 
-        # Fresh scratch dir per call: read_page writes pages here for grep to
-        # search instead of dumping full text into the transcript. Per-call
-        # (not instance-level) so concurrent ask() calls (evaluator's
-        # ThreadPoolExecutor) don't collide, and torn down after — no state
-        # carries between questions, same as the rest of this class.
-        scratch_dir = tempfile.mkdtemp(prefix="deepagents_pages_")
-        try:
-            backend = self._FilesystemBackend(root_dir=scratch_dir, virtual_mode=True)
-            tools = self._build_tools(_max_chars_per_page, read_entries, backend)
+        agent = self._create_deep_agent(
+            model=model,
+            tools=tools,
+            system_prompt=_SYSTEM_PROMPT.format(project_name=self.config.project_name),
+        )
 
-            agent = self._create_deep_agent(
-                model=model,
-                tools=tools,
-                system_prompt=_SYSTEM_PROMPT.format(project_name=self.config.project_name),
-                backend=backend,
+        # deepagents' recursion_limit counts model+tool nodes, roughly 2 per
+        # tool-calling round-trip; approximate smolagents' max_steps budget.
+        recursion_limit = 2 * _max_steps + 2
+
+        def _invoke(input_messages: List[dict]) -> dict:
+            if _debug:
+                return self._run_streaming(agent, input_messages, recursion_limit)
+            return agent.invoke(
+                {"messages": input_messages},
+                config={"recursion_limit": recursion_limit},
             )
 
-            # deepagents' recursion_limit counts model+tool nodes, roughly 2 per
-            # tool-calling round-trip; approximate smolagents' max_steps budget.
-            recursion_limit = 2 * _max_steps + 2
+        def _observations_text() -> str:
+            return "\n".join(e.get("content", "") for e in read_entries)
 
-            try:
-                if _debug:
-                    result = self._run_streaming(agent, question, recursion_limit)
-                else:
-                    result = agent.invoke(
-                        {"messages": [{"role": "user", "content": f"Question: {question}"}]},
-                        config={"recursion_limit": recursion_limit},
-                    )
+        try:
+            result = _invoke([{"role": "user", "content": f"Question: {question}"}])
+            answer = result["messages"][-1].content
+
+            classify_builtin = llm_builtin_classifier(lambda messages: model.invoke(messages))
+            ungrounded_calls = check_grounding(answer, _observations_text(), llm_classify_fn=classify_builtin)
+            retries_used = 0
+            while ungrounded_calls and retries_used < MAX_GROUNDING_RETRIES:
+                retries_used += 1
+                complaints = "; ".join(f"{c['call']} ({c['reason']})" for c in ungrounded_calls)
+                retry_task = (
+                    f"Your previous answer has issues with these calls: {complaints}. "
+                    f"For any call not found in the documentation, search/read again to find "
+                    f"the correct name or signature — do not invent a replacement. For any "
+                    f"call flagged as having multiple documented signatures, re-read its "
+                    f"documentation and confirm which variant you're using and what each "
+                    f"argument actually means — do not assume from a bare code example "
+                    f"alone. Fix ONLY these calls and provide the corrected answer."
+                )
+                retry_messages = result["messages"] + [{"role": "user", "content": retry_task}]
+                try:
+                    result = _invoke(retry_messages)
+                except Exception:
+                    break  # keep the last answer/ungrounded_calls, fall through to degraded handling
+
                 answer = result["messages"][-1].content
-                steps_used = len(result["messages"])
-            except Exception as e:
-                return {
-                    "answer": None,
-                    "sources": [],
-                    "filters": {"mode": "deepagents", "steps_used": 0, "grounded": False},
-                    "error": str(e),
-                }
-        finally:
-            shutil.rmtree(scratch_dir, ignore_errors=True)
+                ungrounded_calls = check_grounding(answer, _observations_text(), llm_classify_fn=classify_builtin)
+
+            steps_used = len(result["messages"])
+        except Exception as e:
+            return {
+                "answer": None,
+                "sources": [],
+                "filters": {"mode": "deepagents", "steps_used": 0, "grounded": False},
+                "error": str(e),
+            }
+
+        # An ambiguous_overload flag can never clear on its own (see
+        # grounding_judge.check_grounding docstring) — only a still-unknown
+        # name after the retry is real evidence the answer isn't grounded.
+        blocking_calls = [c for c in ungrounded_calls if c.get("kind") != "ambiguous_overload"]
+        degraded = bool(blocking_calls)
 
         seen = set()
         sources = []
@@ -333,6 +326,9 @@ class DeepAgentsChatbot:
                 "content": entry.get("content", ""),
             })
 
+        if degraded:
+            answer = _fallback_answer(sources, reason="ungrounded")
+
         return {
             "answer": answer,
             "sources": sources,
@@ -340,6 +336,9 @@ class DeepAgentsChatbot:
                 "mode": "deepagents",
                 "steps_used": steps_used,
                 "grounded": bool(read_entries),
+                "degraded_answer": degraded,
+                "ungrounded_calls": ungrounded_calls,
+                "grounding_retries_used": retries_used,
                 "token_usage": _sum_token_usage(result["messages"]),
             },
             "error": None,
