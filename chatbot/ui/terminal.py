@@ -47,7 +47,7 @@ class TerminalUI:
         print("\nCommands:")
         if has_agentic:
             print("  mode:rag          - Switch to RAG mode (vector retrieval)")
-            print("  mode:agentic      - Switch to Agentic mode (smolagents, multi-hop browsing)")
+            print("  mode:agentic      - Switch to Agentic mode (deepagents, multi-hop browsing)")
         for mod in self.chatbot.available_modules:
             print(f"  module:{mod:<12} - Filter by {mod} (RAG only)")
         print("  type:dev          - Filter developer docs only (RAG only)")
@@ -63,7 +63,7 @@ class TerminalUI:
             print("  bm25              - Toggle BM25 hybrid retrieval on/off (RAG only)")
         if has_agentic:
             print("  agentic:chars:<n>    - Set max chars read per page (Agentic only)")
-            print("  agentic:maxsteps:<n> - Set the CodeAgent step budget (Agentic only)")
+            print("  agentic:maxsteps:<n> - Set the agent step budget (Agentic only)")
         print("  clear             - Clear all filters")
         print("  stats             - Show statistics (RAG only)")
         print("  exit/quit         - Exit\n")

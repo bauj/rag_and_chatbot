@@ -24,7 +24,7 @@ class WebUI:
 
         Args:
             chatbot: DocumentationChatbot instance
-            agentic_chatbot: Optional AgenticChatbot instance (smolagents-backed)
+            agentic_chatbot: Optional AgenticChatbot instance (deepagents-backed)
         """
         self.chatbot = chatbot
         self.agentic_chatbot = agentic_chatbot
@@ -208,7 +208,7 @@ class WebUI:
                         choices=mode_choices,
                         value="RAG",
                         label="Mode",
-                        info="RAG: vector retrieval · Agentic: smolagents CodeAgent, "
+                        info="RAG: vector retrieval · Agentic: deepagents harness, "
                              "multi-hop page browsing",
                         visible=has_agentic,
                     )
@@ -344,7 +344,7 @@ class WebUI:
                         gr.Markdown("---")
                         gr.Markdown("### Agentic params")
                         gr.Markdown(
-                            "A smolagents CodeAgent decides for itself how many search/read "
+                            "A deepagents agent decides for itself how many search/read "
                             "cycles to run, up to the step budget below."
                         )
                         max_chars_per_page = gr.Slider(
@@ -361,7 +361,7 @@ class WebUI:
                             value=agentic_cfg.max_steps if agentic_cfg else 6,
                             step=1,
                             label="Max steps",
-                            info="CodeAgent step budget — how many search/read cycles it may run "
+                            info="Agent step budget — how many search/read cycles it may run "
                                  "before being forced to answer.",
                         )
 

@@ -290,7 +290,6 @@ def _normalize_sources(raw_sources: list) -> list:
 
 _inprocess_chatbot = None
 _inprocess_agentic_chatbot = None
-_inprocess_deepagents_chatbot = None
 
 
 def _init_inprocess_chatbot() -> None:
@@ -304,7 +303,7 @@ def _init_inprocess_chatbot() -> None:
     No state carries between questions: ask()/ask_no_rag() are called fresh
     each time, exactly as before.
     """
-    global _inprocess_chatbot, _inprocess_agentic_chatbot, _inprocess_deepagents_chatbot
+    global _inprocess_chatbot, _inprocess_agentic_chatbot
 
     sys.path.insert(0, CHATBOT_DIR)
     from core import ChatbotConfig, DocumentationChatbot
@@ -312,22 +311,15 @@ def _init_inprocess_chatbot() -> None:
     config_path = os.path.join(CHATBOT_DIR, "config.json")
     config = ChatbotConfig.load(config_path if os.path.exists(config_path) else None)
 
-    # agentic/deepagents modes never touch the reranker (their search_pages/
-    # read_page tools bypass it) — same rule as chatbot.py's own skip_reranker.
-    skip_reranker = EVAL_MODE in ("no-rag", "agentic", "deepagents")
+    # agentic mode never touches the reranker (its search_pages/read_page tools
+    # bypass it) — same rule as chatbot.py's own skip_reranker.
+    skip_reranker = EVAL_MODE in ("no-rag", "agentic")
     print(f"Loading chatbot once for the whole run (mode={EVAL_MODE})...")
     _inprocess_chatbot = DocumentationChatbot(config, skip_reranker=skip_reranker)
 
     if EVAL_MODE == "agentic":
         from core import AgenticChatbot
         _inprocess_agentic_chatbot = AgenticChatbot(
-            config,
-            vectorstore=_inprocess_chatbot.vectorstore,
-            bm25_index=_inprocess_chatbot.bm25_index,
-        )
-    elif EVAL_MODE == "deepagents":
-        from core import DeepAgentsChatbot
-        _inprocess_deepagents_chatbot = DeepAgentsChatbot(
             config,
             vectorstore=_inprocess_chatbot.vectorstore,
             bm25_index=_inprocess_chatbot.bm25_index,
@@ -351,8 +343,6 @@ def _ask_chatbot_inprocess(question: str, timeout_seconds: Optional[int] = None)
         try:
             if EVAL_MODE == "agentic":
                 outcome["result"] = _inprocess_agentic_chatbot.ask(question)
-            elif EVAL_MODE == "deepagents":
-                outcome["result"] = _inprocess_deepagents_chatbot.ask(question)
             elif EVAL_MODE == "no-rag":
                 outcome["result"] = _inprocess_chatbot.ask_no_rag(question)
             else:
@@ -490,7 +480,6 @@ def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
         # Popen (rather than subprocess.run) so a timeout can be handled with
         # _kill_process_tree below: run()'s own timeout handling only kills the
         # immediate chatbot.py PID, which would leave any processes it spawned
-        # (e.g. from agentic-smol's CodeAgent executing arbitrary generated code)
         # still running — burning memory/CPU and potentially still holding a lock
         # on the shared Chroma persist_directory, which could then stall other
         # chatbot calls too.
@@ -935,9 +924,9 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
             "average_request_time_seconds": avg_request_time,
         }
 
-        # Only agentic/deepagents modes report these (rag mode's filters is
-        # currently empty) — skip the averages entirely rather than average
-        # in a bunch of Nones as zeros.
+        # Only agentic mode reports these (rag mode's filters is currently
+        # empty) — skip the averages entirely rather than average in a bunch
+        # of Nones as zeros.
         steps_values = [r["steps_used"] for r in results if r.get("steps_used") is not None]
         if steps_values:
             summary["average_steps_used"] = sum(steps_values) / len(steps_values)

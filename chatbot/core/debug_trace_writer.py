@@ -1,6 +1,10 @@
 """
-DebugTraceWriter — dumps smolagents agent.memory to structured JSON files
-for easier programmatic comparison across many debug runs.
+DebugTraceWriter — dumps a deepagents/LangGraph run's message log to structured
+JSON files for easier programmatic comparison across many debug runs.
+
+Minimal port (2026-08-27): serializes the message list, no per-step wall time —
+LangGraph does not stamp per-node timing. Full-parity timing via the streaming
+path is deferred to task #146.
 """
 
 import json
@@ -11,11 +15,12 @@ from typing import Any, Dict, List, Optional
 
 class DebugTraceWriter:
     """
-    Serializes a smolagents CodeAgent's memory steps to JSON, one file per run.
+    Serializes a run's message log to JSON, one file per run.
 
     Usage:
         writer = DebugTraceWriter(debug_dir="debug_traces")
-        path = writer.dump(agent, question="How do I configure X?", extra={"steps_used": 4})
+        path = writer.dump(result["messages"], question="How do I configure X?",
+                           extra={"steps_used": 4})
     """
 
     def __init__(self, debug_dir: str | Path = "debug_traces"):
@@ -24,15 +29,16 @@ class DebugTraceWriter:
 
     def dump(
         self,
-        agent,
+        messages: List[Any],
         question: str,
         extra: Optional[Dict[str, Any]] = None,
     ) -> Path:
         """
-        Write agent.memory to a timestamped JSON file.
+        Write the message log to a timestamped JSON file.
 
         Args:
-            agent: A smolagents CodeAgent (or anything with a `.memory.steps` list).
+            messages: The LangGraph run's message list (result["messages"]).
+                      May be empty (e.g. a run that crashed before producing one).
             question: The original task/question, stored for context.
             extra: Optional dict of additional metadata to store alongside
                    the trace (e.g. {"steps_used": 4, "degraded_answer": False}).
@@ -43,15 +49,14 @@ class DebugTraceWriter:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         out_path = self.debug_dir / f"trace_{ts}.json"
 
-        steps = [self._serialize_step(i, step) for i, step in enumerate(agent.memory.steps)]
+        serialized = [self._serialize_message(i, m) for i, m in enumerate(messages)]
 
         record = {
             "timestamp": ts,
             "question": question,
             "metadata": extra or {},
-            "total_duration_seconds": self._total_duration(steps),
-            "total_tokens": self._total_tokens(steps),
-            "steps": steps,
+            "total_tokens": self._total_tokens(messages),
+            "messages": serialized,
         }
 
         with open(out_path, "w", encoding="utf-8") as f:
@@ -60,63 +65,43 @@ class DebugTraceWriter:
         return out_path
 
     @staticmethod
-    def _serialize_step(index: int, step: Any) -> Dict[str, Any]:
+    def _serialize_message(index: int, msg: Any) -> Dict[str, Any]:
         entry: Dict[str, Any] = {
             "index": index,
-            "step_type": type(step).__name__,
+            "role": getattr(msg, "type", type(msg).__name__),
+            "content": getattr(msg, "content", ""),
         }
 
-        model_output = getattr(step, "model_output", None)
-        if model_output:
-            entry["model_output"] = model_output
-
-        tool_calls = getattr(step, "tool_calls", None)
+        tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:
             entry["tool_calls"] = [
-                {"name": tc.name, "arguments": tc.arguments} for tc in tool_calls
+                {"name": tc["name"], "args": tc.get("args", {})}
+                if isinstance(tc, dict)
+                else {"name": getattr(tc, "name", None), "args": getattr(tc, "args", {})}
+                for tc in tool_calls
             ]
 
-        observations = getattr(step, "observations", None)
-        if observations:
-            entry["observations"] = observations
+        tool_name = getattr(msg, "name", None)
+        if tool_name:
+            entry["tool_name"] = tool_name
 
-        error = getattr(step, "error", None)
-        if error:
-            entry["error"] = str(error)
-
-        # Some step types (e.g. PlanningStep) carry a plan instead of tool calls
-        plan = getattr(step, "plan", None)
-        if plan:
-            entry["plan"] = plan
-
-        # smolagents' ActionStep carries timing as a Timing object (.start_time/
-        # .end_time/.duration), not flat attrs on the step itself — earlier
-        # versions of this method looked for input_token_count/output_token_count/
-        # duration directly on the step, which never existed, so every trace
-        # silently recorded no timing/token data at all.
-        timing = getattr(step, "timing", None)
-        if timing is not None:
-            entry["start_time"] = timing.start_time
-            entry["end_time"] = timing.end_time
-            entry["duration_seconds"] = timing.duration
-
-        token_usage = getattr(step, "token_usage", None)
-        if token_usage is not None:
-            entry["input_tokens"] = token_usage.input_tokens
-            entry["output_tokens"] = token_usage.output_tokens
-            entry["total_tokens"] = token_usage.total_tokens
+        usage = getattr(msg, "usage_metadata", None)
+        if usage:
+            entry["usage_metadata"] = usage
 
         return entry
 
     @staticmethod
-    def _total_duration(steps: List[Dict[str, Any]]) -> Optional[float]:
-        durations = [s["duration_seconds"] for s in steps if s.get("duration_seconds") is not None]
-        return sum(durations) if durations else None
-
-    @staticmethod
-    def _total_tokens(steps: List[Dict[str, Any]]) -> Optional[int]:
-        totals = [s["total_tokens"] for s in steps if s.get("total_tokens") is not None]
-        return sum(totals) if totals else None
+    def _total_tokens(messages: List[Any]) -> Optional[int]:
+        total = 0
+        seen_any = False
+        for msg in messages:
+            usage = getattr(msg, "usage_metadata", None)
+            if not usage:
+                continue
+            seen_any = True
+            total += usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+        return total if seen_any else None
 
 
 def load_traces(debug_dir: str | Path) -> List[Dict[str, Any]]:

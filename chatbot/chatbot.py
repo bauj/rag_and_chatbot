@@ -217,7 +217,7 @@ Examples:
         '--max-steps',
         type=int,
         dest='max_steps',
-        help='Override the CodeAgent step budget (agentic mode only, terminal single-question mode)'
+        help='Override the agent step budget (agentic mode only, terminal single-question mode)'
     )
     parser.add_argument(
         '--max-chars-per-page',
@@ -228,11 +228,10 @@ Examples:
 
     parser.add_argument(
         '--mode',
-        choices=['rag', 'agentic', 'deepagents', 'no-rag'],
+        choices=['rag', 'agentic', 'no-rag'],
         default='rag',
-        help='Chatbot mode: rag (default), agentic (smolagents CodeAgent, '
-             'multi-hop page browsing), deepagents (LangChain deepagents harness, '
-             'spike comparison — see notes/), or no-rag (no retrieval — answers from '
+        help='Chatbot mode: rag (default), agentic (deepagents harness, '
+             'multi-hop page browsing), or no-rag (no retrieval — answers from '
              "the LLM's own training knowledge, a baseline to isolate RAG's "
              'contribution; terminal single-question mode only)'
     )
@@ -326,8 +325,8 @@ Examples:
 
         # Initialize core chatbot. no-rag mode never touches the reranker, so
         # skip loading it there — pure per-question subprocess startup cost
-        # otherwise. Agentic/deepagents modes DO use it now, to rank their
-        # search_pages_tool candidates (loaded once here, reused per search call).
+        # otherwise. Agentic mode DOES use it now, to rank its search_pages_tool
+        # candidates (loaded once here, reused per search call).
         print("Loading documentation database...")
         chatbot = DocumentationChatbot(config, skip_reranker=(args.mode == 'no-rag'))
         reranker_score_fn = chatbot.score_against_query if chatbot.reranker is not None else None
@@ -352,10 +351,10 @@ Examples:
         print("  3. Config file is valid JSON (if using --config)")
         sys.exit(1)
 
-    # Initialize agentic chatbot if requested. Excludes deepagents mode — it has
-    # its own DeepAgentsChatbot below and doesn't need a smolagents instance too.
+    # Initialize agentic chatbot if requested (or auto-enabled by a config
+    # 'agentic' block).
     agentic_chatbot = None
-    if args.mode == 'agentic' or (config.agentic is not None and args.mode != 'deepagents'):
+    if args.mode == 'agentic' or config.agentic is not None:
         if config.agentic is None:
             print(f"\nError: --mode {args.mode} requires an 'agentic' block in config.json")
             sys.exit(1)
@@ -379,31 +378,15 @@ Examples:
                       "supported in agentic mode and will be ignored.", file=sys.stderr)
         try:
             from core import AgenticChatbot
-            print("Loading agentic chatbot (smolagents)...")
+            print("Loading agentic chatbot (deepagents)...")
             agentic_chatbot = AgenticChatbot(config, vectorstore=chatbot.vectorstore, bm25_index=chatbot.bm25_index,
                                               reranker_score_fn=reranker_score_fn)
             print("Agentic chatbot ready.")
         except ImportError as e:
             if args.mode == 'agentic':
-                print(f"\nError: --mode agentic requires the smolagents package. {e}")
+                print(f"\nError: --mode agentic requires the deepagents package. {e}")
                 sys.exit(1)
             print(f"Warning: agentic mode unavailable ({e}). Continuing without it.", file=sys.stderr)
-
-    # Initialize deepagents chatbot if requested (spike: --mode deepagents, see notes/)
-    deepagents_chatbot = None
-    if args.mode == 'deepagents':
-        if config.agentic is None:
-            print(f"\nError: --mode {args.mode} requires an 'agentic' block in config.json")
-            sys.exit(1)
-        try:
-            from core import DeepAgentsChatbot
-            print("Loading deepagents chatbot...")
-            deepagents_chatbot = DeepAgentsChatbot(config, vectorstore=chatbot.vectorstore, bm25_index=chatbot.bm25_index,
-                                                    reranker_score_fn=reranker_score_fn)
-            print("Deepagents chatbot ready.")
-        except ImportError as e:
-            print(f"\nError: --mode deepagents requires the deepagents package. {e}")
-            sys.exit(1)
 
     # Route to appropriate interface
     if args.web:
@@ -419,14 +402,6 @@ Examples:
         if args.question:
             if args.mode == 'agentic':
                 result = agentic_chatbot.ask(
-                    args.question,
-                    temperature=args.temperature,
-                    max_tokens=args.max_tokens,
-                    max_steps=args.max_steps,
-                    max_chars_per_page=args.max_chars_per_page,
-                )
-            elif args.mode == 'deepagents':
-                result = deepagents_chatbot.ask(
                     args.question,
                     temperature=args.temperature,
                     max_tokens=args.max_tokens,
