@@ -161,6 +161,23 @@ class _FakeBM25Index:
         return [_FakeDoc(f) for f in self._title_ranked[:k]]
 
 
+def test_search_pages_disambiguates_same_filename_across_plugin_dirs():
+    """Two pages can share a trailing filename (ConstructionPlugin/pointFeature.html
+    vs SketchPlugin/pointFeature.html). A chunk hit must map back to the page its
+    URL actually names, not whichever entry a bare-filename dict happened to keep."""
+    idx = [
+        {"filepath": "/docs/gui/ConstructionPlugin/pointFeature.html",
+         "filename": "pointFeature.html", "title": "Construction Point",
+         "module": "SHAPER", "doc_category": "user"},
+        {"filepath": "/docs/gui/SketchPlugin/pointFeature.html",
+         "filename": "pointFeature.html", "title": "Sketch Point",
+         "module": "SHAPER", "doc_category": "user"},
+    ]
+    vs = _FakeVectorStore(["ConstructionPlugin/pointFeature.html"])
+    results = search_pages(vs, idx, "construction point")
+    assert [r["filepath"] for r in results] == ["/docs/gui/ConstructionPlugin/pointFeature.html"]
+
+
 def test_search_pages_finds_dense_hit(dummy=None):
     idx = _make_index()
     vs = _FakeVectorStore(["classModelAPI__Feature.html"])

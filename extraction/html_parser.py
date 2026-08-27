@@ -492,7 +492,22 @@ def search_pages(
     than the url/filepath fields directly.
     """
     exclude_filepaths = exclude_filepaths or set()
-    by_filename = {e['filename']: e for e in page_index}
+
+    # Join key = trailing filename, PLUS a <parent-dir>/<filename> qualified key.
+    # Filenames alone are NOT unique across the corpus (e.g. ConstructionPlugin/
+    # pointFeature.html and SketchPlugin/pointFeature.html both end "pointFeature
+    # .html"); keying only on the bare name silently maps a chunk hit to whichever
+    # colliding page the dict kept, handing the agent the wrong page. Chunk URLs
+    # carry the parent dir, so prefer the qualified key and fall back to the bare
+    # name only when the qualified one doesn't match.
+    def _qualified(path: str) -> str:
+        parts = [p for p in path.split('#')[0].split('?')[0].split('/') if p]
+        return '/'.join(parts[-2:]) if len(parts) >= 2 else (parts[-1] if parts else '')
+
+    by_key: Dict[str, Any] = {}
+    for e in page_index:
+        by_key.setdefault(e['filename'], e)
+        by_key[_qualified(e['filepath'])] = e
 
     fetch_k = k * 4  # over-fetch; dedup + collapse-to-page + join will shrink it
 
@@ -506,31 +521,32 @@ def search_pages(
     deduped_chunks = _dedup_symbol_copies(fused_chunks)
 
     seen: Set[str] = set()
-    result_filenames: List[str] = []
-    filename_to_doc: Dict[str, Any] = {}
+    result_keys: List[str] = []
+    key_to_doc: Dict[str, Any] = {}
     for doc in deduped_chunks:
         url = doc.metadata.get('url', '')
         if not url:
             continue
-        filename = url.split('/')[-1].split('#')[0]
-        entry = by_filename.get(filename)
-        if entry is None:
+        qualified = _qualified(url)
+        bare = qualified.split('/')[-1]
+        key = qualified if qualified in by_key else (bare if bare in by_key else None)
+        if key is None:
             continue  # chunk has no matching page_index entry — skip rather than guess
 
-        filepath = entry['filepath']
+        filepath = by_key[key]['filepath']
         if filepath in seen or filepath in exclude_filepaths:
             continue
         seen.add(filepath)
-        result_filenames.append(filename)
-        filename_to_doc[filename] = doc
+        result_keys.append(key)
+        key_to_doc[key] = doc
 
-        if len(result_filenames) >= k:
+        if len(result_keys) >= k:
             break
 
-    if rerank_fn is not None and result_filenames:
-        scored_docs = [filename_to_doc[f] for f in result_filenames]
+    if rerank_fn is not None and result_keys:
+        scored_docs = [key_to_doc[key] for key in result_keys]
         scores = rerank_fn(query, scored_docs)
-        result_filenames = [f for _score, f in
-                             sorted(zip(scores, result_filenames), key=lambda x: float(x[0]), reverse=True)]
+        result_keys = [key for _score, key in
+                       sorted(zip(scores, result_keys), key=lambda x: float(x[0]), reverse=True)]
 
-    return [by_filename[f] for f in result_filenames]
+    return [by_key[key] for key in result_keys]
