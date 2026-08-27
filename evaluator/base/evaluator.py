@@ -480,7 +480,6 @@ def _call_chatbot(question: str, mode: str = None, timeout_seconds: int = None,
         # Popen (rather than subprocess.run) so a timeout can be handled with
         # _kill_process_tree below: run()'s own timeout handling only kills the
         # immediate chatbot.py PID, which would leave any processes it spawned
-        # (e.g. from agentic-smol's CodeAgent executing arbitrary generated code)
         # still running — burning memory/CPU and potentially still holding a lock
         # on the shared Chroma persist_directory, which could then stall other
         # chatbot calls too.
@@ -800,7 +799,8 @@ def _print_example_result(display_index: int, result: dict) -> None:
     print(f"{'=' * 80}")
     print(f"\nQuestion: {result['question']}\n")
     print(f"Expected Answer: {result['expected_answer']}\n")
-    rag_answer_preview = result['rag_answer'][:100] + "..." if len(result['rag_answer']) > 100 else result['rag_answer']
+    rag_answer = result['rag_answer'] or f"[no answer — error: {result.get('error') or 'unknown'}]"
+    rag_answer_preview = rag_answer[:100] + "..." if len(rag_answer) > 100 else rag_answer
     print(f"RAG Answer (preview): {rag_answer_preview}\n")
     print("-" * 80)
     print("EVALUATION SCORES:")
@@ -848,6 +848,7 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
         print(f"[{example_index}/{total}] Graded in {grade_elapsed:.1f}s", flush=True)
         request_time = output.get("request_time", 0.0) if isinstance(output, dict) else 0.0
         rag_answer = output.get('answer') if isinstance(output, dict) else str(output)
+        error = output.get("error") if isinstance(output, dict) else None
         documents = output.get("documents", [])
         filters = output.get("filters", {}) if isinstance(output, dict) else {}
         # Serialize documents for JSON
@@ -859,12 +860,14 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
             "question": q,
             "expected_answer": expected,
             "rag_answer": rag_answer,
+            "error": error,
             "request_time": request_time,
             "evaluations": evaluations,
             "documents": serialized_documents,
             "index": example_index,
-            # None for modes that don't report them (rag mode today) rather than
-            # omitted, so downstream aggregation can tell "no data" from "zero".
+            # None for modes/endpoints that don't report them (e.g. an LLM backend
+            # that never returns usage_metadata) rather than omitted, so downstream
+            # aggregation can tell "no data" from "zero".
             "steps_used": filters.get("steps_used"),
             "token_usage": filters.get("token_usage"),
         }
@@ -921,9 +924,9 @@ def main(num_workers: int = 1, limit_questions: int = None, timeout_seconds: int
             "average_request_time_seconds": avg_request_time,
         }
 
-        # Only agentic/deepagents modes report these (rag mode's filters is
-        # currently empty) — skip the averages entirely rather than average
-        # in a bunch of Nones as zeros.
+        # Only agentic mode reports these (rag mode's filters is currently
+        # empty) — skip the averages entirely rather than average in a bunch
+        # of Nones as zeros.
         steps_values = [r["steps_used"] for r in results if r.get("steps_used") is not None]
         if steps_values:
             summary["average_steps_used"] = sum(steps_values) / len(steps_values)

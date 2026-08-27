@@ -28,7 +28,7 @@
       "max_steps": {"type": "int", "low": 2, "high": 10},
       "max_chars_per_page": {"type": "int", "low": 2000, "high": 12000}
     },
-    "_comment_agentic": "Full list of agentic fields: temperature, max_tokens, max_steps (the CodeAgent step budget), max_chars_per_page.",
+    "_comment_agentic": "Full list of agentic fields: temperature, max_tokens, max_steps (the agent step budget), max_chars_per_page.",
 
     "model": {
       "model": {"type": "categorical", "choices": ["mistralai-small"]}

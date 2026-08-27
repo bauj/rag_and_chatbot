@@ -116,10 +116,13 @@ def _make_index():
 
 
 class _FakeDoc:
-    """Stand-in for a langchain Document — only .metadata['url'] is read by search_pages."""
+    """Stand-in for a langchain Document — .metadata['url'] is read by search_pages,
+    .page_content is what a rerank_fn/dedup would score/hash. Extra metadata
+    (anchor_id, hierarchy, section_id, chunk_position) supports the dedup tests."""
 
-    def __init__(self, filename):
-        self.metadata = {"url": f"https://example.com/{filename}"}
+    def __init__(self, filename, page_content="", **extra_metadata):
+        self.metadata = {"url": f"https://example.com/{filename}", **extra_metadata}
+        self.page_content = page_content or filename
 
 
 class _FakeVectorStore:
@@ -130,6 +133,18 @@ class _FakeVectorStore:
 
     def similarity_search(self, query, k):
         return [_FakeDoc(f) for f in self._ranked_filenames[:k]]
+
+
+class _FakeVectorStoreDocs:
+    """Like _FakeVectorStore, but returns pre-built Documents directly — for
+    tests that need specific per-chunk metadata (anchor_id, hierarchy) rather
+    than just a ranked filename list."""
+
+    def __init__(self, docs):
+        self._docs = list(docs)
+
+    def similarity_search(self, query, k):
+        return self._docs[:k]
 
 
 class _FakeBM25Index:
@@ -213,6 +228,112 @@ def test_search_pages_deduplicates_across_channels():
     results = search_pages(vs, idx, "ModelAPI Feature class reference", bm25_index=bm25)
     filepaths = [r["filepath"] for r in results]
     assert len(filepaths) == len(set(filepaths))
+
+
+def test_search_pages_reorders_by_rerank_fn_score():
+    idx = _make_index()
+    # RRF/dense order puts group__ModelAPI.html first; rerank_fn scores the
+    # other page higher, and the final order must follow the score, not RRF rank.
+    vs = _FakeVectorStore(["group__ModelAPI.html", "classModelAPI__Feature.html"])
+
+    def rerank_fn(query, docs):
+        return [1.0 if d.metadata["url"].endswith("classModelAPI__Feature.html") else 0.0
+                for d in docs]
+
+    results = search_pages(vs, idx, "ModelAPI", rerank_fn=rerank_fn)
+    filenames = [r["filename"] for r in results]
+    assert filenames == ["classModelAPI__Feature.html", "group__ModelAPI.html"]
+
+
+def test_search_pages_rerank_fn_scores_the_actual_chunk_content():
+    idx = _make_index()
+    vs = _FakeVectorStore(["classModelAPI__Feature.html"])
+    seen_content = []
+
+    def rerank_fn(query, docs):
+        seen_content.extend(d.page_content for d in docs)
+        return [0.0 for _ in docs]
+
+    search_pages(vs, idx, "ModelAPI", rerank_fn=rerank_fn)
+    assert seen_content == ["classModelAPI__Feature.html"]
+
+
+def _symbol_dedup_index():
+    return [
+        {"filepath": "/docs/classSub1.html", "filename": "classSub1.html",
+         "title": "Sub1 Class Reference", "module": "SHAPER", "doc_category": "dev"},
+        {"filepath": "/docs/classSub2.html", "filename": "classSub2.html",
+         "title": "Sub2 Class Reference", "module": "SHAPER", "doc_category": "dev"},
+        {"filepath": "/docs/classModelAPI__Feature.html", "filename": "classModelAPI__Feature.html",
+         "title": "ModelAPI_Feature Class Reference", "module": "SHAPER", "doc_category": "dev"},
+    ]
+
+
+def test_search_pages_dedups_inherited_symbol_copies_across_pages():
+    """Two subclass pages carry byte-identical copies of an inherited method
+    (Doxygen's INLINE_INHERITED_MEMB) alongside the declaring class's own
+    page — all three must collapse to just the declaring page's page."""
+    idx = _symbol_dedup_index()
+    anchor = "a1"
+    hierarchy = "ModelAPI_Feature::lastResult"
+
+    # Declaring page ranked LAST — dedup must still prefer it over the subclasses.
+    vs = _FakeVectorStoreDocs([
+        _FakeDoc("classSub1.html", anchor_id=anchor, hierarchy=hierarchy),
+        _FakeDoc("classSub2.html", anchor_id=anchor, hierarchy=hierarchy),
+        _FakeDoc("classModelAPI__Feature.html", anchor_id=anchor, hierarchy=hierarchy),
+    ])
+
+    results = search_pages(vs, idx, "lastResult")
+    filenames = [r["filename"] for r in results]
+
+    assert filenames == ["classModelAPI__Feature.html"]
+
+
+def test_search_pages_keeps_distinct_symbols_separate():
+    """Different anchor_ids must not be collapsed together."""
+    idx = _symbol_dedup_index()
+    vs = _FakeVectorStoreDocs([
+        _FakeDoc("classSub1.html", anchor_id="a1", hierarchy="ModelAPI_Feature::lastResult"),
+        _FakeDoc("classSub2.html", anchor_id="a2", hierarchy="ModelAPI_Feature::firstResult"),
+    ])
+
+    results = search_pages(vs, idx, "result")
+    filenames = {r["filename"] for r in results}
+
+    assert filenames == {"classSub1.html", "classSub2.html"}
+
+
+def test_search_pages_dedup_sees_every_chunk_not_just_first_ranked():
+    """The dense channel's first-ranked chunk for classSub1.html is a DIFFERENT
+    symbol (no anchor) than its second, later-ranked chunk (which does share
+    the duplicated anchor) — dedup must still catch the duplicate, proving
+    collapse-to-one-per-page does not happen before dedup runs."""
+    idx = _symbol_dedup_index()
+    anchor = "a1"
+    hierarchy = "ModelAPI_Feature::lastResult"
+
+    vs = _FakeVectorStoreDocs([
+        _FakeDoc("classSub1.html", page_content="unrelated content on this page"),  # no anchor
+        _FakeDoc("classModelAPI__Feature.html", anchor_id=anchor, hierarchy=hierarchy),
+        _FakeDoc("classSub1.html", page_content="the inherited copy", anchor_id=anchor, hierarchy=hierarchy),
+    ])
+
+    results = search_pages(vs, idx, "lastResult")
+    filenames = [r["filename"] for r in results]
+
+    # classSub1.html survives once (its first, non-duplicate chunk) but its
+    # duplicate chunk must not also win the declaring page's spot.
+    assert filenames.count("classModelAPI__Feature.html") == 1
+    assert "classSub1.html" in filenames
+
+
+def test_search_pages_without_rerank_fn_keeps_rrf_order():
+    idx = _make_index()
+    vs = _FakeVectorStore(["group__ModelAPI.html", "classModelAPI__Feature.html"])
+    results = search_pages(vs, idx, "ModelAPI")
+    filenames = [r["filename"] for r in results]
+    assert filenames == ["group__ModelAPI.html", "classModelAPI__Feature.html"]
 
 
 # ---------------------------------------------------------------------------

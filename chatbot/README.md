@@ -3,7 +3,7 @@
 Chatbot with two retrieval modes and clean separation between business logic and UI.
 
 - **RAG mode** — queries a ChromaDB vector database, with optional reranking (cross-encoder or late-interaction), optional BM25 keyword hybrid retrieval, and optional HyDE
-- **Agentic mode** — searches a page index via a smolagents `CodeAgent`, which decides for itself how many search/read cycles to run (bounded by `agentic.max_steps`); no vector retrieval at query time
+- **Agentic mode** — searches a page index via a deepagents agent (LangGraph tool-calling loop), which decides for itself how many search/read cycles to run (bounded by `agentic.max_steps`, mapped to the graph recursion limit)
 
 ## Architecture
 
@@ -13,7 +13,7 @@ chatbot/
 │   ├── config.py                    # ChatbotConfig, LLMConfig, EmbeddingConfig, RerankerConfig, AgenticConfig
 │   ├── rag_chatbot.py               # DocumentationChatbot — RAG mode (+ BM25 hybrid, HyDE)
 │   ├── bm25_index.py                # BM25Index + reciprocal_rank_fusion
-│   └── agentic_chatbot.py           # AgenticChatbot — agentic mode (smolagents CodeAgent)
+│   └── agentic_chatbot.py           # AgenticChatbot — agentic mode (deepagents harness)
 ├── ui/
 │   ├── terminal.py             # Interactive terminal interface
 │   └── web.py                  # Gradio web interface
@@ -66,9 +66,9 @@ Config is loaded in this priority order: CLI arguments > `config.json` > default
 |---|---|---|
 | `page_index_path` | required | Path to `page_index.json` (relative to `chatbot/` or absolute) |
 | `max_chars_per_page` | `8000` | Max characters read per HTML page |
-| `max_steps` | `6` | CodeAgent step budget — how many search/read cycles it may run |
+| `max_steps` | `6` | Agent step budget — how many search/read cycles it may run (mapped to LangGraph recursion_limit) |
 
-`page_index.json` is generated automatically when running `extraction/process_docs.py`. Note that the CodeAgent's step loop resends every previously-read page on each iteration, so effective context cost grows faster with `max_chars_per_page` than a single read-and-answer pipeline would — consider a lower value if `max_steps` is high.
+`page_index.json` is generated automatically when running `extraction/process_docs.py`. deepagents compacts context between turns rather than resending the whole transcript, but a large `max_chars_per_page` still inflates each read — lower it if `max_steps` is high.
 
 ## Usage
 
@@ -100,7 +100,7 @@ python chatbot.py --mode agentic --question "Explain the full workflow" --max-st
 Commands in interactive mode:
 ```
 mode:rag             - Switch to RAG mode (vector retrieval)
-mode:agentic         - Switch to Agentic mode (smolagents, multi-hop browsing)
+mode:agentic         - Switch to Agentic mode (deepagents, multi-hop browsing)
 module:MODULE_A      - Filter by module (RAG only)
 type:dev             - Filter developer docs only (RAG only)
 type:user            - Filter user docs only (RAG only)
@@ -110,7 +110,7 @@ topn:<n>             - Set top-N docs kept after rerank (RAG only)
 hyde                 - Toggle HyDE on/off (RAG only)
 bm25                 - Toggle BM25 hybrid retrieval on/off (RAG only)
 agentic:chars:<n>    - Set max chars read per page (Agentic only)
-agentic:maxsteps:<n> - Set the CodeAgent step budget (Agentic only)
+agentic:maxsteps:<n> - Set the agent step budget (Agentic only)
 clear                - Clear all filters
 stats                - Show database statistics (RAG only)
 exit                 - Exit

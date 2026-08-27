@@ -26,7 +26,7 @@
     "max_steps": [4, 6, 8],
     "max_chars_per_page": [8000]
   },
-  "_comment_agentic_hyperparams": "Full list: temperature, max_tokens, max_steps (the CodeAgent step budget), max_chars_per_page.",
+  "_comment_agentic_hyperparams": "Full list: temperature, max_tokens, max_steps (the agent step budget), max_chars_per_page.",
 
   "model_hyperparams": {
     "model": ["mistralai-small"]

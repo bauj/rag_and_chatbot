@@ -25,7 +25,7 @@
   "_comment_reranker": "Set to null to disable. Enable with: {\"model\": \"BAAI/bge-reranker-v2-m3\", \"type\": \"cross_encoder\"}. Requires sentence-transformers. type: \"late_interaction\" (e.g. {\"model\": \"answerdotai/answerai-colbert-small-v1\", \"type\": \"late_interaction\"}) uses ColBERT-style MaxSim scoring via sentence_transformers.MultiVectorEncoder instead of a cross-encoder — requires sentence-transformers >= 6.0. Only one method runs at a time.",
 
   "agentic": null,
-  "_comment_agentic": "Set to null to disable. Enable with: {\"page_index_path\": \"../extraction/my_project_docs_extracted/page_index.json\", \"max_chars_per_page\": 8000, \"max_steps\": 6}. Requires re-running extraction to generate page_index.json, plus the smolagents package. A smolagents CodeAgent decides for itself how many search/read cycles to run, bounded by max_steps.",
+  "_comment_agentic": "Set to null to disable. Enable with: {\"page_index_path\": \"../extraction/my_project_docs_extracted/page_index.json\", \"max_chars_per_page\": 8000, \"max_steps\": 6}. Requires re-running extraction to generate page_index.json, plus the deepagents package. A deepagents agent decides for itself how many search/read cycles to run, bounded by max_steps (mapped to LangGraph's recursion_limit).",
 
   "k_standard": 40,
   "k_deep_dive": 60,

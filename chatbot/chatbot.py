@@ -217,7 +217,7 @@ Examples:
         '--max-steps',
         type=int,
         dest='max_steps',
-        help='Override the CodeAgent step budget (agentic mode only, terminal single-question mode)'
+        help='Override the agent step budget (agentic mode only, terminal single-question mode)'
     )
     parser.add_argument(
         '--max-chars-per-page',
@@ -230,10 +230,10 @@ Examples:
         '--mode',
         choices=['rag', 'agentic', 'no-rag'],
         default='rag',
-        help='Chatbot mode: rag (default), agentic (smolagents CodeAgent, '
-             'multi-hop page browsing), or no-rag (no retrieval — answers from the '
-             "LLM's own training knowledge, a baseline to isolate RAG's contribution; "
-             'terminal single-question mode only)'
+        help='Chatbot mode: rag (default), agentic (deepagents harness, '
+             'multi-hop page browsing), or no-rag (no retrieval — answers from '
+             "the LLM's own training knowledge, a baseline to isolate RAG's "
+             'contribution; terminal single-question mode only)'
     )
 
     # Web options
@@ -323,11 +323,13 @@ Examples:
         if args.k_deep_dive is not None:
             config.k_deep_dive = args.k_deep_dive
 
-        # Initialize core chatbot. no-rag and agentic modes never touch the
-        # reranker (agentic's search_pages/read_page tools bypass it entirely),
-        # so skip loading it — pure per-question subprocess startup cost otherwise.
+        # Initialize core chatbot. no-rag mode never touches the reranker, so
+        # skip loading it there — pure per-question subprocess startup cost
+        # otherwise. Agentic mode DOES use it now, to rank its search_pages_tool
+        # candidates (loaded once here, reused per search call).
         print("Loading documentation database...")
-        chatbot = DocumentationChatbot(config, skip_reranker=(args.mode in ('no-rag', 'agentic')))
+        chatbot = DocumentationChatbot(config, skip_reranker=(args.mode == 'no-rag'))
+        reranker_score_fn = chatbot.score_against_query if chatbot.reranker is not None else None
 
         print(f"  Loaded {chatbot.get_chunk_count()} documentation chunks")
         print(f"  Modules: {', '.join(chatbot.available_modules)}")
@@ -349,7 +351,8 @@ Examples:
         print("  3. Config file is valid JSON (if using --config)")
         sys.exit(1)
 
-    # Initialize agentic chatbot if requested
+    # Initialize agentic chatbot if requested (or auto-enabled by a config
+    # 'agentic' block).
     agentic_chatbot = None
     if args.mode == 'agentic' or config.agentic is not None:
         if config.agentic is None:
@@ -375,12 +378,13 @@ Examples:
                       "supported in agentic mode and will be ignored.", file=sys.stderr)
         try:
             from core import AgenticChatbot
-            print("Loading agentic chatbot (smolagents)...")
-            agentic_chatbot = AgenticChatbot(config, vectorstore=chatbot.vectorstore, bm25_index=chatbot.bm25_index)
+            print("Loading agentic chatbot (deepagents)...")
+            agentic_chatbot = AgenticChatbot(config, vectorstore=chatbot.vectorstore, bm25_index=chatbot.bm25_index,
+                                              reranker_score_fn=reranker_score_fn)
             print("Agentic chatbot ready.")
         except ImportError as e:
             if args.mode == 'agentic':
-                print(f"\nError: --mode agentic requires the smolagents package. {e}")
+                print(f"\nError: --mode agentic requires the deepagents package. {e}")
                 sys.exit(1)
             print(f"Warning: agentic mode unavailable ({e}). Continuing without it.", file=sys.stderr)
 

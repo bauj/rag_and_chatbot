@@ -8,4 +8,5 @@ from .agentic_chatbot import AgenticChatbot
 from .debug_trace_writer import DebugTraceWriter
 
 __all__ = ["ChatbotConfig", "LLMConfig", "EmbeddingConfig", "RerankerConfig",
-           "AgenticConfig", "DocumentationChatbot", "AgenticChatbot", "DebugTraceWriter"]
+           "AgenticConfig", "DocumentationChatbot", "AgenticChatbot",
+           "DebugTraceWriter"]

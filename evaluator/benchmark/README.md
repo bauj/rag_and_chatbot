@@ -72,7 +72,7 @@ Every combination of the values above is run: each mode gets its own full cross-
 
 RAG hyperparameters: `k_standard`/`k_deep_dive` (RAG pool size — only one applies per run, picked by that run's own `deep_dive` value; `chatbot.py --k` also exists as a flat override but isn't needed here), `temperature`, `max_tokens` (LLM generation length), `reranker_enabled`, `reranker_model`, `reranker_type` (`"cross_encoder"` default or `"late_interaction"`, requires `sentence-transformers >= 6.0` — `reranker_model` and `reranker_type` only have an effect when `reranker_enabled` is true; the cross-product can pair a mismatched model/type since they're varied independently, so keep only one of each in a single run when varying the other — see `benchmark_config.example.json`'s comment), `top_n` (docs kept after reranking), `deep_dive` (comprehensive-answer mode), `hyde_enabled`, `bm25_enabled` and `title_boost_enabled` (retrieval-pipeline toggles — see `chatbot/config.json`'s comments for what each does), `k_retrieve` (per-channel retrieval depth before RRF fusion — decoupled from `k_standard`/`k_deep_dive`, the fused pool size; ignored in deep dive mode), `deep_dive_batch_size` (only applies when `deep_dive` is true), `expansion_char_budget` (shared char budget for expanding surviving docs to their full section).
 
-Agentic hyperparameters: `temperature`, `max_tokens`, `max_steps` (the CodeAgent step budget), `max_chars_per_page` (how much of each page it reads).
+Agentic hyperparameters: `temperature`, `max_tokens`, `max_steps` (the agent step budget), `max_chars_per_page` (how much of each page it reads).
 
 ### Model choice
 

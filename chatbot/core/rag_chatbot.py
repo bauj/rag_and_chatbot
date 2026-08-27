@@ -26,9 +26,28 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+from langchain_core.callbacks import UsageMetadataCallbackHandler
 
 from .config import ChatbotConfig
 from .bm25_index import BM25Index, reciprocal_rank_fusion
+
+
+def _sum_usage_metadata(usage_metadata: Dict[str, dict]) -> Optional[Dict[str, int]]:
+    """Sum a UsageMetadataCallbackHandler's per-model usage dict into the same
+    {input_tokens, output_tokens, total_tokens} shape agentic/deepagents modes
+    report, so eval results are comparable across modes. None if no LLM call
+    reported usage (e.g. an endpoint that doesn't return it)."""
+    if not usage_metadata:
+        return None
+    input_tokens = output_tokens = 0
+    for usage in usage_metadata.values():
+        input_tokens += usage.get("input_tokens", 0) or 0
+        output_tokens += usage.get("output_tokens", 0) or 0
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
 
 
 class DocumentationChatbot:
@@ -155,8 +174,8 @@ class DocumentationChatbot:
         sentence_transformers.CrossEncoder; "late_interaction" loads
         sentence_transformers.MultiVectorEncoder for ColBERT-style MaxSim scoring,
         which requires sentence-transformers >= 6.0 (MultiVectorEncoder was added
-        in that release). _order_by_reranker vs. _order_by_late_interaction picks
-        the matching scoring call based on this same type.
+        in that release). score_against_query() picks the matching scoring call
+        based on this same type.
         """
         if self.config.reranker is None:
             return None
@@ -202,7 +221,8 @@ class DocumentationChatbot:
         print(f"DEBUG : load BM25 index ({jsonl_path}) ...")
         return BM25Index(str(jsonl_path))
 
-    def _generate_hyde_passage(self, question: str) -> str:
+    def _generate_hyde_passage(self, question: str,
+                                usage_callback: Optional[UsageMetadataCallbackHandler] = None) -> str:
         """
         Generate a hypothetical documentation passage answering `question` (HyDE).
 
@@ -219,7 +239,8 @@ Passage:"""
         )
         try:
             chain = prompt | self.hyde_llm | StrOutputParser()
-            return chain.invoke({"project_name": self.config.project_name, "question": question})
+            config = {"callbacks": [usage_callback]} if usage_callback else None
+            return chain.invoke({"project_name": self.config.project_name, "question": question}, config=config)
         except Exception as e:
             print(f"Warning: HyDE passage generation failed ({e}) — falling back to raw question")
             return question
@@ -470,27 +491,27 @@ Passage:"""
 
         return LCDocument(page_content=text, metadata=doc.metadata), len(text)
 
-    def _order_by_reranker(self, query: str, docs: List) -> List:
-        """Sort docs by cross-encoder relevance to the query, best first."""
+    def score_against_query(self, query: str, docs: List) -> List[float]:
+        """
+        Score each doc's relevance to the query using the configured reranker,
+        best-match score highest. Dispatches on config.reranker.type: cross-encoder
+        .predict() (default) or ColBERT-style late-interaction (MaxSim).
+
+        Public: also used by extraction/html_parser.py's search_pages() (agentic/
+        deepagents mode's page-search tool) via dependency injection, the same
+        duck-typed-callable pattern already used for bm25_index — keeps
+        extraction/ independent of chatbot/core.
+        """
+        if self.config.reranker is not None and self.config.reranker.type == "late_interaction":
+            # encode_query/encode_document are separate calls (not interchangeable:
+            # these models use different prefixes/length caps per side), per
+            # MultiVectorEncoder's API.
+            query_emb = self.reranker.encode_query([query])
+            doc_embs = self.reranker.encode_document([doc.page_content for doc in docs])
+            return list(self.reranker.similarity(query_emb, doc_embs)[0])
+
         pairs = [(query, doc.page_content) for doc in docs]
-        scores = self.reranker.predict(pairs)
-        return [doc for _score, doc in
-                sorted(zip(scores, docs), key=lambda x: float(x[0]), reverse=True)]
-
-    def _order_by_late_interaction(self, query: str, docs: List) -> List:
-        """
-        Sort docs by ColBERT-style late-interaction (MaxSim) relevance, best first.
-
-        Scores only the candidate pool already assembled by _hybrid_retrieve — this
-        is a reranker swap, not a new first-stage retrieval channel. encode_query/
-        encode_document are separate calls (not interchangeable: these models use
-        different prefixes/length caps per side), per MultiVectorEncoder's API.
-        """
-        query_emb = self.reranker.encode_query([query])
-        doc_embs = self.reranker.encode_document([doc.page_content for doc in docs])
-        scores = self.reranker.similarity(query_emb, doc_embs)[0]
-        return [doc for _score, doc in
-                sorted(zip(scores, docs), key=lambda x: float(x[0]), reverse=True)]
+        return list(self.reranker.predict(pairs))
 
     def _pick_section_representatives(self, docs: List) -> List:
         """
@@ -553,10 +574,9 @@ Passage:"""
         docs = self._dedup_symbol_copies(docs)
 
         if self.reranker is not None and reranker_enabled:
-            if self.config.reranker is not None and self.config.reranker.type == "late_interaction":
-                docs = self._order_by_late_interaction(query, docs)
-            else:
-                docs = self._order_by_reranker(query, docs)
+            scores = self.score_against_query(query, docs)
+            docs = [d for _score, d in
+                    sorted(zip(scores, docs), key=lambda x: float(x[0]), reverse=True)]
 
         docs = self._pick_section_representatives(docs)[:limit]
 
@@ -642,7 +662,8 @@ Answer:"""
                      title_boost_enabled: Optional[bool] = None,
                      k_retrieve: Optional[int] = None,
                      deep_dive_batch_size: Optional[int] = None,
-                     expansion_char_budget: Optional[int] = None):
+                     expansion_char_budget: Optional[int] = None,
+                     usage_callback: Optional[UsageMetadataCallbackHandler] = None):
         """
         Create RAG chain with optional filtering
 
@@ -759,7 +780,8 @@ Answer:"""
                         | StrOutputParser()
                     )
 
-                    summary = summary_chain.invoke(batch_text)
+                    summary_config = {"callbacks": [usage_callback]} if usage_callback else None
+                    summary = summary_chain.invoke(batch_text, config=summary_config)
                     summaries.append(summary)
 
                 return "\n\n".join(summaries)
@@ -781,7 +803,7 @@ Answer:"""
             # second retrieval + reranking pass. Per-call keeps concurrent requests —
             # e.g. two Gradio users at once — from overwriting each other's sources.
             def retrieve_and_format(question: str) -> str:
-                vector_query = self._generate_hyde_passage(question) if effective_hyde else question
+                vector_query = self._generate_hyde_passage(question, usage_callback=usage_callback) if effective_hyde else question
                 raw_docs = retriever.invoke(vector_query)
                 raw_docs = self._hybrid_retrieve(
                     question, raw_docs, k=k,
@@ -912,6 +934,7 @@ Answer:"""
 
         try:
             # Create chain and get answer (pass runtime overrides)
+            usage_callback = UsageMetadataCallbackHandler()
             chain, retriever, source_docs_holder = self._create_chain(
                 module, doc_type, deep_dive,
                 k=k, temperature=temperature, max_tokens=max_tokens,
@@ -920,8 +943,9 @@ Answer:"""
                 title_boost_enabled=title_boost_enabled,
                 k_retrieve=k_retrieve, deep_dive_batch_size=deep_dive_batch_size,
                 expansion_char_budget=expansion_char_budget,
+                usage_callback=usage_callback,
             )
-            answer = chain.invoke(question)
+            answer = chain.invoke(question, config={"callbacks": [usage_callback]})
             # Reuse docs already retrieved+reranked inside the standard chain.
             # Deep-dive chains leave the holder empty, so fall back to a
             # separate retrieval call for that path.
@@ -960,6 +984,7 @@ Answer:"""
             # file should carry the number rather than leave it to be inferred.
             filters['context_docs'] = len(source_docs)
             filters['context_chars'] = sum(len(d.page_content) for d in source_docs)
+            filters['token_usage'] = _sum_usage_metadata(usage_callback.usage_metadata)
 
             return {
                 "answer": answer,

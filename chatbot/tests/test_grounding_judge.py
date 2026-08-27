@@ -38,7 +38,7 @@ def test_concatenated_observations_skips_steps_with_no_observations():
 
 def test_check_grounding_returns_empty_for_prose_with_no_code():
     agent = _agent_with_observations("some documentation")
-    result = check_grounding("Just a plain-language answer, no code here.", agent)
+    result = check_grounding("Just a plain-language answer, no code here.", concatenated_observations(agent))
     assert result == []
 
 
@@ -49,35 +49,35 @@ def test_check_grounding_returns_empty_for_prose_with_no_code():
 def test_check_grounding_flags_python_call_not_in_observations():
     agent = _agent_with_observations("addFeature(shape, name) is defined on ModelAPI.")
     answer = "```python\nresult = deleteEverything(shape)\n```"
-    result = check_grounding(answer, agent)
+    result = check_grounding(answer, concatenated_observations(agent))
     assert [c["call"] for c in result] == ["deleteEverything"]
 
 
 def test_check_grounding_passes_python_call_present_in_observations():
     agent = _agent_with_observations("addFeature(shape, name) is defined on ModelAPI.")
     answer = "```python\nresult = addFeature(shape, 'x')\n```"
-    result = check_grounding(answer, agent)
+    result = check_grounding(answer, concatenated_observations(agent))
     assert result == []
 
 
 def test_check_grounding_ignores_python_builtins():
     agent = _agent_with_observations("no relevant API here")
     answer = "```python\nprint(len(str(42)))\n```"
-    result = check_grounding(answer, agent)
+    result = check_grounding(answer, concatenated_observations(agent))
     assert result == []
 
 
 def test_check_grounding_handles_unfenced_python_that_parses():
     agent = _agent_with_observations("addFeature(shape, name) is defined on ModelAPI.")
     answer = "deleteEverything(shape)"
-    result = check_grounding(answer, agent)
+    result = check_grounding(answer, concatenated_observations(agent))
     assert [c["call"] for c in result] == ["deleteEverything"]
 
 
 def test_check_grounding_dedupes_repeated_unknown_call():
     agent = _agent_with_observations("nothing relevant")
     answer = "```python\nfoo(1)\nfoo(2)\n```"
-    result = check_grounding(answer, agent)
+    result = check_grounding(answer, concatenated_observations(agent))
     assert len(result) == 1
     assert result[0]["call"] == "foo"
 
@@ -89,14 +89,14 @@ def test_check_grounding_dedupes_repeated_unknown_call():
 def test_check_grounding_flags_cpp_call_not_in_observations_via_regex_fallback():
     agent = _agent_with_observations("Feature::addFeature(shape, name) is the C++ entry point.")
     answer = "```cpp\nauto result = Feature::deleteEverything(shape);\n```"
-    result = check_grounding(answer, agent)
+    result = check_grounding(answer, concatenated_observations(agent))
     assert "deleteEverything" in [c["call"] for c in result]
 
 
 def test_check_grounding_ignores_cpp_keywords_via_regex_fallback():
     agent = _agent_with_observations("nothing relevant")
     answer = "```cpp\nif (x) { return std::cout; }\n```"
-    result = check_grounding(answer, agent)
+    result = check_grounding(answer, concatenated_observations(agent))
     assert result == []
 
 
@@ -107,7 +107,7 @@ def test_check_grounding_ignores_cpp_keywords_via_regex_fallback():
 def test_check_grounding_llm_classify_fn_can_filter_a_flagged_name():
     agent = _agent_with_observations("nothing relevant")
     answer = "```python\ncustomBuiltinLikeThing(1)\n```"
-    result = check_grounding(answer, agent, llm_classify_fn=lambda name: True)
+    result = check_grounding(answer, concatenated_observations(agent), llm_classify_fn=lambda name: True)
     assert result == []
 
 
@@ -122,7 +122,7 @@ def test_check_grounding_llm_classify_fn_cannot_wave_through_names_already_match
         calls_seen.append(name)
         return False
 
-    result = check_grounding(answer, agent, llm_classify_fn=classify)
+    result = check_grounding(answer, concatenated_observations(agent), llm_classify_fn=classify)
     assert result == []
     assert calls_seen == []
 
@@ -130,7 +130,7 @@ def test_check_grounding_llm_classify_fn_cannot_wave_through_names_already_match
 def test_check_grounding_llm_classify_fn_false_keeps_the_flag():
     agent = _agent_with_observations("nothing relevant")
     answer = "```python\nfoo(1)\n```"
-    result = check_grounding(answer, agent, llm_classify_fn=lambda name: False)
+    result = check_grounding(answer, concatenated_observations(agent), llm_classify_fn=lambda name: False)
     assert [c["call"] for c in result] == ["foo"]
 
 
@@ -184,7 +184,7 @@ def test_check_grounding_flags_grounded_call_with_multiple_documented_overloads(
     )
     agent = _agent_with_observations(observations)
     answer = "```python\nBox_1 = model.addBox(doc, 0, 0, 60, 10, 10, 10)\n```"
-    result = check_grounding(answer, agent)
+    result = check_grounding(answer, concatenated_observations(agent))
     assert len(result) == 1
     assert result[0]["call"] == "addBox"
     assert "multiple documented signatures" in result[0]["reason"]
@@ -194,7 +194,7 @@ def test_check_grounding_does_not_flag_grounded_call_with_one_signature():
     observations = "model.addFeature(shape, name) is the only documented form."
     agent = _agent_with_observations(observations)
     answer = "```python\nmodel.addFeature(shape, 'x')\n```"
-    result = check_grounding(answer, agent)
+    result = check_grounding(answer, concatenated_observations(agent))
     assert result == []
 
 
@@ -214,7 +214,7 @@ def test_check_grounding_overload_flag_not_offered_to_llm_classify_fn():
         calls_seen.append(name)
         return True  # would wave through if it were ever consulted
 
-    result = check_grounding(answer, agent, llm_classify_fn=classify)
+    result = check_grounding(answer, concatenated_observations(agent), llm_classify_fn=classify)
     assert len(result) == 1
     assert calls_seen == []
 

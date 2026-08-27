@@ -18,7 +18,7 @@ transformers==5.3.0            # Token-aware chunking (optional but recommended)
 # CHATBOT CORE (core/salome_chatbot.py)
 # ============================================
 # LangChain components
-langchain-core==1.2.22          # Core abstractions (prompts, runnables)
+langchain-core==1.6.0           # Core abstractions (prompts, runnables); bumped from 1.2.22 for deepagents
 langchain-chroma==1.1.0         # ChromaDB integration
 langchain-openai==1.1.12        # OpenAI-compatible API (for LiteLLM)
 langchain-huggingface==1.2.1    # HuggingFace embeddings (replaces langchain-community)
@@ -27,8 +27,9 @@ langchain-huggingface==1.2.1    # HuggingFace embeddings (replaces langchain-com
 sentence-transformers==6.0.0    # Embedding models (all-MiniLM-L6-v2); v6 adds MultiVectorEncoder for late-interaction reranking
 rank_bm25==0.2.2                # BM25 sparse retrieval (hybrid search)
 
-# Agentic-smol mode (optional — only needed if smol_enabled: true in config.json)
-smolagents==1.26.0               # CodeAgent multi-hop browsing (chatbot/core/agentic_smol_chatbot.py)
+# Agentic mode (optional — only needed if the config has an 'agentic' block)
+deepagents==0.7.8               # LangGraph tool-calling agent for --mode agentic (chatbot/core/agentic_chatbot.py)
+langgraph==1.2.11              # deepagents' underlying agent loop / recursion_limit
 
 # ============================================
 # WEB UI (ui/web.py) - OPTIONAL

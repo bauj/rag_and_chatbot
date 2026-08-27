@@ -11,7 +11,7 @@ A chatbot for any project with HTML documentation (Sphinx, Doxygen). Point it at
 **Key Features:**
 - Works with any HTML documentation (Sphinx, Doxygen, or custom)
 - Multi-module support — query across multiple doc sets simultaneously
-- Two chatbot modes: **RAG** (vector retrieval + reranking) and **Agentic** (smolagents `CodeAgent`, multi-hop page browsing)
+- Two chatbot modes: **RAG** (vector retrieval + reranking) and **Agentic** (deepagents harness, multi-hop page browsing)
 - Token-aware chunking (prevents embedding truncation)
 - Reranking for better result ranking — cross-encoder (`BAAI/bge-reranker-v2-m3`, default) or opt-in late-interaction/ColBERT-style (`answerdotai/answerai-colbert-small-v1`, lower latency)
 - Optional BM25 keyword hybrid retrieval (opt-in, fused with vector search via Reciprocal Rank Fusion)
@@ -37,7 +37,7 @@ rag_and_chatbot/
 │   │   ├── config.py        # Configuration (ChatbotConfig, AgenticConfig, ...)
 │   │   ├── rag_chatbot.py   # RAG mode (DocumentationChatbot) — BM25 + HyDE live here too
 │   │   ├── bm25_index.py    # BM25 keyword index + Reciprocal Rank Fusion
-│   │   └── agentic_chatbot.py       # Agentic mode (AgenticChatbot) — smolagents CodeAgent
+│   │   └── agentic_chatbot.py       # Agentic mode (AgenticChatbot) — deepagents harness
 │   ├── ui/
 │   │   ├── terminal.py      # CLI interface
 │   │   └── web.py           # Gradio web UI
@@ -121,7 +121,7 @@ cp config.example.json config.json
 # Interactive terminal (RAG mode, default)
 python chatbot.py
 
-# Agentic mode (smolagents CodeAgent, multi-hop page browsing, see Configuration)
+# Agentic mode (deepagents harness, multi-hop page browsing, see Configuration)
 python chatbot.py --mode agentic
 
 # Web interface (Gradio) — all configured modes available via UI toggle
@@ -228,7 +228,7 @@ python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type 
 
 **Reranker:** set to `null` or remove the block to disable reranking (faster, lower quality). Two `type`s: `cross_encoder` (default, `BAAI/bge-reranker-v2-m3`) or `late_interaction` (ColBERT-style MaxSim scoring via `sentence-transformers` `MultiVectorEncoder`, e.g. `answerdotai/answerai-colbert-small-v1` — requires `sentence-transformers >= 6.0`). Measured on the SHAPER eval set: quality is a wash between the two, `late_interaction` cuts average answer latency roughly in half (see `notes/late_interaction_reranker_eval_230826.md`).
 
-**Agentic mode:** set `agentic` to `null` or remove the block to disable. When enabled, the web UI and `--mode agentic` CLI flag become available. Requires `page_index.json` produced by the extractor, and the `smolagents` package (`pip install smolagents`, included in `requirements.txt`). Uses [smolagents](https://github.com/huggingface/smolagents)' `CodeAgent`: the LLM decides for itself how many search/read cycles to run, bounded by `agentic.max_steps` (default `6`).
+**Agentic mode:** set `agentic` to `null` or remove the block to disable. When enabled, the web UI and `--mode agentic` CLI flag become available. Requires `page_index.json` produced by the extractor, and the `deepagents` package (`pip install deepagents`, included in `requirements.txt`). Uses LangChain's [deepagents](https://github.com/langchain-ai/deepagents) tool-calling loop: the LLM decides for itself how many search/read cycles to run, bounded by `agentic.max_steps` (default `6`, mapped to the LangGraph recursion limit).
 
 **BM25 hybrid retrieval:** set `bm25_enabled: true` to fuse keyword search (BM25) with vector search via Reciprocal Rank Fusion, in RAG mode's standard (non-deep-dive) path. Requires `{project_name}_docs.jsonl` next to `chromadb_path` (produced by extraction). Opt-in — not yet measured, off by default.
 
@@ -280,7 +280,7 @@ LLM answer generation
 
 **Agentic mode:**
 ```
-CodeAgent (smolagents) given two tools: search_pages, read_page
+deepagents agent given two tools: search_pages, read_page
         ↓
 Agent decides for itself how many search → read cycles to run,
 bounded by agentic.max_steps (default 6) — real multi-hop browsing,
@@ -309,7 +309,7 @@ Agentic mode requires no ChromaDB at query time — it reads the original HTML f
 ```
 Commands in interactive mode:
   mode:rag             - Switch to RAG mode (vector retrieval)
-  mode:agentic         - Switch to Agentic mode (smolagents, multi-hop browsing)
+  mode:agentic         - Switch to Agentic mode (deepagents, multi-hop browsing)
   module:MODULE_A      - Filter by module (RAG only)
   type:dev             - Filter developer docs only (RAG only)
   type:user            - Filter user docs only (RAG only)
@@ -318,7 +318,7 @@ Commands in interactive mode:
   topn:<n>             - Set top-N docs kept after rerank (RAG only)
   hyde                 - Toggle HyDE on/off (RAG only)
   agentic:chars:<n>    - Set max chars read per page (Agentic only)
-  agentic:maxsteps:<n> - Set the CodeAgent step budget (Agentic only)
+  agentic:maxsteps:<n> - Set the agent step budget (Agentic only)
   clear                - Clear all filters
   stats                - Show database statistics (RAG only)
   exit                 - Exit
@@ -501,7 +501,7 @@ Edit `benchmark_config.json` to define which modes and hyperparameters to test �
 }
 ```
 
-`hyde_enabled`, `bm25_enabled` and `title_boost_enabled` are RAG retrieval-pipeline toggles (see `chatbot/config.json`'s comments for what each does); `max_steps` is the agentic mode's CodeAgent step budget, and `max_chars_per_page` is how much of each page it reads. With the values above, this generates **48 RAG configurations** and **3 Agentic configurations** (all combinations), each tested against every question — prefer varying one or two dimensions at a time to keep run counts manageable.
+`hyde_enabled`, `bm25_enabled` and `title_boost_enabled` are RAG retrieval-pipeline toggles (see `chatbot/config.json`'s comments for what each does); `max_steps` is the agentic mode's agent step budget, and `max_chars_per_page` is how much of each page it reads. With the values above, this generates **48 RAG configurations** and **3 Agentic configurations** (all combinations), each tested against every question — prefer varying one or two dimensions at a time to keep run counts manageable.
 
 ### Step 5: Run Benchmarks
 
@@ -647,7 +647,7 @@ The chatbot detects available modules automatically from the database at startup
 - `sentence-transformers` — embeddings and reranking
 - `langchain` — RAG framework
 - `rank_bm25` — BM25 keyword retrieval (optional, only used if `bm25_enabled: true`)
-- `smolagents` — Agentic mode (required if `agentic` block is configured)
+- `deepagents` — Agentic mode (required if `agentic` block is configured)
 - `gradio` — web interface
 - `transformers` — token-aware chunking (recommended)
 

@@ -50,7 +50,10 @@ _CPP_KEYWORDS = {
 
 
 def concatenated_observations(agent) -> str:
-    """Join every step's observations into one text blob to check calls against."""
+    """Join every step's observations into one text blob to check calls against.
+    smolagents-specific helper — agent.memory.steps carries an .observations
+    string per step. Other backends build their own observations string and
+    pass it directly to check_grounding()."""
     parts = []
     for step in getattr(agent.memory, "steps", []):
         obs = getattr(step, "observations", None)
@@ -146,7 +149,7 @@ def _documented_arg_counts(name: str, observations: str) -> set:
 
 def check_grounding(
     answer: str,
-    agent,
+    observations: str,
     llm_classify_fn: Optional[Callable[[str], bool]] = None,
 ) -> List[dict]:
     """
@@ -169,6 +172,9 @@ def check_grounding(
     ambiguous_overload flag alone as a reason to discard an otherwise-good
     answer. Returns [] if `answer` has no code blocks at all.
 
+    observations: concatenated text of everything the agent actually
+    retrieved (tool outputs / page content) to check call names against.
+
     llm_classify_fn: optional callable(name) -> bool, asked only about names
     that survive the static allowlist - a narrow "is this a language/stdlib
     builtin" question, not a grounding verifier. It can only shrink the
@@ -181,7 +187,6 @@ def check_grounding(
     if not blocks:
         return []
 
-    observations = concatenated_observations(agent)
     observations_lower = observations.lower()
 
     flagged = {}
