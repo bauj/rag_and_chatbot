@@ -356,13 +356,18 @@ def _ask_chatbot_inprocess(question: str, timeout_seconds: Optional[int] = None)
     elapsed = time.perf_counter() - start_time
 
     if thread.is_alive():
-        return {"answer": "Chatbot request timed out", "documents": [], "request_time": elapsed}
+        return {"answer": "Chatbot request timed out", "error": "timeout", "documents": [], "request_time": elapsed}
     if "error" in outcome:
-        return {"answer": f"Error: {outcome['error']}", "documents": [], "request_time": elapsed}
+        return {"answer": f"Error: {outcome['error']}", "error": outcome["error"], "documents": [], "request_time": elapsed}
 
     result = outcome["result"]
+    answer = result.get("answer")
+    error = result.get("error")
     return {
-        "answer": result.get("answer", "No answer returned"),
+        # keep a real None answer as None so downstream can render the error;
+        # only substitute the sentinel when the key is genuinely absent.
+        "answer": answer if ("answer" in result or answer is not None) else "No answer returned",
+        "error": error,
         "documents": _build_documents(_normalize_sources(result.get("sources", []))),
         "request_time": elapsed,
         "filters": result.get("filters", {}),

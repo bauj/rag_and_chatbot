@@ -94,6 +94,22 @@ def test_run_evaluation_only_runs_requested_metrics(monkeypatch):
     retrieval_relevance_mock.assert_not_called()
 
 
+def test_ask_chatbot_inprocess_propagates_error_on_normal_return(monkeypatch):
+    """A chatbot that returns {answer: None, error: <msg>} without raising must
+    have its error string surfaced, not silently dropped."""
+    import evaluator.base.evaluator as ev
+
+    fake_bot = MagicMock()
+    fake_bot.ask.return_value = {"answer": None, "error": "transient API error", "sources": []}
+    monkeypatch.setattr(ev, "_inprocess_chatbot", fake_bot)
+    monkeypatch.setattr(ev, "EVAL_MODE", "rag")
+
+    out = ev._ask_chatbot_inprocess("q", timeout_seconds=None)
+
+    assert out["error"] == "transient API error"
+    assert out["answer"] is None
+
+
 def test_run_evaluation_defaults_to_all_metrics(monkeypatch):
     import evaluator.base.evaluator as ev
 
