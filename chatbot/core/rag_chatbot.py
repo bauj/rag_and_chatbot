@@ -582,6 +582,21 @@ Passage:"""
 
         return self._expand_survivors(docs, expansion_char_budget=expansion_char_budget)
 
+    def expand_sections(self, query: str, chunks: List, top_n: int = 5,
+                        char_budget: int = 15000) -> List:
+        """Rank a chunk pool and return its top_n entries as fully
+        reconstructed section-text Documents.
+
+        Thin public wrapper over _select_context. Injected into
+        extraction/html_parser.search_pages for agentic section-level
+        retrieval, the same duck-typed way as score_against_query and
+        bm25_index, so extraction/ stays independent of chatbot/core.
+        """
+        return self._select_context(
+            query, chunks, reranker_enabled=True,
+            top_n=top_n, expansion_char_budget=char_budget,
+        )
+
     def _create_prompt(self) -> PromptTemplate:
         """Create the base prompt template"""
         module_lines = "\n".join(

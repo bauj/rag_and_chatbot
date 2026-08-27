@@ -275,6 +275,80 @@ def test_search_pages_rerank_fn_scores_the_actual_chunk_content():
     assert seen_content == ["classModelAPI__Feature.html"]
 
 
+# ---------------------------------------------------------------------------
+# search_pages — section-level branch (select_sections_fn injected)
+# ---------------------------------------------------------------------------
+
+def test_search_pages_section_branch_returns_sections_joined_to_page_index():
+    idx = _make_index()
+    vs = _FakeVectorStore(["classModelAPI__Feature.html"])
+
+    def select_sections_fn(query, chunks, top_n, char_budget):
+        return [_FakeDoc("classModelAPI__Feature.html",
+                         page_content="Full reconstructed section body.",
+                         section_id="classModelAPI__Feature.html#__summary")]
+
+    results = search_pages(vs, idx, "ModelAPI_Feature",
+                           select_sections_fn=select_sections_fn)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r["filename"] == "classModelAPI__Feature.html"
+    assert r["module"] == "SHAPER" and r["doc_category"] == "dev"
+    assert r["section_text"] == "Full reconstructed section body."
+    assert r["section_id"] == "classModelAPI__Feature.html#__summary"
+
+
+def test_search_pages_section_branch_skips_sections_with_no_page_index_entry():
+    idx = _make_index()
+    vs = _FakeVectorStore(["classModelAPI__Feature.html"])
+
+    def select_sections_fn(query, chunks, top_n, char_budget):
+        return [
+            _FakeDoc("unknown_page.html", page_content="x", section_id="unknown_page.html#s"),
+            _FakeDoc("tutorial_mesh.html", page_content="y", section_id="tutorial_mesh.html#s"),
+        ]
+
+    results = search_pages(vs, idx, "mesh", select_sections_fn=select_sections_fn)
+
+    assert [r["filename"] for r in results] == ["tutorial_mesh.html"]
+
+
+def test_search_pages_section_branch_honors_exclude_filepaths():
+    idx = _make_index()
+    vs = _FakeVectorStore(["classModelAPI__Feature.html"])
+
+    def select_sections_fn(query, chunks, top_n, char_budget):
+        return [
+            _FakeDoc("classModelAPI__Feature.html", page_content="a",
+                     section_id="classModelAPI__Feature.html#s"),
+            _FakeDoc("group__ModelAPI.html", page_content="b",
+                     section_id="group__ModelAPI.html#s"),
+        ]
+
+    results = search_pages(vs, idx, "ModelAPI",
+                           select_sections_fn=select_sections_fn,
+                           exclude_filepaths={"/docs/classModelAPI__Feature.html"})
+
+    assert [r["filename"] for r in results] == ["group__ModelAPI.html"]
+
+
+def test_search_pages_section_branch_passes_config_sizes_through():
+    idx = _make_index()
+    vs = _FakeVectorStore(["classModelAPI__Feature.html"])
+    seen = {}
+
+    def select_sections_fn(query, chunks, top_n, char_budget):
+        seen["top_n"] = top_n
+        seen["char_budget"] = char_budget
+        return []
+
+    search_pages(vs, idx, "q", select_sections_fn=select_sections_fn,
+                 top_n=8, char_budget=25000)
+
+    assert seen == {"top_n": 8, "char_budget": 25000}
+
+
 def _symbol_dedup_index():
     return [
         {"filepath": "/docs/classSub1.html", "filename": "classSub1.html",

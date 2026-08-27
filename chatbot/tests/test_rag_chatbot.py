@@ -867,6 +867,43 @@ def test_rerank_expands_a_summary_past_the_5000_char_cap():
     assert "method10()" in result[0].page_content
 
 
+def test_expand_sections_returns_reconstructed_section_text_past_the_cap():
+    """Public wrapper used by agentic search — must reconstruct, not use the cap."""
+    sid = "https://docs.example.org/classModelAPI__Feature.html#__summary"
+    bodies = [f"method{i}() does thing {i}. " * 40 for i in range(11)]
+    rows = _corpus_rows(sid, "ModelAPI_Feature Class Reference", bodies)
+    doc = Document(
+        page_content=rows[0]["content"],
+        metadata={"url": sid.split("#")[0], "section_id": sid, "chunk_position": "1/11",
+                  "section_text": "TRUNCATED HEAD"},
+    )
+
+    bot = _rerank_bot(bm25_index=_FakeCorpus(rows))
+    result = bot.expand_sections("q", [doc], top_n=5, char_budget=50000)
+
+    assert len(result) == 1
+    assert len(result[0].page_content) > 5000
+    assert "method10()" in result[0].page_content
+
+
+def test_expand_sections_caps_at_top_n():
+    docs = []
+    rows = []
+    for i in range(4):
+        sid = f"https://docs.example.org/page{i}.html#__summary"
+        rows += _corpus_rows(sid, f"Page {i}", [f"body{i}"])
+        docs.append(Document(
+            page_content=f"head{i}",
+            metadata={"url": sid.split("#")[0], "section_id": sid,
+                      "chunk_position": "1/1", "section_text": f"short{i}"},
+        ))
+
+    bot = _rerank_bot(bm25_index=_FakeCorpus(rows))
+    result = bot.expand_sections("q", docs, top_n=2, char_budget=50000)
+
+    assert len(result) == 2
+
+
 def test_rerank_falls_back_to_section_text_when_the_section_is_not_in_the_corpus():
     """Old ChromaDB indexes and bm25-disabled runs must keep working unchanged."""
     doc = Document(

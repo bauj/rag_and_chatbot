@@ -311,18 +311,24 @@ def _init_inprocess_chatbot() -> None:
     config_path = os.path.join(CHATBOT_DIR, "config.json")
     config = ChatbotConfig.load(config_path if os.path.exists(config_path) else None)
 
-    # agentic mode never touches the reranker (its search_pages/read_page tools
-    # bypass it) — same rule as chatbot.py's own skip_reranker.
-    skip_reranker = EVAL_MODE in ("no-rag", "agentic")
+    # no-rag mode never touches the reranker. agentic mode DOES now — its
+    # section-level search reranks candidates and rebuilds sections via the
+    # injected DocumentationChatbot.expand_sections (task #156); mirror
+    # chatbot.py, which loads the reranker for agentic too.
+    skip_reranker = EVAL_MODE in ("no-rag",)
     print(f"Loading chatbot once for the whole run (mode={EVAL_MODE})...")
     _inprocess_chatbot = DocumentationChatbot(config, skip_reranker=skip_reranker)
 
     if EVAL_MODE == "agentic":
         from core import AgenticChatbot
+        reranker_score_fn = (_inprocess_chatbot.score_against_query
+                             if _inprocess_chatbot.reranker is not None else None)
         _inprocess_agentic_chatbot = AgenticChatbot(
             config,
             vectorstore=_inprocess_chatbot.vectorstore,
             bm25_index=_inprocess_chatbot.bm25_index,
+            reranker_score_fn=reranker_score_fn,
+            section_select_fn=_inprocess_chatbot.expand_sections,
         )
     print("Chatbot ready — reused for every question in this run.")
 

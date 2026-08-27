@@ -228,7 +228,7 @@ python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type 
 
 **Reranker:** set to `null` or remove the block to disable reranking (faster, lower quality). Two `type`s: `cross_encoder` (default, `BAAI/bge-reranker-v2-m3`) or `late_interaction` (ColBERT-style MaxSim scoring via `sentence-transformers` `MultiVectorEncoder`, e.g. `answerdotai/answerai-colbert-small-v1` — requires `sentence-transformers >= 6.0`). Measured on the SHAPER eval set: quality is a wash between the two, `late_interaction` cuts average answer latency roughly in half (see `notes/late_interaction_reranker_eval_230826.md`).
 
-**Agentic mode:** set `agentic` to `null` or remove the block to disable. When enabled, the web UI and `--mode agentic` CLI flag become available. Requires `page_index.json` produced by the extractor, and the `deepagents` package (`pip install deepagents`, included in `requirements.txt`). Uses LangChain's [deepagents](https://github.com/langchain-ai/deepagents) tool-calling loop: the LLM decides for itself how many search/read cycles to run, bounded by `agentic.max_steps` (default `6`, mapped to the LangGraph recursion limit).
+**Agentic mode:** set `agentic` to `null` or remove the block to disable. When enabled, the web UI and `--mode agentic` CLI flag become available. Requires `page_index.json` produced by the extractor, and the `deepagents` package (`pip install deepagents`, included in `requirements.txt`). Uses LangChain's [deepagents](https://github.com/langchain-ai/deepagents) tool-calling loop: the LLM decides for itself how many search/read cycles to run, bounded by `agentic.max_steps` (default `6`, mapped to the LangGraph recursion limit). `search_sections_tool` returns up to `agentic.section_top_n` (default `5`) reranked, fully-reconstructed doc sections with their text inline, sharing `agentic.section_char_budget` characters (default `15000`); `read_page_tool` fetches a whole page (capped at `agentic.max_chars_per_page`) as an escape hatch.
 
 **BM25 hybrid retrieval:** set `bm25_enabled: true` to fuse keyword search (BM25) with vector search via Reciprocal Rank Fusion, in RAG mode's standard (non-deep-dive) path. Requires `{project_name}_docs.jsonl` next to `chromadb_path` (produced by extraction). Opt-in — not yet measured, off by default.
 
@@ -280,7 +280,11 @@ LLM answer generation
 
 **Agentic mode:**
 ```
-deepagents agent given two tools: search_pages, read_page
+deepagents agent given two tools: search_sections, read_page
+        ↓
+search_sections returns the top-N reconstructed doc sections (reranked,
+one per section, sharing agentic.section_char_budget) with their text
+inline; read_page is a whole-page escape hatch
         ↓
 Agent decides for itself how many search → read cycles to run,
 bounded by agentic.max_steps (default 6) — real multi-hop browsing,

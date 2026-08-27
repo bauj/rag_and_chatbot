@@ -325,8 +325,9 @@ Examples:
 
         # Initialize core chatbot. no-rag mode never touches the reranker, so
         # skip loading it there — pure per-question subprocess startup cost
-        # otherwise. Agentic mode DOES use it now, to rank its search_pages_tool
-        # candidates (loaded once here, reused per search call).
+        # otherwise. Agentic mode DOES use it now: its search_sections_tool
+        # reranks and reconstructs sections via chatbot.expand_sections
+        # (loaded once here, reused per search call).
         print("Loading documentation database...")
         chatbot = DocumentationChatbot(config, skip_reranker=(args.mode == 'no-rag'))
         reranker_score_fn = chatbot.score_against_query if chatbot.reranker is not None else None
@@ -380,7 +381,8 @@ Examples:
             from core import AgenticChatbot
             print("Loading agentic chatbot (deepagents)...")
             agentic_chatbot = AgenticChatbot(config, vectorstore=chatbot.vectorstore, bm25_index=chatbot.bm25_index,
-                                              reranker_score_fn=reranker_score_fn)
+                                              reranker_score_fn=reranker_score_fn,
+                                              section_select_fn=chatbot.expand_sections)
             print("Agentic chatbot ready.")
         except ImportError as e:
             if args.mode == 'agentic':

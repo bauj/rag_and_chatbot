@@ -3,7 +3,7 @@
 Chatbot with two retrieval modes and clean separation between business logic and UI.
 
 - **RAG mode** — queries a ChromaDB vector database, with optional reranking (cross-encoder or late-interaction), optional BM25 keyword hybrid retrieval, and optional HyDE
-- **Agentic mode** — searches a page index via a deepagents agent (LangGraph tool-calling loop), which decides for itself how many search/read cycles to run (bounded by `agentic.max_steps`, mapped to the graph recursion limit)
+- **Agentic mode** — a deepagents agent (LangGraph tool-calling loop) with a `search_sections_tool` (returns the top reranked, fully-reconstructed doc sections with text inline) and a `read_page_tool` (whole-page escape hatch); it decides for itself how many search/read cycles to run (bounded by `agentic.max_steps`, mapped to the graph recursion limit)
 
 ## Architecture
 
@@ -65,8 +65,10 @@ Config is loaded in this priority order: CLI arguments > `config.json` > default
 | Field | Default | Description |
 |---|---|---|
 | `page_index_path` | required | Path to `page_index.json` (relative to `chatbot/` or absolute) |
-| `max_chars_per_page` | `8000` | Max characters read per HTML page |
+| `max_chars_per_page` | `8000` | Max characters `read_page_tool` returns per HTML page (escape hatch) |
 | `max_steps` | `6` | Agent step budget — how many search/read cycles it may run (mapped to LangGraph recursion_limit) |
+| `section_top_n` | `5` | Sections `search_sections_tool` returns per call |
+| `section_char_budget` | `15000` | Total characters shared across those sections |
 
 `page_index.json` is generated automatically when running `extraction/process_docs.py`. deepagents compacts context between turns rather than resending the whole transcript, but a large `max_chars_per_page` still inflates each read — lower it if `max_steps` is high.
 

@@ -48,6 +48,12 @@ class AgenticConfig:
     max_chars_per_page: int = 8000
     max_steps: int = 6             # agent step budget (mapped to LangGraph recursion_limit)
     debug: bool = False            # Debug mode
+    # Section-level retrieval (search_sections_tool): how many reconstructed
+    # sections a single search returns, and the total char budget shared across
+    # them. Mirrors RAG mode's top_n_after_rerank / expansion_char_budget, sized
+    # smaller since each agent turn resends the full transcript.
+    section_top_n: int = 5
+    section_char_budget: int = 15000
 
 
 @dataclass
