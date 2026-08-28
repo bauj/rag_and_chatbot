@@ -45,10 +45,12 @@ def _make_config(tmp_path, index_entries=None):
     )
 
 
-def _make_bot(tmp_path, index_entries=None, bm25_index=None, reranker_score_fn=None):
+def _make_bot(tmp_path, index_entries=None, bm25_index=None, reranker_score_fn=None,
+              section_select_fn=None):
     config = _make_config(tmp_path, index_entries)
     return AgenticChatbot(config, vectorstore=MagicMock(), bm25_index=bm25_index,
-                          reranker_score_fn=reranker_score_fn)
+                          reranker_score_fn=reranker_score_fn,
+                          section_select_fn=section_select_fn)
 
 
 class _FakeMsg:
@@ -139,59 +141,77 @@ def test_constructor_stores_reranker_score_fn(tmp_path):
     assert bot._reranker_score_fn is score_fn
 
 
-def test_search_pages_tool_passes_rerank_fn_through(tmp_path, monkeypatch):
-    score_fn = MagicMock()
-    bot = _make_bot(tmp_path, reranker_score_fn=score_fn)
+def _search_tool(tools):
+    return next(t for t in tools if t.name == "search_sections_tool")
+
+
+def test_constructor_stores_section_select_fn(tmp_path):
+    fn = MagicMock()
+    bot = _make_bot(tmp_path, section_select_fn=fn)
+    assert bot._section_select_fn is fn
+
+
+def test_search_sections_tool_passes_select_fn_and_config_sizes(tmp_path, monkeypatch):
+    select_fn = MagicMock()
+    bot = _make_bot(tmp_path, section_select_fn=select_fn)
+    bot._agentic_cfg.section_top_n = 7
+    bot._agentic_cfg.section_char_budget = 22000
 
     captured = {}
 
     def fake_search_pages(*args, **kwargs):
-        captured["rerank_fn"] = kwargs.get("rerank_fn")
+        captured.update(kwargs)
         return []
 
     monkeypatch.setattr("core.agentic_chatbot.search_pages", fake_search_pages)
 
-    tools = bot._build_tools(8000, [])
-    search_tool = next(t for t in tools if t.name == "search_pages_tool")
-    search_tool.invoke({"query": "ModelAPI_Feature"})
+    tools = bot._build_tools(8000, [], [])
+    _search_tool(tools).invoke({"query": "construction point"})
 
-    assert captured["rerank_fn"] is score_fn
+    assert captured["select_sections_fn"] is select_fn
+    assert captured["top_n"] == 7
+    assert captured["char_budget"] == 22000
+    assert captured["k"] == 15
+    assert captured["rerank_fn"] is bot._reranker_score_fn
 
 
-def test_search_pages_tool_passes_k_15(tmp_path, monkeypatch):
+def test_search_sections_tool_formats_section_text_inline(tmp_path, monkeypatch):
     bot = _make_bot(tmp_path)
 
-    captured = {}
-
     def fake_search_pages(*args, **kwargs):
-        captured["k"] = kwargs.get("k")
-        return []
+        return [{
+            "filepath": "/docs/pointFeature.html", "filename": "pointFeature.html",
+            "title": "Construction Point", "module": "SHAPER", "doc_category": "user",
+            "section_id": "pointFeature.html#__intro", "section_text": "Five methods exist.",
+        }]
 
     monkeypatch.setattr("core.agentic_chatbot.search_pages", fake_search_pages)
 
-    tools = bot._build_tools(8000, [])
-    search_tool = next(t for t in tools if t.name == "search_pages_tool")
-    search_tool.invoke({"query": "ModelAPI_Feature"})
+    tools = bot._build_tools(8000, [], [])
+    out = _search_tool(tools).invoke({"query": "construction point"})
 
-    assert captured["k"] == 15
+    assert "pointFeature.html" in out
+    assert "Construction Point" in out
+    assert "Five methods exist." in out
 
 
-def test_search_pages_tool_with_no_reranker_score_fn_passes_none(tmp_path, monkeypatch):
-    bot = _make_bot(tmp_path, reranker_score_fn=None)
+def test_search_sections_tool_populates_retrieved_sections_deduped(tmp_path, monkeypatch):
+    bot = _make_bot(tmp_path)
+    section = {
+        "filepath": "/docs/pointFeature.html", "filename": "pointFeature.html",
+        "title": "Construction Point", "module": "SHAPER", "doc_category": "user",
+        "section_id": "pointFeature.html#__intro", "section_text": "body",
+    }
+    monkeypatch.setattr("core.agentic_chatbot.search_pages",
+                        lambda *a, **k: [section, dict(section)])
 
-    captured = {}
+    retrieved_sections = []
+    tools = bot._build_tools(8000, [], retrieved_sections)
+    _search_tool(tools).invoke({"query": "q"})
+    _search_tool(tools).invoke({"query": "q again"})
 
-    def fake_search_pages(*args, **kwargs):
-        captured["rerank_fn"] = kwargs.get("rerank_fn")
-        return []
-
-    monkeypatch.setattr("core.agentic_chatbot.search_pages", fake_search_pages)
-
-    tools = bot._build_tools(8000, [])
-    search_tool = next(t for t in tools if t.name == "search_pages_tool")
-    search_tool.invoke({"query": "ModelAPI_Feature"})
-
-    assert captured["rerank_fn"] is None
+    assert len(retrieved_sections) == 1
+    assert retrieved_sections[0]["section_id"] == "pointFeature.html#__intro"
 
 
 def test_read_page_tool_looks_up_by_filename_and_records_entry(tmp_path, monkeypatch):
@@ -200,7 +220,7 @@ def test_read_page_tool_looks_up_by_filename_and_records_entry(tmp_path, monkeyp
                         lambda filepath, doc_category, max_chars: "page text")
 
     read_entries = []
-    tools = bot._build_tools(8000, read_entries)
+    tools = bot._build_tools(8000, read_entries, [])
     known_filename = bot._page_index[0]["filename"]
     result = _read_tool(tools).invoke({"filename": known_filename, "doc_category": "dev"})
 
@@ -212,7 +232,7 @@ def test_read_page_tool_looks_up_by_filename_and_records_entry(tmp_path, monkeyp
 def test_read_page_tool_rejects_unknown_filename(tmp_path):
     bot = _make_bot(tmp_path)
     read_entries = []
-    tools = bot._build_tools(8000, read_entries)
+    tools = bot._build_tools(8000, read_entries, [])
     result = _read_tool(tools).invoke({"filename": "/etc/passwd", "doc_category": "dev"})
 
     assert "not a known documentation page" in result.lower()
@@ -227,7 +247,7 @@ def test_read_page_tool_handles_file_not_found(tmp_path, monkeypatch):
 
     monkeypatch.setattr("core.agentic_chatbot.parse_page", fake_parse)
     read_entries = []
-    tools = bot._build_tools(8000, read_entries)
+    tools = bot._build_tools(8000, read_entries, [])
     known_filename = bot._page_index[0]["filename"]
     result = _read_tool(tools).invoke({"filename": known_filename, "doc_category": "dev"})
 
@@ -347,6 +367,111 @@ def test_ask_sources_carry_the_parsed_page_content(tmp_path, monkeypatch):
     result = bot.ask("question")
 
     assert result["sources"][0]["content"] == "The actual page text."
+
+
+def _fake_section(**over):
+    base = {
+        "filepath": "/docs/pointFeature.html", "filename": "pointFeature.html",
+        "title": "Construction Point", "module": "SHAPER", "doc_category": "user",
+        "section_id": "pointFeature.html#__intro",
+        "section_text": "There are five construction point methods.",
+    }
+    base.update(over)
+    return base
+
+
+def test_ask_grounds_against_retrieved_section_text(tmp_path, monkeypatch):
+    bot = _make_bot(tmp_path)
+    monkeypatch.setattr("core.agentic_chatbot.search_pages",
+                        lambda *a, **k: [_fake_section()])
+    seen = {}
+
+    def fake_check_grounding(answer, observations, llm_classify_fn=None):
+        seen["observations"] = observations
+        return []
+
+    monkeypatch.setattr("core.agentic_chatbot.check_grounding", fake_check_grounding)
+
+    capture = {}
+
+    def respond_fn(_messages):
+        _search_tool(capture["tools"]).invoke({"query": "construction point"})
+        return [_FakeMsg("Five.")]
+
+    _install_fake_agent(bot, respond_fn, capture)
+    bot.ask("how many construction point methods")
+
+    assert "five construction point methods" in seen["observations"]
+
+
+def test_ask_builds_sources_from_sections_and_reads(tmp_path, monkeypatch):
+    bot = _make_bot(tmp_path)
+    read_filename = bot._page_index[0]["filename"]
+    monkeypatch.setattr("core.agentic_chatbot.search_pages",
+                        lambda *a, **k: [_fake_section()])
+    monkeypatch.setattr("core.agentic_chatbot.parse_page",
+                        lambda filepath, doc_category, max_chars: "read page body")
+
+    capture = {}
+
+    def respond_fn(_messages):
+        _search_tool(capture["tools"]).invoke({"query": "q"})
+        _read_tool(capture["tools"]).invoke({"filename": read_filename, "doc_category": "dev"})
+        return [_FakeMsg("answer")]
+
+    _install_fake_agent(bot, respond_fn, capture)
+    result = bot.ask("q")
+
+    by_name = {s["filename"]: s for s in result["sources"]}
+    assert set(by_name) == {"pointFeature.html", read_filename}
+    assert by_name["pointFeature.html"]["content"] == "There are five construction point methods."
+    assert by_name[read_filename]["content"] == "read page body"
+
+
+def test_ask_grounded_true_when_only_sections_retrieved_no_reads(tmp_path, monkeypatch):
+    bot = _make_bot(tmp_path)
+    monkeypatch.setattr("core.agentic_chatbot.search_pages",
+                        lambda *a, **k: [_fake_section()])
+
+    capture = {}
+
+    def respond_fn(_messages):
+        _search_tool(capture["tools"]).invoke({"query": "q"})
+        return [_FakeMsg("answer from sections")]
+
+    _install_fake_agent(bot, respond_fn, capture)
+    result = bot.ask("q")
+
+    assert result["filters"]["grounded"] is True
+    assert [s["filename"] for s in result["sources"]] == ["pointFeature.html"]
+
+
+def test_ask_graph_recursion_error_yields_sources_from_sections(tmp_path, monkeypatch):
+    from langgraph.errors import GraphRecursionError
+
+    bot = _make_bot(tmp_path)
+    monkeypatch.setattr("core.agentic_chatbot.search_pages",
+                        lambda *a, **k: [_fake_section()])
+
+    capture = {}
+
+    def respond_fn(_messages):
+        _search_tool(capture["tools"]).invoke({"query": "q"})
+        raise GraphRecursionError("Recursion limit reached")
+
+    _install_fake_agent(bot, respond_fn, capture)
+    result = bot.ask("q")
+
+    assert result["error"] is None
+    assert result["filters"]["degraded_answer"] is True
+    assert result["filters"]["grounded"] is True
+    assert [s["filename"] for s in result["sources"]] == ["pointFeature.html"]
+
+
+def test_system_prompt_does_not_mandate_read_page(tmp_path):
+    from core.agentic_chatbot import _SYSTEM_PROMPT
+    assert "MUST call read_page_tool" not in _SYSTEM_PROMPT
+    assert "search_sections_tool" in _SYSTEM_PROMPT
 
 
 def test_ask_grounded_false_and_empty_sources_when_no_pages_read(tmp_path):

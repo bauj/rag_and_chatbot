@@ -110,6 +110,51 @@ def test_ask_chatbot_inprocess_propagates_error_on_normal_return(monkeypatch):
     assert out["answer"] is None
 
 
+def test_init_inprocess_agentic_wires_reranker_and_section_expand(monkeypatch):
+    """Agentic eval must load the reranker and inject both the reranker score fn
+    and the section-expand fn, or section-level retrieval measures nothing."""
+    import os
+    import sys
+    import evaluator.base.evaluator as ev
+
+    chatbot_dir = os.path.abspath(os.path.join(os.path.dirname(ev.__file__), "..", "..", "chatbot"))
+    sys.path.insert(0, chatbot_dir)
+    monkeypatch.setattr(ev, "CHATBOT_DIR", chatbot_dir)
+    import core
+
+    captured = {}
+
+    class FakeDoc:
+        def __init__(self, config, skip_reranker=False):
+            captured["skip_reranker"] = skip_reranker
+            captured["doc"] = self
+            self.vectorstore = "VS"
+            self.bm25_index = "BM"
+            self.reranker = object()
+
+        def score_against_query(self, *a):
+            return []
+
+        def expand_sections(self, *a, **k):
+            return []
+
+    class FakeAgentic:
+        def __init__(self, config, **kwargs):
+            captured["agentic_kwargs"] = kwargs
+
+    monkeypatch.setattr(core, "DocumentationChatbot", FakeDoc)
+    monkeypatch.setattr(core, "AgenticChatbot", FakeAgentic)
+    monkeypatch.setattr(core.ChatbotConfig, "load", staticmethod(lambda p: object()))
+    monkeypatch.setattr(ev, "EVAL_MODE", "agentic")
+
+    ev._init_inprocess_chatbot()
+
+    assert captured["skip_reranker"] is False
+    kw = captured["agentic_kwargs"]
+    assert kw["reranker_score_fn"] == captured["doc"].score_against_query
+    assert kw["section_select_fn"] == captured["doc"].expand_sections
+
+
 def test_run_evaluation_defaults_to_all_metrics(monkeypatch):
     import evaluator.base.evaluator as ev
 

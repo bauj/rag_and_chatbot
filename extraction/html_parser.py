@@ -456,6 +456,9 @@ def search_pages(
     bm25_index: Optional[Any] = None,
     title_boost_enabled: bool = False,
     rerank_fn: Optional[Callable[[str, List[Any]], List[float]]] = None,
+    select_sections_fn: Optional[Callable[[str, List[Any], int, int], List[Any]]] = None,
+    top_n: int = 5,
+    char_budget: int = 15000,
 ) -> List[Dict[str, Any]]:
     """
     Hybrid search over the RAG-mode retrieval channels, mapped back to
@@ -485,6 +488,16 @@ def search_pages(
     injected the same way bm25_index is — that reorders the final ≤k page
     candidates by score instead of fusion rank, using each page's chosen
     representative chunk (the one that survived dedup and collapse below).
+    Only used by the page-level branch.
+
+    select_sections_fn, if given, switches to section-level retrieval
+    (agentic mode): a duck-typed callable(query, chunks, top_n, char_budget)
+    -> List[Document] — i.e. DocumentationChatbot.expand_sections — that
+    reranks the fused + symbol-deduped chunk pool, keeps one representative
+    per section, caps at top_n and rebuilds each survivor's full section
+    text. Each returned Document is re-joined to its page_index entry; the
+    result dicts carry the entry plus 'section_id' and 'section_text'. When
+    None, the page-level branch runs unchanged.
 
     Chroma chunk metadata may hold a web URL instead of a local filepath
     (extraction config-dependent), so the join to page_index is done via
@@ -519,6 +532,37 @@ def search_pages(
 
     fused_chunks = channels[0] if len(channels) == 1 else _rrf_fuse_chunks(channels)
     deduped_chunks = _dedup_symbol_copies(fused_chunks)
+
+    if select_sections_fn is not None:
+        # Section-level branch (agentic mode): hand the fused + symbol-deduped
+        # chunk pool to the injected DocumentationChatbot.expand_sections, which
+        # reranks, keeps one representative per section_id, caps at top_n and
+        # rebuilds each survivor's full section text. Re-join each returned
+        # section to its page_index entry via the same qualified-filename
+        # lookup the page branch uses.
+        section_docs = select_sections_fn(query, deduped_chunks, top_n, char_budget)
+        sections: List[Dict[str, Any]] = []
+        seen_section_paths: Set[str] = set()
+        for doc in section_docs:
+            url = doc.metadata.get('url', '')
+            if not url:
+                continue
+            qualified = _qualified(url)
+            bare = qualified.split('/')[-1]
+            key = qualified if qualified in by_key else (bare if bare in by_key else None)
+            if key is None:
+                continue
+            entry = by_key[key]
+            filepath = entry['filepath']
+            if filepath in seen_section_paths or filepath in exclude_filepaths:
+                continue
+            seen_section_paths.add(filepath)
+            sections.append({
+                **entry,
+                'section_id': doc.metadata.get('section_id', ''),
+                'section_text': doc.page_content,
+            })
+        return sections
 
     seen: Set[str] = set()
     result_keys: List[str] = []

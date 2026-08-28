@@ -43,12 +43,12 @@ def test_dump_serializes_one_entry_per_message_with_role_and_content(tmp_path):
 
 def test_dump_records_tool_calls_from_ai_messages(tmp_path):
     writer = DebugTraceWriter(debug_dir=tmp_path)
-    ai = _ai("", tool_calls=[{"name": "search_pages_tool", "args": {"query": "sketch"}, "id": "c1"}])
+    ai = _ai("", tool_calls=[{"name": "search_sections_tool", "args": {"query": "sketch"}, "id": "c1"}])
     out_path = writer.dump([_human("q"), ai], question="q")
     data = json.loads(out_path.read_text())
 
     assert data["messages"][1]["tool_calls"] == [
-        {"name": "search_pages_tool", "args": {"query": "sketch"}}
+        {"name": "search_sections_tool", "args": {"query": "sketch"}}
     ]
 
 

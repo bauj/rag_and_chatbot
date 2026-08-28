@@ -55,13 +55,15 @@ def _sum_token_usage(messages) -> Optional[Dict[str, int]]:
     }
 
 
-def _build_sources(read_entries: List[dict]) -> List[dict]:
-    """Dedup the pages the agent read (by filepath), preserving read order and
-    carrying the parsed page content through for the evaluator's groundedness
-    grading (#114)."""
+def _build_sources(read_entries: List[dict],
+                   retrieved_sections: Optional[List[dict]] = None) -> List[dict]:
+    """Dedup, by filepath, the pages the agent saw — read via read_page_tool or
+    returned as sections by search_sections_tool — preserving order and carrying
+    the text through for the evaluator's groundedness grading (#114). Pages read
+    in full take precedence over the section-text copy when both are present."""
     seen = set()
     sources = []
-    for entry in read_entries:
+    for entry in list(read_entries) + list(retrieved_sections or []):
         if entry["filepath"] in seen:
             continue
         seen.add(entry["filepath"])
@@ -71,7 +73,7 @@ def _build_sources(read_entries: List[dict]) -> List[dict]:
             "title": entry["title"],
             "module": entry["module"],
             "doc_category": entry["doc_category"],
-            "content": entry.get("content", ""),
+            "content": entry.get("content") or entry.get("section_text", ""),
         })
     return sources
 
@@ -101,10 +103,12 @@ def _fallback_answer(sources: List[dict], reason: str = "steps") -> str:
 
 _SYSTEM_PROMPT = (
     "You are an expert assistant for {project_name} documentation. "
-    "Use the search_pages_tool to find candidate documentation pages, then the "
-    "read_page_tool to read their content. You MUST call read_page_tool at least "
-    "once before answering — never answer from prior knowledge alone. Answer the "
-    "question strictly based on what you read. Identify each distinct operation "
+    "Use the search_sections_tool to find relevant documentation sections — it "
+    "returns each section's text directly, so you usually do not need "
+    "read_page_tool. Call read_page_tool only when a section looks truncated or "
+    "you need the surrounding page context. Never answer from prior knowledge "
+    "alone — if the tools return nothing usable, say so. Answer the "
+    "question strictly based on what you retrieved. Identify each distinct operation "
     "required and search for each one separately. If a search returns no results, "
     "you MUST retry with at least one alternative term before proceeding. Never "
     "invent API calls, imports, or libraries that did not appear in retrieved "
@@ -122,7 +126,7 @@ class AgenticChatbot:
     """
 
     def __init__(self, config: ChatbotConfig, vectorstore: Chroma, bm25_index: Optional[BM25Index] = None,
-                 reranker_score_fn: Optional[Any] = None):
+                 reranker_score_fn: Optional[Any] = None, section_select_fn: Optional[Any] = None):
         if config.agentic is None:
             raise ValueError(
                 "AgenticChatbot requires config.agentic to be set. "
@@ -147,6 +151,7 @@ class AgenticChatbot:
         self._vectorstore = vectorstore
         self._bm25_index = bm25_index
         self._reranker_score_fn = reranker_score_fn
+        self._section_select_fn = section_select_fn
 
         index_path = Path(self._agentic_cfg.page_index_path)
         if not index_path.is_absolute():
@@ -185,42 +190,56 @@ class AgenticChatbot:
             kwargs["http_client"] = httpx.Client(verify=str(cert_path))
         return self._ChatOpenAI(**kwargs)
 
-    def _build_tools(self, max_chars_per_page: int, read_entries: List[dict]):
+    def _build_tools(self, max_chars_per_page: int, read_entries: List[dict],
+                     retrieved_sections: List[dict]):
         title_boost_enabled = self.config.title_boost_enabled
         vectorstore = self._vectorstore
         page_index = self._page_index
         bm25_index = self._bm25_index
         entry_by_filename = self._entry_by_filename
         rerank_fn = self._reranker_score_fn
+        section_select_fn = self._section_select_fn
+        section_top_n = self._agentic_cfg.section_top_n
+        section_char_budget = self._agentic_cfg.section_char_budget
+        seen_section_keys: set = set()
 
         @self._tool_decorator
-        def search_pages_tool(query: str) -> str:
-            """Search the documentation page index for pages matching a query.
-            Returns candidate pages with their filename, title, module, and doc_category."""
+        def search_sections_tool(query: str) -> str:
+            """Search the documentation for the sections most relevant to a query.
+            Returns each section's page filename, title, module, and its text."""
             candidates = search_pages(
                 vectorstore, page_index, query,
                 bm25_index=bm25_index,
                 title_boost_enabled=title_boost_enabled,
                 rerank_fn=rerank_fn,
+                select_sections_fn=section_select_fn,
+                top_n=section_top_n,
+                char_budget=section_char_budget,
                 k=15,
             )
             if not candidates:
                 return "No matches for " + query + ". Try a broader or alternative term, or search a related feature category."
-            return "\n".join(
-                f"- {e['filename']} | {e['title']} | {e['module']}/{e['doc_category']}"
-                for e in candidates
+            for e in candidates:
+                key = e.get("section_id") or e["filepath"]
+                if key not in seen_section_keys:
+                    seen_section_keys.add(key)
+                    retrieved_sections.append(e)
+            return "\n\n".join(
+                f"[{i}] {e['filename']} | {e['title']} | {e['module']}/{e['doc_category']}\n"
+                f"{e.get('section_text', '')}"
+                for i, e in enumerate(candidates, 1)
             )
 
         @self._tool_decorator
         def read_page_tool(filename: str, doc_category: str) -> str:
-            """Read and return the text content of a documentation page. The
-            filename must be one returned by search_pages_tool — other
+            """Read and return the full text content of a documentation page. The
+            filename must be one returned by search_sections_tool — other
             filenames are rejected."""
             entry = entry_by_filename.get(filename)
             if entry is None:
                 return (
                     f"Error: {filename!r} is not a known documentation page. "
-                    "Only use filenames returned by search_pages_tool."
+                    "Only use filenames returned by search_sections_tool."
                 )
             try:
                 content = parse_page(entry['filepath'], doc_category, max_chars=max_chars_per_page)
@@ -229,7 +248,7 @@ class AgenticChatbot:
             read_entries.append({**entry, "content": content})
             return content
 
-        return [search_pages_tool, read_page_tool]
+        return [search_sections_tool, read_page_tool]
 
     @staticmethod
     def _run_streaming(agent, input_messages: List[dict], recursion_limit: int) -> dict:
@@ -286,8 +305,9 @@ class AgenticChatbot:
         _debug = debug if debug is not None else getattr(cfg, "debug", False)
 
         read_entries: List[dict] = []
+        retrieved_sections: List[dict] = []
         model = self._build_model(temperature, max_tokens)
-        tools = self._build_tools(_max_chars_per_page, read_entries)
+        tools = self._build_tools(_max_chars_per_page, read_entries, retrieved_sections)
 
         agent = self._create_deep_agent(
             model=model,
@@ -308,7 +328,12 @@ class AgenticChatbot:
             )
 
         def _observations_text() -> str:
-            return "\n".join(e.get("content", "") for e in read_entries)
+            parts = [e.get("section_text", "") for e in retrieved_sections]
+            parts += [e.get("content", "") for e in read_entries]
+            return "\n".join(p for p in parts if p)
+
+        def _grounded() -> bool:
+            return bool(retrieved_sections or read_entries)
 
         try:
             result = _invoke([{"role": "user", "content": f"Question: {question}"}])
@@ -345,14 +370,14 @@ class AgenticChatbot:
             # here instead. read_entries is populated as a side effect by
             # read_page_tool's closure during the run, so pages read before the
             # budget ran out survive the crash; degrade to a fallback answer.
-            sources = _build_sources(read_entries)
+            sources = _build_sources(read_entries, retrieved_sections)
             return {
                 "answer": _fallback_answer(sources, reason="steps"),
                 "sources": sources,
                 "filters": {
                     "mode": "agentic",
                     "steps_used": recursion_limit,
-                    "grounded": bool(read_entries),
+                    "grounded": _grounded(),
                     "degraded_answer": True,
                     "ungrounded_calls": [],
                     "grounding_retries_used": 0,
@@ -374,7 +399,7 @@ class AgenticChatbot:
         blocking_calls = [c for c in ungrounded_calls if c.get("kind") != "ambiguous_overload"]
         degraded = bool(blocking_calls)
 
-        sources = _build_sources(read_entries)
+        sources = _build_sources(read_entries, retrieved_sections)
 
         if degraded:
             answer = _fallback_answer(sources, reason="ungrounded")
@@ -382,7 +407,7 @@ class AgenticChatbot:
         filters = {
             "mode": "agentic",
             "steps_used": steps_used,
-            "grounded": bool(read_entries),
+            "grounded": _grounded(),
             "degraded_answer": degraded,
             "ungrounded_calls": ungrounded_calls,
             "grounding_retries_used": retries_used,
@@ -393,7 +418,7 @@ class AgenticChatbot:
             self._debug_writer.dump(result["messages"], question, extra={
                 "steps_used": steps_used,
                 "degraded_answer": degraded,
-                "grounded": bool(read_entries),
+                "grounded": _grounded(),
                 "ungrounded_calls": ungrounded_calls,
                 "grounding_retries_used": retries_used,
             })

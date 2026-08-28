@@ -20,6 +20,27 @@ def test_agentic_config_custom_values():
     assert cfg.max_chars_per_page == 4000
 
 
+def test_agentic_config_section_defaults():
+    from core.config import AgenticConfig
+    cfg = AgenticConfig(page_index_path="/tmp/idx.json")
+    assert cfg.section_top_n == 5
+    assert cfg.section_char_budget == 15000
+
+
+def test_agentic_config_section_custom_from_json(tmp_path):
+    config_json = tmp_path / "config.json"
+    config_json.write_text(json.dumps({
+        "agentic": {
+            "page_index_path": "/tmp/page_index.json",
+            "section_top_n": 8,
+            "section_char_budget": 25000,
+        }
+    }))
+    cfg = ChatbotConfig.load(str(config_json))
+    assert cfg.agentic.section_top_n == 8
+    assert cfg.agentic.section_char_budget == 25000
+
+
 def test_chatbot_config_agentic_from_json(tmp_path):
     config_json = tmp_path / "config.json"
     config_json.write_text(json.dumps({

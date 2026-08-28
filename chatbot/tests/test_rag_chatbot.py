@@ -867,6 +867,106 @@ def test_rerank_expands_a_summary_past_the_5000_char_cap():
     assert "method10()" in result[0].page_content
 
 
+def test_expand_sections_returns_reconstructed_section_text_past_the_cap():
+    """Public wrapper used by agentic search — must reconstruct, not use the cap."""
+    sid = "https://docs.example.org/classModelAPI__Feature.html#__summary"
+    bodies = [f"method{i}() does thing {i}. " * 40 for i in range(11)]
+    rows = _corpus_rows(sid, "ModelAPI_Feature Class Reference", bodies)
+    doc = Document(
+        page_content=rows[0]["content"],
+        metadata={"url": sid.split("#")[0], "section_id": sid, "chunk_position": "1/11",
+                  "section_text": "TRUNCATED HEAD"},
+    )
+
+    bot = _rerank_bot(bm25_index=_FakeCorpus(rows))
+    result = bot.expand_sections("q", [doc], top_n=5, char_budget=50000)
+
+    assert len(result) == 1
+    assert len(result[0].page_content) > 5000
+    assert "method10()" in result[0].page_content
+
+
+def test_expand_sections_caps_at_top_n():
+    docs = []
+    rows = []
+    for i in range(4):
+        sid = f"https://docs.example.org/page{i}.html#__summary"
+        rows += _corpus_rows(sid, f"Page {i}", [f"body{i}"])
+        docs.append(Document(
+            page_content=f"head{i}",
+            metadata={"url": sid.split("#")[0], "section_id": sid,
+                      "chunk_position": "1/1", "section_text": f"short{i}"},
+        ))
+
+    bot = _rerank_bot(bm25_index=_FakeCorpus(rows))
+    result = bot.expand_sections("q", docs, top_n=2, char_budget=50000)
+
+    assert len(result) == 2
+
+
+def test_expand_sections_returns_the_whole_small_page_not_just_the_matched_section():
+    """#157: on a small cohesive page the matched section is swapped for the
+    whole page, so a multi-part answer keeps its other half."""
+    page = "https://docs.example.org/Circle.html"
+    intro, matched = page + "#__intro", page + "#by-three-points"
+    rows = (
+        _corpus_rows(intro, "Circle", ["There are 2 algorithms: by center, by three points."])
+        + _corpus_rows(matched, "Circle", ["Selecting a segment creates a Tangent constraint."])
+    )
+    doc = Document(
+        page_content="Selecting a segment creates a Tangent constraint.",
+        metadata={"url": page, "section_id": matched, "chunk_position": "1/1",
+                  "section_text": "capped"},
+    )
+
+    bot = _rerank_bot(bm25_index=_FakeCorpus(rows))
+    result = bot.expand_sections("q", [doc], top_n=5, char_budget=50000)
+
+    assert len(result) == 1
+    assert "There are 2 algorithms" in result[0].page_content   # sibling section
+    assert "Tangent constraint" in result[0].page_content
+
+
+def test_expand_sections_emits_a_small_page_once_across_sibling_sections():
+    page = "https://docs.example.org/Circle.html"
+    a, b = page + "#__intro", page + "#by-three-points"
+    rows = _corpus_rows(a, "Circle", ["Intro text."]) + _corpus_rows(b, "Circle", ["Body text."])
+    docs = [
+        Document(page_content="Intro text.",
+                 metadata={"url": page, "section_id": a, "chunk_position": "1/1", "section_text": "x"}),
+        Document(page_content="Body text.",
+                 metadata={"url": page, "section_id": b, "chunk_position": "1/1", "section_text": "y"}),
+    ]
+
+    bot = _rerank_bot(bm25_index=_FakeCorpus(rows))
+    result = bot.expand_sections("q", docs, top_n=5, char_budget=50000)
+
+    assert len(result) == 1
+
+
+def test_expand_sections_keeps_large_pages_section_level():
+    """A page whose whole text exceeds _SMALL_PAGE_CHARS still returns just the
+    matched section, not the entire page."""
+    page = "https://docs.example.org/classBig.html"
+    wanted, other = page + "#execute", page + "#other"
+    rows = (
+        _corpus_rows(wanted, "Big", ["execute() runs the feature."])
+        + _corpus_rows(other, "Big", ["filler. " * 2000])   # ~16k chars — page is large
+    )
+    doc = Document(
+        page_content="execute() runs the feature.",
+        metadata={"url": page, "section_id": wanted, "chunk_position": "1/1",
+                  "section_text": "capped"},
+    )
+
+    bot = _rerank_bot(bm25_index=_FakeCorpus(rows))
+    result = bot.expand_sections("q", [doc], top_n=5, char_budget=50000)
+
+    assert len(result) == 1
+    assert result[0].page_content == "Big\n\nexecute() runs the feature."
+    assert "filler." not in result[0].page_content
+
+
 def test_rerank_falls_back_to_section_text_when_the_section_is_not_in_the_corpus():
     """Old ChromaDB indexes and bm25-disabled runs must keep working unchanged."""
     doc = Document(
