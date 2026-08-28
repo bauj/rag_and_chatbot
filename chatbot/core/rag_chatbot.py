@@ -435,6 +435,12 @@ Passage:"""
     # a naive concatenation would repeat that window.
     _MAX_FRAGMENT_OVERLAP = 500
 
+    # Below this many chars, agentic section retrieval hands back a whole page
+    # instead of the single matched h2/h3 section. Small Sphinx user-doc feature
+    # pages split into sections whose individual text drops half of a multi-part
+    # answer; large Doxygen class pages stay section-level (#156/#157).
+    _SMALL_PAGE_CHARS = 8000
+
     def _full_section_text(self, section_id: str) -> str:
         """
         Rebuild a section's complete text from its chunks.
@@ -470,6 +476,37 @@ Passage:"""
             text += piece[overlap:]
 
         return text.strip()
+
+    def _page_section_ids(self) -> dict:
+        """page key (the section_id prefix) -> [section_id, ...] in corpus order.
+
+        Built once from the corpus, same source as _section_rows.
+        """
+        cached = getattr(self, '_page_section_ids_cache', None)
+        if cached is not None:
+            return cached
+
+        pages: dict = {}
+        for row in self._corpus_rows():
+            section_id = row.get('metadata', {}).get('section_id', '')
+            if not section_id:
+                continue
+            page_key = section_id.split('#', 1)[0]
+            ids = pages.setdefault(page_key, [])
+            if section_id not in ids:
+                ids.append(section_id)
+
+        self._page_section_ids_cache = pages
+        return pages
+
+    def _full_page_text(self, page_key: str) -> str:
+        """Rebuild a whole page from its sections' chunks, sections in corpus
+        order. '' when the page is unknown (old index, or bm25 disabled)."""
+        if not page_key:
+            return ''
+        parts = [self._full_section_text(section_id)
+                 for section_id in self._page_section_ids().get(page_key, [])]
+        return "\n\n".join(p for p in parts if p).strip()
 
     def _expand_to_section(self, doc, budget: int):
         """
@@ -584,18 +621,57 @@ Passage:"""
 
     def expand_sections(self, query: str, chunks: List, top_n: int = 5,
                         char_budget: int = 15000) -> List:
-        """Rank a chunk pool and return its top_n entries as fully
-        reconstructed section-text Documents.
+        """Rank a chunk pool and return up to top_n relevant sections as fully
+        reconstructed Documents.
 
-        Thin public wrapper over _select_context. Injected into
-        extraction/html_parser.search_pages for agentic section-level
-        retrieval, the same duck-typed way as score_against_query and
-        bm25_index, so extraction/ stays independent of chatbot/core.
+        Injected into extraction/html_parser.search_pages for agentic
+        section-level retrieval, the same duck-typed way as score_against_query
+        and bm25_index, so extraction/ stays independent of chatbot/core.
+
+        For a small cohesive page (<= _SMALL_PAGE_CHARS whole) the matched
+        section is replaced by the whole page, deduped so the page is emitted
+        once. A multi-part question — "name the two algorithms AND give the TUI
+        signature" — has its two halves in different h2/h3 sections of such a
+        page, and a single section starves groundedness (#157). Large Doxygen
+        class pages stay section-level (the point of #156). One shared
+        char_budget across all survivors, same as _expand_survivors.
         """
-        return self._select_context(
-            query, chunks, reranker_enabled=True,
-            top_n=top_n, expansion_char_budget=char_budget,
-        )
+        from langchain_core.documents import Document as LCDocument
+
+        docs = self._dedup_symbol_copies(chunks)
+
+        if self.reranker is not None:
+            scores = self.score_against_query(query, docs)
+            docs = [d for _score, d in
+                    sorted(zip(scores, docs), key=lambda x: float(x[0]), reverse=True)]
+
+        reps = self._pick_section_representatives(docs)
+
+        result: List = []
+        budget = char_budget
+        seen_pages: set = set()
+        for doc in reps:
+            if len(result) >= top_n:
+                break
+            section_id = doc.metadata.get('section_id', '')
+            page_key = section_id.split('#', 1)[0] if section_id else ''
+            full_page = self._full_page_text(page_key)
+
+            if full_page and len(full_page) <= self._SMALL_PAGE_CHARS:
+                if page_key in seen_pages:
+                    continue  # whole page already emitted for a sibling section
+                seen_pages.add(page_key)
+                text = full_page if len(full_page) <= budget else doc.metadata.get('section_text', '')
+                if not text:
+                    continue
+                result.append(LCDocument(page_content=text, metadata=doc.metadata))
+                budget -= len(text)
+            else:
+                expanded, spent = self._expand_to_section(doc, budget)
+                budget -= spent
+                result.append(expanded)
+
+        return result
 
     def _create_prompt(self) -> PromptTemplate:
         """Create the base prompt template"""
