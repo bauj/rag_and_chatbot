@@ -1282,17 +1282,17 @@ def test_reranker_config_rejects_unknown_type():
         RerankerConfig(model="fake-model", type="something_else")
 
 
-def test_reranker_config_defaults_to_cross_encoder():
+def test_reranker_config_defaults_to_late_interaction():
     from core.config import RerankerConfig
-    assert RerankerConfig().type == "cross_encoder"
+    assert RerankerConfig().type == "late_interaction"
 
 
-def test_load_reranker_defaults_to_cross_encoder():
+def test_load_reranker_uses_cross_encoder_when_configured():
     from core.rag_chatbot import DocumentationChatbot
     from core.config import RerankerConfig
 
     bot = DocumentationChatbot.__new__(DocumentationChatbot)
-    bot.config = MagicMock(reranker=RerankerConfig(model="fake-cross-encoder"))
+    bot.config = MagicMock(reranker=RerankerConfig(model="fake-cross-encoder", type="cross_encoder"))
 
     with patch("sentence_transformers.CrossEncoder") as mock_ce:
         bot._load_reranker()

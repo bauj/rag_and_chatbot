@@ -13,8 +13,8 @@ A chatbot for any project with HTML documentation (Sphinx, Doxygen). Point it at
 - Multi-module support — query across multiple doc sets simultaneously
 - Two chatbot modes: **RAG** (vector retrieval + reranking) and **Agentic** (deepagents harness, multi-hop page browsing)
 - Token-aware chunking (prevents embedding truncation)
-- Reranking for better result ranking — cross-encoder (`BAAI/bge-reranker-v2-m3`, default) or opt-in late-interaction/ColBERT-style (`answerdotai/answerai-colbert-small-v1`, lower latency)
-- Optional BM25 keyword hybrid retrieval (opt-in, fused with vector search via Reciprocal Rank Fusion)
+- Reranking for better result ranking — late-interaction/ColBERT-style (`answerdotai/answerai-colbert-small-v1`, default, lower latency) or cross-encoder (`BAAI/bge-reranker-v2-m3`)
+- BM25 keyword hybrid retrieval (on by default, fused with vector search via Reciprocal Rank Fusion), with a title-only channel for entity lookups
 - Optional HyDE retrieval (opt-in — an LLM-written hypothetical passage steers the vector search instead of the raw question)
 - Quality scoring (filters low-value content)
 - Code block extraction (enables code-aware retrieval, preserved as Markdown)
@@ -87,8 +87,8 @@ python download_models.py
 
 This downloads to `~/.cache/huggingface/hub`:
 - `all-MiniLM-L6-v2` — embedding model (required for local embeddings)
-- `BAAI/bge-reranker-v2-m3` — cross-encoder reranker model (required if `reranker.type: "cross_encoder"` is enabled in chatbot config)
-- `answerdotai/answerai-colbert-small-v1` — late-interaction reranker model (required if `reranker.type: "late_interaction"` is enabled instead)
+- `answerdotai/answerai-colbert-small-v1` — late-interaction reranker model (default; required if `reranker.type: "late_interaction"`)
+- `BAAI/bge-reranker-v2-m3` — cross-encoder reranker model (required only if `reranker.type: "cross_encoder"` is set instead)
 
 > **Offline use:** the chatbot runs with `HF_HUB_OFFLINE=1` by default, so models must be downloaded before first use. Skip this step only if you are using API-based embeddings and no reranker.
 
@@ -202,17 +202,18 @@ python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type 
   },
 
   "reranker": {
-    "model": "BAAI/bge-reranker-v2-m3",
-    "type": "cross_encoder"
+    "model": "answerdotai/answerai-colbert-small-v1",
+    "type": "late_interaction"
   },
 
   "agentic": {
     "page_index_path": "../extraction/my_project_docs_extracted/page_index.json",
     "max_chars_per_page": 8000,
-    "max_steps": 6
+    "max_steps": 20
   },
 
-  "bm25_enabled": false,
+  "bm25_enabled": true,
+  "title_boost_enabled": true,
   "hyde_enabled": false
 }
 ```
@@ -226,15 +227,15 @@ python chatbot.py --question "How do I create a mesh?" --module MODULE_A --type 
 | Mistral | `https://api.mistral.ai/v1` | your key |
 | Any OpenAI-compatible | your endpoint | your key |
 
-**Reranker:** set to `null` or remove the block to disable reranking (faster, lower quality). Two `type`s: `cross_encoder` (default, `BAAI/bge-reranker-v2-m3`) or `late_interaction` (ColBERT-style MaxSim scoring via `sentence-transformers` `MultiVectorEncoder`, e.g. `answerdotai/answerai-colbert-small-v1` — requires `sentence-transformers >= 6.0`). Measured on the SHAPER eval set: quality is a wash between the two, `late_interaction` cuts average answer latency roughly in half (see `notes/late_interaction_reranker_eval_230826.md`).
+**Reranker:** set to `null` or remove the block to disable reranking (faster, lower quality). Two `type`s: `late_interaction` (default, ColBERT-style MaxSim scoring via `sentence-transformers` `MultiVectorEncoder`, `answerdotai/answerai-colbert-small-v1` — requires `sentence-transformers >= 6.0`) or `cross_encoder` (`BAAI/bge-reranker-v2-m3`). Measured on the SHAPER eval set: quality is a wash between the two, `late_interaction` cuts average answer latency roughly in half (see `notes/late_interaction_reranker_eval_230826.md`).
 
-**Agentic mode:** set `agentic` to `null` or remove the block to disable. When enabled, the web UI and `--mode agentic` CLI flag become available. Requires `page_index.json` produced by the extractor, and the `deepagents` package (`pip install deepagents`, included in `requirements.txt`). Uses LangChain's [deepagents](https://github.com/langchain-ai/deepagents) tool-calling loop: the LLM decides for itself how many search/read cycles to run, bounded by `agentic.max_steps` (default `6`, mapped to the LangGraph recursion limit). `search_sections_tool` returns up to `agentic.section_top_n` (default `5`) reranked, fully-reconstructed doc sections with their text inline, sharing `agentic.section_char_budget` characters (default `15000`); `read_page_tool` fetches a whole page (capped at `agentic.max_chars_per_page`) as an escape hatch.
+**Agentic mode:** set `agentic` to `null` or remove the block to disable. When enabled, the web UI and `--mode agentic` CLI flag become available. Requires `page_index.json` produced by the extractor, and the `deepagents` package (`pip install deepagents`, included in `requirements.txt`). Uses LangChain's [deepagents](https://github.com/langchain-ai/deepagents) tool-calling loop: the LLM decides for itself how many search/read cycles to run, bounded by `agentic.max_steps` (default `20`, mapped to the LangGraph recursion limit). `search_sections_tool` returns up to `agentic.section_top_n` (default `5`) reranked, fully-reconstructed doc sections with their text inline, sharing `agentic.section_char_budget` characters (default `15000`); `read_page_tool` fetches a whole page (capped at `agentic.max_chars_per_page`) as an escape hatch.
 
-**BM25 hybrid retrieval:** set `bm25_enabled: true` to fuse keyword search (BM25) with vector search via Reciprocal Rank Fusion, in RAG mode's standard (non-deep-dive) path. Requires `{project_name}_docs.jsonl` next to `chromadb_path` (produced by extraction). Opt-in — not yet measured, off by default.
+**BM25 hybrid retrieval:** on by default (`bm25_enabled: true`) — fuses keyword search (BM25) with vector search via Reciprocal Rank Fusion, in RAG mode's standard (non-deep-dive) path. Requires `{project_name}_docs.jsonl` next to `chromadb_path` (produced by extraction); if that file is missing the chatbot warns at startup and falls back to pure vector search. `title_boost_enabled` (also on by default) adds a third RRF list scoring chunk titles only, collapsed to one hit per page — far more precise for entity-lookup questions; requires `bm25_enabled`.
 
 **HyDE retrieval:** set `hyde_enabled: true` to have an LLM write a short hypothetical documentation passage per question and embed *that* (instead of the raw question) for the vector search — helps when questions are phrased very differently from how the docs word things. Costs one extra LLM call per question; BM25 and reranking still use the real question. Opt-in, off by default.
 
-**Runtime toggles:** BM25, HyDE and the reranker each have a web-UI checkbox and a terminal command (`bm25`, `hyde`, `reranker`). All three are gated the same way — the config flag must be `true` at startup for the feature to load, and the toggle can then only turn it **off**. Every answer reports which stages actually ran.
+**Runtime toggles:** BM25, HyDE and the reranker each have a web-UI checkbox and a terminal command (`bm25`, `hyde`, `reranker`). All three are gated the same way — the config flag must be `true` at startup for the feature to load (BM25 and the reranker default to `true`), and the toggle can then only turn it **off**. Every answer reports which stages actually ran.
 
 **Deep Dive caveat:** Deep Dive mode runs its own retrieve-and-summarize pipeline that **bypasses BM25, HyDE and reranking entirely.** The web UI hides those controls while Deep Dive is on and the terminal warns when you enable it, so the bypass is never silent.
 
@@ -287,7 +288,7 @@ one per section, sharing agentic.section_char_budget) with their text
 inline; read_page is a whole-page escape hatch
         ↓
 Agent decides for itself how many search → read cycles to run,
-bounded by agentic.max_steps (default 6) — real multi-hop browsing,
+bounded by agentic.max_steps (default 20) — real multi-hop browsing,
 e.g. can follow a cross-reference found mid-read
         ↓
 LLM final answer
@@ -665,7 +666,7 @@ See [requirements.txt](requirements.txt) for exact versions.
 |---|---|---|---|
 | **Retrieval** | Vector similarity search | Vector search + reranker (+ optional BM25/HyDE) | Keyword search, agent-directed |
 | **Context** | Chunks (sub-page fragments) | Chunks, re-scored and expanded | Full pages, read across as many hops as the agent decides |
-| **LLM calls** | 1 (+1 if HyDE enabled) | 1 (+1 if HyDE enabled) | Variable, bounded by `max_steps` (default 6) |
+| **LLM calls** | 1 (+1 if HyDE enabled) | 1 (+1 if HyDE enabled) | Variable, bounded by `max_steps` (default 20) |
 | **Local inference** | Embeddings only | Embeddings + reranker (slow with `cross_encoder`, ~2x faster with `late_interaction`) | None beyond the LLM |
 | **Latency** | Fast | Can be slower than Agentic | Variable, less predictable than RAG |
 | **Maturity** | Established | Established | Established |

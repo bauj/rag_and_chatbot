@@ -27,13 +27,15 @@ class EmbeddingConfig:
 
 @dataclass
 class RerankerConfig:
-    model: str = "BAAI/bge-reranker-v2-m3"
-    # "cross_encoder" (default, sentence_transformers.CrossEncoder) or
-    # "late_interaction" (sentence_transformers.MultiVectorEncoder, ColBERT-style
-    # MaxSim scoring — requires sentence-transformers >= 6.0). Only one reranking
-    # method runs at a time, so this is a mode switch, not an opt-in flag alongside
+    model: str = "answerdotai/answerai-colbert-small-v1"
+    # "late_interaction" (default, sentence_transformers.MultiVectorEncoder,
+    # ColBERT-style MaxSim scoring — requires sentence-transformers >= 6.0) or
+    # "cross_encoder" (sentence_transformers.CrossEncoder, model
+    # BAAI/bge-reranker-v2-m3). late_interaction cuts avg answer time ~52% with a
+    # wash on quality at n=17 (task #72). Only one reranking method runs at a
+    # time, so this is a mode switch, not an opt-in flag alongside
     # bm25_enabled/hyde_enabled/title_boost_enabled.
-    type: str = "cross_encoder"
+    type: str = "late_interaction"
 
     def __post_init__(self):
         if self.type not in ("cross_encoder", "late_interaction"):
@@ -46,7 +48,7 @@ class RerankerConfig:
 class AgenticConfig:
     page_index_path: str           # required — path to page_index.json (relative or absolute)
     max_chars_per_page: int = 8000
-    max_steps: int = 6             # agent step budget (mapped to LangGraph recursion_limit)
+    max_steps: int = 20            # agent step budget (mapped to LangGraph recursion_limit)
     debug: bool = False            # Debug mode
     # Section-level retrieval (search_sections_tool): how many reconstructed
     # sections a single search returns, and the total char budget shared across
@@ -88,14 +90,14 @@ class ChatbotConfig:
     # extractor's 5,000-char metadata copy), so a single 54,000-char page could otherwise
     # crowd the context window. Sections that no longer fit fall back to the capped copy.
     expansion_char_budget: int = 60000
-    bm25_enabled: bool = False      # opt-in BM25 hybrid retrieval (fused with vector search via RRF)
-    # opt-in third RRF list: BM25 over chunk TITLES only, collapsed to one hit per page.
+    bm25_enabled: bool = True       # BM25 hybrid retrieval (fused with vector search via RRF)
+    # third RRF list: BM25 over chunk TITLES only, collapsed to one hit per page.
     # A question naming a class/identifier is an entity lookup, not a semantic search — the
     # identifier is one token among the ~100+ of a chunk body but the whole of a page's
     # title, so this channel is far more precise for "what does class X do" style questions.
     # The title index lives inside BM25Index, so this requires bm25_enabled's index to be
     # loaded; it has no effect on its own.
-    title_boost_enabled: bool = False
+    title_boost_enabled: bool = True
     hyde_enabled: bool = False      # opt-in HyDE: embed an LLM-written hypothetical passage instead of the raw question
 
     # LLM generation parameters

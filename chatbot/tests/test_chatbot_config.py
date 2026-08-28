@@ -68,9 +68,9 @@ def test_chatbot_config_agentic_null_from_json(tmp_path):
     assert cfg.agentic is None
 
 
-def test_bm25_enabled_defaults_false():
+def test_bm25_enabled_defaults_true():
     cfg = ChatbotConfig(project_name="test", chromadb_path="/tmp/db/chromadb")
-    assert cfg.bm25_enabled is False
+    assert cfg.bm25_enabled is True
 
 
 def test_bm25_enabled_from_json(tmp_path):
@@ -92,7 +92,7 @@ def test_bm25_jsonl_path_derived_from_chromadb_path():
 def test_agentic_config_max_steps_default():
     from core.config import AgenticConfig
     cfg = AgenticConfig(page_index_path="/tmp/idx.json")
-    assert cfg.max_steps == 6
+    assert cfg.max_steps == 20
 
 
 def test_agentic_config_max_steps_custom():
@@ -118,9 +118,9 @@ def test_k_retrieve_from_json(tmp_path):
     assert cfg.k_retrieve == 80
 
 
-def test_title_boost_enabled_defaults_false():
+def test_title_boost_enabled_defaults_true():
     cfg = ChatbotConfig(project_name="test", chromadb_path="/tmp/db/chromadb")
-    assert cfg.title_boost_enabled is False
+    assert cfg.title_boost_enabled is True
 
 
 def test_title_boost_enabled_from_json(tmp_path):

@@ -101,7 +101,7 @@ Examples:
         '--reranker-type',
         dest='reranker_type',
         choices=['cross_encoder', 'late_interaction'],
-        help='Reranker scoring method: cross_encoder (default) or late_interaction '
+        help='Reranker scoring method: late_interaction (default) or cross_encoder '
              '(ColBERT-style MaxSim via sentence_transformers.MultiVectorEncoder, requires '
              'sentence-transformers >= 6.0) (overrides config; enables reranking even if '
              'disabled in config, rag mode only, terminal single-question mode)'

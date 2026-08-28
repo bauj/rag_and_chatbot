@@ -2,7 +2,7 @@
 
 Chatbot with two retrieval modes and clean separation between business logic and UI.
 
-- **RAG mode** — queries a ChromaDB vector database, with optional reranking (cross-encoder or late-interaction), optional BM25 keyword hybrid retrieval, and optional HyDE
+- **RAG mode** — queries a ChromaDB vector database, with reranking (late-interaction by default, or cross-encoder), BM25 keyword hybrid retrieval (on by default, with a title-only channel), and optional HyDE
 - **Agentic mode** — a deepagents agent (LangGraph tool-calling loop) with a `search_sections_tool` (returns the top reranked, fully-reconstructed doc sections with text inline) and a `read_page_tool` (whole-page escape hatch); it decides for itself how many search/read cycles to run (bounded by `agentic.max_steps`, mapped to the graph recursion limit)
 
 ## Architecture
@@ -38,14 +38,15 @@ cp config.example.json config.json
 | `llm.api_key` | `"dummy"` | Use `"dummy"` for local models |
 | `embedding.model` | `"all-MiniLM-L6-v2"` | Must match extraction config |
 | `embedding.type` | `"local"` | `"local"` or `"api"` |
-| `reranker` | `null` | Set to `null` to disable. `type: "cross_encoder"` (default, e.g. `{"model": "BAAI/bge-reranker-v2-m3", "type": "cross_encoder"}`) or `type: "late_interaction"` (ColBERT-style MaxSim, e.g. `{"model": "answerdotai/answerai-colbert-small-v1", "type": "late_interaction"}`, requires `sentence-transformers >= 6.0`) |
+| `reranker` | `null` | Set to `null` to disable. `type: "late_interaction"` (default, ColBERT-style MaxSim, e.g. `{"model": "answerdotai/answerai-colbert-small-v1", "type": "late_interaction"}`, requires `sentence-transformers >= 6.0`) or `type: "cross_encoder"` (e.g. `{"model": "BAAI/bge-reranker-v2-m3", "type": "cross_encoder"}`) |
 | `agentic` | `null` | Set to `null` to disable. Enable with `{"page_index_path": "...", ...}` (see below) |
 | `k_standard` | `40` | Chunks retrieved in standard mode (RAG). Web UI search-depth slider defaults to this. |
 | `k_deep_dive` | `60` | Chunks retrieved in deep dive mode (RAG). Web UI search-depth slider switches to this when Deep Dive is enabled. |
 | `top_n_after_rerank` | `15` | Docs kept after reranking. Web UI top-N slider defaults to this. |
 | `temperature` | `0.0` | LLM temperature. Used directly in the terminal; in the web UI, select the "Config default" response style to apply it (the other styles override it). |
 | `max_tokens` | `2000` | Max tokens per response. Web UI answer-length slider defaults to this. |
-| `bm25_enabled` | `false` | Opt-in BM25 keyword search fused with vector search via Reciprocal Rank Fusion (RAG standard mode only). Requires `{project_name}_docs.jsonl` next to `chromadb_path`. |
+| `bm25_enabled` | `true` | BM25 keyword search fused with vector search via Reciprocal Rank Fusion (RAG standard mode only). Requires `{project_name}_docs.jsonl` next to `chromadb_path`; warns and falls back to pure vector search if missing. Set `false` to A/B against pure vector search. |
+| `title_boost_enabled` | `true` | Third RRF list: BM25 over chunk titles only, collapsed to one hit per page — far more precise for entity-lookup questions. Requires `bm25_enabled`. Set `false` if pages have uniform/repeated titles. |
 | `hyde_enabled` | `false` | Opt-in HyDE — an LLM writes a hypothetical passage per question, embedded instead of the raw question for vector search. BM25/reranking still use the real question. One extra LLM call per question. |
 
 Config is loaded in this priority order: CLI arguments > `config.json` > defaults.
@@ -58,7 +59,7 @@ Config is loaded in this priority order: CLI arguments > `config.json` > default
 "agentic": {
   "page_index_path": "../extraction/my_project_docs_extracted/page_index.json",
   "max_chars_per_page": 8000,
-  "max_steps": 6
+  "max_steps": 20
 }
 ```
 
@@ -66,7 +67,7 @@ Config is loaded in this priority order: CLI arguments > `config.json` > default
 |---|---|---|
 | `page_index_path` | required | Path to `page_index.json` (relative to `chatbot/` or absolute) |
 | `max_chars_per_page` | `8000` | Max characters `read_page_tool` returns per HTML page (escape hatch) |
-| `max_steps` | `6` | Agent step budget — how many search/read cycles it may run (mapped to LangGraph recursion_limit) |
+| `max_steps` | `20` | Agent step budget — how many search/read cycles it may run (mapped to LangGraph recursion_limit) |
 | `section_top_n` | `5` | Sections `search_sections_tool` returns per call |
 | `section_char_budget` | `15000` | Total characters shared across those sections |
 
