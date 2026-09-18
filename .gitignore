@@ -39,6 +39,7 @@ Thumbs.db
 
 # Docs and notes
 docs/
+notes/
 
 # Personal configuration files (might contain secrets)
 extraction/config.json
