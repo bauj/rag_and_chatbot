@@ -252,3 +252,77 @@ def test_search_titles_empty_corpus_returns_empty_list(tmp_path):
     path = _write_jsonl(tmp_path, [])
     index = BM25Index(str(path))
     assert index.search_titles("anything", k=5) == []
+
+
+# ---------------------------------------------------------------------------
+# No-match rows must not be returned (task #230)
+#
+# get_scores() scores EVERY row, so on a query sharing no token with most of
+# the corpus the tail is a run of score-0 rows ordered only by the tie-break
+# (JSONL order for search(), URL order for search_titles()) — unrelated hits
+# that RRF then weights like real ones.
+# A row is a hit only if it contains at least one query token. That is
+# deliberately not "score > 0": a term present in exactly half the corpus
+# has IDF 0, and a tiny corpus can have negative-floored IDFs, so a genuine
+# match can score <= 0.
+# ---------------------------------------------------------------------------
+
+def test_bm25_search_returns_nothing_when_no_row_contains_a_query_token(tmp_path):
+    rows = [
+        _row("execute feature", url="u1", section_id="s1"),
+        _row("installation guide", url="u2", section_id="s2"),
+        _row("tutorial overview", url="u3", section_id="s3"),
+    ]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    assert index.search("comment créer une esquisse", k=3) == []
+
+
+def test_bm25_search_drops_rows_without_a_query_token_even_under_k(tmp_path):
+    rows = [
+        _row("installation guide", url="u1", section_id="s1"),
+        _row("execute feature", url="u2", section_id="s2"),
+        _row("tutorial overview", url="u3", section_id="s3"),
+    ]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    results = index.search("execute", k=3)
+    assert [r.metadata["url"] for r in results] == ["u2"]
+
+
+def test_bm25_search_keeps_a_match_whose_term_has_zero_idf(tmp_path):
+    """'feature' is in exactly 2 of 4 rows, so its IDF is exactly 0 and both
+    matching rows score 0 — they are still matches and must be returned."""
+    rows = [
+        _row("feature one", url="u1", section_id="s1"),
+        _row("feature two", url="u2", section_id="s2"),
+        _row("installation guide", url="u3", section_id="s3"),
+        _row("tutorial overview", url="u4", section_id="s4"),
+    ]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    results = index.search("feature", k=4)
+    assert sorted(r.metadata["url"] for r in results) == ["u1", "u2"]
+
+
+def test_search_titles_returns_nothing_when_no_title_contains_a_query_token(tmp_path):
+    rows = [
+        _row("body", title="Alpha Class Reference", url="u1", section_id="s1"),
+        _row("body", title="Beta Class Reference", url="u2", section_id="s2"),
+        _row("body", title="Installation Guide", url="u3", section_id="s3"),
+    ]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    assert index.search_titles("comment créer une esquisse", k=3) == []
+
+
+def test_search_titles_drops_pages_without_a_query_token_even_under_k(tmp_path):
+    rows = [
+        _row("body", title="Alpha Class Reference", url="u1", section_id="s1"),
+        _row("body", title="Beta Page", url="u2", section_id="s2"),
+        _row("body", title="Installation Guide", url="u3", section_id="s3"),
+    ]
+    path = _write_jsonl(tmp_path, rows)
+    index = BM25Index(str(path))
+    results = index.search_titles("Alpha", k=3)
+    assert [r.metadata["url"] for r in results] == ["u1"]

@@ -87,6 +87,22 @@ def _flatten_metadata(row: dict) -> dict:
     }
 
 
+def _contains_any(term_freqs: dict, query_tokens: List[str]) -> bool:
+    """
+    Whether a row shares at least one token with the query, read from the
+    per-row term-frequency dict BM25Okapi already built (bm25.doc_freqs).
+    get_scores() scores every row, so without this a query matching little or
+    nothing pads its top k with score-0 rows that share no token with it —
+    unrelated hits whose order is only the tie-break (JSONL order in search(),
+    URL order in search_titles()), which reciprocal_rank_fusion then weights
+    like real ones. Not
+    "score > 0": a term in exactly half the corpus has IDF 0, and BM25Okapi's
+    epsilon floor goes negative when the average IDF does, so a real match can
+    score <= 0.
+    """
+    return any(token in term_freqs for token in query_tokens)
+
+
 class BM25Index:
     """Keyword (BM25) search over the extraction pipeline's JSONL corpus."""
 
@@ -119,7 +135,8 @@ class BM25Index:
         if self._bm25 is None:
             return []
 
-        scores = self._bm25.get_scores(_tokenize(query))
+        query_tokens = _tokenize(query)
+        scores = self._bm25.get_scores(query_tokens)
 
         candidates = []
         for idx, score in enumerate(scores):
@@ -127,6 +144,8 @@ class BM25Index:
             if module_filter and row.get('module') != module_filter:
                 continue
             if doc_category_filter and row.get('doc_category') != doc_category_filter:
+                continue
+            if not _contains_any(self._bm25.doc_freqs[idx], query_tokens):
                 continue
             candidates.append((score, idx))
 
@@ -160,12 +179,14 @@ class BM25Index:
         iteration order.
 
         Honors the same module/doc_category filters as search(), applied before
-        collapsing so a filtered-out chunk cannot still nominate its page.
+        collapsing so a filtered-out chunk cannot still nominate its page. Pages
+        whose title shares no token with the query are dropped (see _contains_any).
         """
         if self._title_bm25 is None:
             return []
 
-        scores = self._title_bm25.get_scores(_tokenize(query))
+        query_tokens = _tokenize(query)
+        scores = self._title_bm25.get_scores(query_tokens)
 
         best_idx_by_page: Dict[str, int] = {}
         for idx, row in enumerate(self.rows):
@@ -178,7 +199,10 @@ class BM25Index:
             if current is None or _first_chunk_rank(row) < _first_chunk_rank(self.rows[current]):
                 best_idx_by_page[page] = idx
 
-        candidates = [(scores[idx], idx) for idx in best_idx_by_page.values()]
+        candidates = [
+            (scores[idx], idx) for idx in best_idx_by_page.values()
+            if _contains_any(self._title_bm25.doc_freqs[idx], query_tokens)
+        ]
         candidates.sort(key=lambda pair: (-pair[0], self.rows[pair[1]].get('url', '')))
 
         return [
